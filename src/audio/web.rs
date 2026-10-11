@@ -3,9 +3,9 @@ use std::collections::VecDeque;
 use std::rc::Rc;
 
 use cw_core::band::{
-    AGC_ATTACK_SEC, AGC_COMPRESSOR_KNEE_DB, AGC_RELEASE_SEC, BandMixer, BandSource, FilterDesign,
-    QSB_MIN_GAIN, QSB_PATHS, QSB_SPREAD, RECEIVER_SECTIONS, SOFT_LIMIT_HEADROOM, Section,
-    agc_compressor, agc_knee, qsb_path, soft_limit_curve,
+    AGC_ATTACK_SEC, AGC_COMPRESSOR_KNEE_DB, AGC_RELEASE_SEC, AudioFloor, BandMixer, BandSource,
+    FilterDesign, QSB_MIN_GAIN, QSB_PATHS, QSB_SPREAD, RECEIVER_SECTIONS, Section, agc_compressor,
+    agc_knee, limiter_feed, qsb_path, soft_limit_curve,
 };
 use cw_core::{
     FilterShape, PlannedTransmission, TrainingSettings, Transmission, plan_transmission,
@@ -102,6 +102,10 @@ pub struct MorsePlayer {
     /// The gain into the limiter, which also takes back the make-up gain the
     /// compressor adds of its own accord.
     limiter_in: GainNode,
+    /// The audio-stage floor's way into the limiter: around the compressor,
+    /// as the native player adds it after its AGC, so it has no make-up gain
+    /// to take back.
+    floor_in: GainNode,
     /// Gains that are fading out, with the context time their ramp ends: a
     /// stopped send's, or the band stream that was just replaced.
     released: Vec<(GainNode, f64)>,
@@ -132,9 +136,13 @@ impl BandGraph {
     }
 
     /// Take the band down. The stream fades rather than stopping dead; its
-    /// output gain is handed back so the caller can let it go once the fade
-    /// has run.
-    fn stop_layers(&mut self, ctx: &AudioContext, cw_gain: &GainNode) -> Option<(GainNode, f64)> {
+    /// output gains are handed back so the caller can let them go once the
+    /// fade has run.
+    fn stop_layers(
+        &mut self,
+        ctx: &AudioContext,
+        cw_gain: &GainNode,
+    ) -> Option<([GainNode; 2], f64)> {
         let fading = self.stream.take().map(BandStream::fade_out);
         for source in self.sources.drain(..) {
             let _ = source.stop();
@@ -272,6 +280,12 @@ impl ReceiverBank {
 /// a tenth of a second at a time, and each buffer is scheduled on the audio
 /// clock to start exactly where the last one ends. Nothing repeats, and the
 /// browser plays the very model the desktop does.
+///
+/// The receiver's audio-stage floor ([`AudioFloor`]) rides in the same
+/// buffers as a second channel, so the two stay in step and fade together,
+/// and is split off on arrival: the band goes into the receiver, the floor
+/// around it and the compressor to the limiter, which is where the native
+/// player adds it.
 struct BandStream {
     state: Rc<RefCell<StreamState>>,
     _ticker: Interval,
@@ -279,9 +293,16 @@ struct BandStream {
 
 struct StreamState {
     ctx: AudioContext,
+    /// The band's fade, on its way into the receiver.
     output: GainNode,
+    /// The floor's fade, on its way to the limiter.
+    floor_output: GainNode,
+    /// Takes each buffer apart: channel 0 to `output`, 1 to `floor_output`.
+    splitter: web_sys::ChannelSplitterNode,
     source: BandSource,
+    floor: AudioFloor,
     chunk: Vec<f32>,
+    floor_chunk: Vec<f32>,
     /// Context time the next buffer starts at.
     next_start: f64,
     /// Buffers scheduled and not yet over, with the time each one ends.
@@ -292,28 +313,50 @@ struct StreamState {
 }
 
 impl BandStream {
+    /// Start the band into `into`, the receiver's input, and its audio-stage
+    /// floor into `floor_into`, past the compressor.
     fn start(
         ctx: &AudioContext,
         into: &GainNode,
+        floor_into: &GainNode,
         settings: &TrainingSettings,
     ) -> Result<Self, String> {
-        let output = ctx.create_gain().map_err(|e| format!("band gain: {e:?}"))?;
         let now = ctx.current_time();
-        let gain = output.gain();
-        gain.set_value_at_time(0.0, now)
-            .map_err(|e| format!("band fade: {e:?}"))?;
-        gain.linear_ramp_to_value_at_time(1.0, now + STREAM_FADE_SEC)
-            .map_err(|e| format!("band fade: {e:?}"))?;
-        output
-            .connect_with_audio_node(into)
-            .map_err(|e| format!("band connect: {e:?}"))?;
+        let fading_in = |into: &GainNode| -> Result<GainNode, String> {
+            let output = ctx.create_gain().map_err(|e| format!("band gain: {e:?}"))?;
+            let gain = output.gain();
+            gain.set_value_at_time(0.0, now)
+                .map_err(|e| format!("band fade: {e:?}"))?;
+            gain.linear_ramp_to_value_at_time(1.0, now + STREAM_FADE_SEC)
+                .map_err(|e| format!("band fade: {e:?}"))?;
+            output
+                .connect_with_audio_node(into)
+                .map_err(|e| format!("band connect: {e:?}"))?;
+            Ok(output)
+        };
+        let output = fading_in(into)?;
+        let floor_output = fading_in(floor_into)?;
+        let splitter = ctx
+            .create_channel_splitter_with_number_of_outputs(2)
+            .map_err(|e| format!("band splitter: {e:?}"))?;
+        splitter
+            .connect_with_audio_node_and_output(&output, 0)
+            .map_err(|e| format!("band split: {e:?}"))?;
+        splitter
+            .connect_with_audio_node_and_output(&floor_output, 1)
+            .map_err(|e| format!("floor split: {e:?}"))?;
         let sample_rate = ctx.sample_rate();
         let chunk = ((f64::from(sample_rate) * STREAM_CHUNK_SEC).round() as usize).max(128);
+        let seed = fastrand::u64(..);
         let state = Rc::new(RefCell::new(StreamState {
             ctx: ctx.clone(),
             output,
-            source: BandSource::new(sample_rate as u32, settings, fastrand::u64(..)),
+            floor_output,
+            splitter,
+            source: BandSource::new(sample_rate as u32, settings, seed),
+            floor: AudioFloor::from_settings(sample_rate as u32, settings, seed),
             chunk: vec![0.0; chunk],
+            floor_chunk: vec![0.0; chunk],
             next_start: now,
             queued: VecDeque::new(),
             pileup: None,
@@ -350,21 +393,24 @@ impl BandStream {
     }
 
     /// Fade out and stop. Dropping `self` here stops the ticker; the output
-    /// gain comes back with the time its fade ends.
-    fn fade_out(self) -> (GainNode, f64) {
+    /// gains, the band's and the floor's, come back with the time their fade
+    /// ends.
+    fn fade_out(self) -> ([GainNode; 2], f64) {
         let stream = self.state.borrow();
         let now = stream.ctx.current_time();
         let done = now + STREAM_FADE_SEC;
-        let gain = stream.output.gain();
-        let _ = gain.cancel_scheduled_values(now);
-        let _ = gain.set_value_at_time(gain.value(), now);
-        let _ = gain.linear_ramp_to_value_at_time(0.0, done);
+        for output in [&stream.output, &stream.floor_output] {
+            let gain = output.gain();
+            let _ = gain.cancel_scheduled_values(now);
+            let _ = gain.set_value_at_time(gain.value(), now);
+            let _ = gain.linear_ramp_to_value_at_time(0.0, done);
+        }
         for (node, _) in &stream.queued {
             let _ = node
                 .unchecked_ref::<AudioScheduledSourceNode>()
                 .stop_with_when(done);
         }
-        (stream.output.clone(), done)
+        ([stream.output.clone(), stream.floor_output.clone()], done)
     }
 }
 
@@ -397,19 +443,23 @@ impl StreamState {
             };
             self.source.reserve_stations(callers);
             self.source.fill(&mut self.chunk);
+            self.floor.fill(&mut self.floor_chunk);
             let buffer = self
                 .ctx
-                .create_buffer(1, self.chunk.len() as u32, sample_rate)
+                .create_buffer(2, self.chunk.len() as u32, sample_rate)
                 .map_err(|e| format!("band buffer: {e:?}"))?;
             buffer
                 .copy_to_channel(&self.chunk, 0)
                 .map_err(|e| format!("band copy: {e:?}"))?;
+            buffer
+                .copy_to_channel(&self.floor_chunk, 1)
+                .map_err(|e| format!("floor copy: {e:?}"))?;
             let node = self
                 .ctx
                 .create_buffer_source()
                 .map_err(|e| format!("band source: {e:?}"))?;
             node.set_buffer(Some(&buffer));
-            node.connect_with_audio_node(&self.output)
+            node.connect_with_audio_node(&self.splitter)
                 .map_err(|e| format!("band source connect: {e:?}"))?;
             node.start_with_when(self.next_start)
                 .map_err(|e| format!("band start: {e:?}"))?;
@@ -485,13 +535,23 @@ impl MorsePlayer {
         // attack lets the first milliseconds of a crash through, and a crash
         // through a wide-open filter on a noisy band is well past full scale:
         // without this the browser squared it off where the desktop catches it.
+        let feed = limiter_feed(&agc_compressor(None));
         let headroom = ctx
             .create_gain()
             .map_err(|e| format!("limiter gain: {e:?}"))?;
         headroom
             .gain()
-            .set_value_at_time((1.0 / SOFT_LIMIT_HEADROOM) as f32, ctx.current_time())
+            .set_value_at_time(feed.receiver as f32, ctx.current_time())
             .map_err(|e| format!("limiter set: {e:?}"))?;
+        // The receiver's audio stage comes in after its AGC, so the floor
+        // goes around the compressor, straight to the limiter.
+        let floor_in = ctx
+            .create_gain()
+            .map_err(|e| format!("floor gain: {e:?}"))?;
+        floor_in
+            .gain()
+            .set_value_at_time(feed.audio_floor as f32, ctx.current_time())
+            .map_err(|e| format!("floor set: {e:?}"))?;
         let limiter = ctx
             .create_wave_shaper()
             .map_err(|e| format!("limiter: {e:?}"))?;
@@ -502,6 +562,9 @@ impl MorsePlayer {
         headroom
             .connect_with_audio_node(&limiter)
             .map_err(|e| format!("limiter connect: {e:?}"))?;
+        floor_in
+            .connect_with_audio_node(&limiter)
+            .map_err(|e| format!("floor connect: {e:?}"))?;
         limiter
             .connect_with_audio_node(&ctx.destination())
             .map_err(|e| format!("mix connect: {e:?}"))?;
@@ -519,6 +582,7 @@ impl MorsePlayer {
             receiver_gain,
             agc,
             limiter_in: headroom,
+            floor_in,
             released: Vec::new(),
             pending_resume: RefCell::new(None),
             live_osc: None,
@@ -631,7 +695,7 @@ impl MorsePlayer {
         }
         add_qsb(&self.ctx, &self.cw_gain, settings, &mut self.band)?;
         if BandMixer::needs_background(settings) {
-            let stream = BandStream::start(&self.ctx, &self.mix_gain, settings)?;
+            let stream = BandStream::start(&self.ctx, &self.mix_gain, &self.floor_in, settings)?;
             if let Some((callers, until)) = pileup {
                 stream.reserve(callers, until);
             }
@@ -645,8 +709,9 @@ impl MorsePlayer {
     /// Fade the band out, and let go of whatever earlier fades have finished.
     fn retire_band(&mut self) {
         self.drop_released();
-        if let Some(fading) = self.band.stop_layers(&self.ctx, &self.cw_gain) {
-            self.released.push(fading);
+        if let Some((gains, done)) = self.band.stop_layers(&self.ctx, &self.cw_gain) {
+            self.released
+                .extend(gains.into_iter().map(|gain| (gain, done)));
         }
     }
 
@@ -663,7 +728,9 @@ impl MorsePlayer {
     ///
     /// Every browser adds make-up gain after a compressor, scaled by how hard
     /// it compresses at full scale. A receiver's AGC only ever turns things
-    /// down, so the gain into the limiter takes that back off.
+    /// down, so the gain into the limiter takes that back off — for the
+    /// receiver's output, which has been through the compressor, and not for
+    /// the audio-stage floor, which has not ([`limiter_feed`]).
     fn tune_agc(&self, settings: &TrainingSettings) {
         let knee = if BandMixer::needs_background(settings) {
             agc_knee(settings)
@@ -680,11 +747,15 @@ impl MorsePlayer {
             .agc
             .ratio()
             .set_value_at_time(setting.ratio.clamp(1.0, 20.0) as f32, now);
-        let makeup = 10f64.powf(-setting.makeup_db / 20.0);
+        let feed = limiter_feed(&setting);
         let _ = self
             .limiter_in
             .gain()
-            .set_value_at_time((makeup / SOFT_LIMIT_HEADROOM) as f32, now);
+            .set_value_at_time(feed.receiver as f32, now);
+        let _ = self
+            .floor_in
+            .gain()
+            .set_value_at_time(feed.audio_floor as f32, now);
     }
 
     fn bump_epoch(&self) -> u64 {

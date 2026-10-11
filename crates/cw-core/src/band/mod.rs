@@ -19,6 +19,9 @@
 //! 3. The AGC rides the gain ([`agc`]): a steady few decibels down under a
 //!    keyed station, back up in the pauses, and only a moment's duck for a
 //!    crash.
+//! 4. The receiver's audio stage adds a faint, wide hiss of its own
+//!    ([`AudioFloor`]), after the filter and the AGC, so the band is never
+//!    quite silent outside the passband — as no real receiver is.
 //!
 //! What it deliberately does not do is invent a sound the receiver would not
 //! make. An earlier model fed sparse clicks into resonators a few hertz wide
@@ -42,8 +45,9 @@ pub use filter::{
     FilterDesign, RECEIVER_SECTIONS, ReceiverFilter, Section, mirror_hz, passband_edges,
 };
 pub use noise::{
-    Atmospherics, BandSource, Gaussian, NoiseFloor, REFERENCE_BANDWIDTH_HZ, SIGNAL_RMS,
-    heard_snr_db, noise_floor_rms, noise_floor_snr_db,
+    Atmospherics, AudioFloor, BandSource, FLOOR_BELOW_DB, FLOOR_HIGH_PASS_HZ, FLOOR_LOW_PASS_HZ,
+    Gaussian, NoiseFloor, REFERENCE_BANDWIDTH_HZ, SIGNAL_RMS, heard_snr_db, noise_floor_rms,
+    noise_floor_snr_db,
 };
 pub use qsb::{QSB_MIN_GAIN, QSB_PATHS, QSB_SPREAD, qsb_gain_at, qsb_path};
 
@@ -81,6 +85,34 @@ pub fn soft_limit_curve(points: usize) -> Vec<f32> {
             soft_limit(x) as f32
         })
         .collect()
+}
+
+/// The gains the browser feeds its soft limiter through, for a compressor
+/// set as `setting`.
+///
+/// The browser's limiter is a shaper whose input is scaled down by
+/// [`SOFT_LIMIT_HEADROOM`], so whatever reaches it has to be too. What has
+/// come through the compressor also carries the make-up gain the compressor
+/// adds of its own accord, which a receiver's AGC never would, so the
+/// receiver's feed takes that back off. The audio-stage floor joins after the
+/// compressor, as it does after the native AGC, and has nothing to take back:
+/// sent through the receiver's feed it would come out quieter by the make-up
+/// gain whenever the AGC is on. Either way, both reach the limiter at the
+/// gain the native player gives them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LimiterFeed {
+    /// For the receiver's output, after the compressor.
+    pub receiver: f64,
+    /// For the [`AudioFloor`], which bypasses the compressor.
+    pub audio_floor: f64,
+}
+
+/// The [`LimiterFeed`] for the browser's compressor set as `setting`.
+pub fn limiter_feed(setting: &CompressorSetting) -> LimiterFeed {
+    LimiterFeed {
+        receiver: 10f64.powf(-setting.makeup_db / 20.0) / SOFT_LIMIT_HEADROOM,
+        audio_floor: 1.0 / SOFT_LIMIT_HEADROOM,
+    }
 }
 
 /// How high this band's floor ordinarily peaks, through the receiver.
@@ -181,6 +213,8 @@ pub struct BandMixer {
     source: BandSource,
     receiver: ReceiverFilter,
     agc: Agc,
+    /// The receiver's audio stage, joining after the AGC.
+    audio_floor: AudioFloor,
     send_level: f64,
 }
 
@@ -195,6 +229,7 @@ impl BandMixer {
                 Some(knee) => Agc::new(sample_rate, knee),
                 None => Agc::off(),
             },
+            audio_floor: AudioFloor::from_settings(sample_rate, &settings, seed),
             send_level: 0.0,
         }
     }
@@ -215,7 +250,11 @@ impl BandMixer {
         // At the gain the receiver is riding at, which a crash has just
         // pulled down and which everything else has to come down with —
         // including the send, which reads this through `agc_gain`.
-        soft_limit(self.agc.process(heard, self.send_level)) as f32
+        let ridden = self.agc.process(heard, self.send_level);
+        // The audio stage's own hiss comes in after all of that: the filter
+        // never had it, so it runs on outside the passband, and the AGC never
+        // saw it, so it neither moves the gain nor ducks under a station.
+        soft_limit(ridden + self.audio_floor.next_sample()) as f32
     }
 
     /// A pile-up is calling with this many stations besides yours: they come

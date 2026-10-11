@@ -1169,6 +1169,303 @@ fn the_source_is_the_same_band_for_the_same_seed() {
     );
 }
 
+// ----------------------------------------------------------- the audio stage
+
+/// Seconds of band the audio floor is measured over, and the spectrum's
+/// segment: 5.9 Hz bins at 48 kHz, averaged over some 350 segments.
+const STAGE_SECONDS: usize = 30;
+const STAGE_SEGMENT: usize = 8_192;
+const STAGE_SEED: u64 = 0xF100;
+
+/// In-place radix-2 FFT, forward. The lengths are a power of two.
+fn fft(re: &mut [f64], im: &mut [f64]) {
+    let n = re.len();
+    assert!(n.is_power_of_two() && im.len() == n);
+    let mut j = 0;
+    for i in 1..n {
+        let mut bit = n >> 1;
+        while j & bit != 0 {
+            j ^= bit;
+            bit >>= 1;
+        }
+        j |= bit;
+        if i < j {
+            re.swap(i, j);
+            im.swap(i, j);
+        }
+    }
+    let twiddles: Vec<(f64, f64)> = (0..n / 2)
+        .map(|k| (TAU * k as f64 / n as f64).sin_cos())
+        .collect();
+    let mut len = 2;
+    while len <= n {
+        let half = len / 2;
+        let stride = n / len;
+        for start in (0..n).step_by(len) {
+            for k in 0..half {
+                let (s, c) = twiddles[k * stride];
+                let (a, b) = (start + k, start + k + half);
+                // (re + j·im)·e^{-jθ}
+                let tr = re[b] * c + im[b] * s;
+                let ti = im[b] * c - re[b] * s;
+                re[b] = re[a] - tr;
+                im[b] = im[a] - ti;
+                re[a] += tr;
+                im[a] += ti;
+            }
+        }
+        len *= 2;
+    }
+}
+
+/// Welch's power spectrum on the FFT — Hann window, half overlap — with bin
+/// `k` at `k·SR/segment` hertz. [`psd`] is fine for a few frequencies over a
+/// few seconds; the audio floor is measured across the whole spectrum over
+/// half a minute.
+fn welch(x: &[f32], segment: usize) -> Vec<f64> {
+    let window: Vec<f64> = (0..segment)
+        .map(|i| 0.5 - 0.5 * (TAU * i as f64 / segment as f64).cos())
+        .collect();
+    let mut power = vec![0.0; segment / 2 + 1];
+    let (mut re, mut im) = (vec![0.0; segment], vec![0.0; segment]);
+    let mut segments = 0;
+    let mut start = 0;
+    while start + segment <= x.len() {
+        for (i, w) in window.iter().enumerate() {
+            re[i] = f64::from(x[start + i]) * w;
+        }
+        im.fill(0.0);
+        fft(&mut re, &mut im);
+        for (k, p) in power.iter_mut().enumerate() {
+            *p += re[k] * re[k] + im[k] * im[k];
+        }
+        segments += 1;
+        start += segment / 2;
+    }
+    power.into_iter().map(|p| p / f64::from(segments)).collect()
+}
+
+/// The median of a [`welch`] spectrum over `low..=high` hertz, in decibels.
+fn median_db(spectrum: &[f64], low: f64, high: f64) -> f64 {
+    let bin = f64::from(SR) / STAGE_SEGMENT as f64;
+    let mut inside: Vec<f64> = spectrum
+        .iter()
+        .enumerate()
+        .filter(|(k, _)| (low..=high).contains(&(*k as f64 * bin)))
+        .map(|(_, p)| *p)
+        .collect();
+    assert!(!inside.is_empty(), "no bins in {low}..{high} Hz");
+    inside.sort_by(f64::total_cmp);
+    10.0 * inside[inside.len() / 2].log10()
+}
+
+/// The default band with its static off: the hiss and nothing else, at the
+/// filter width given.
+fn hiss_only(bandwidth_hz: Option<f64>) -> TrainingSettings {
+    let mut s = TrainingSettings::default();
+    s.band.qrn_enabled = false;
+    if let Some(bandwidth) = bandwidth_hz {
+        s.band.filter_bandwidth_hz = bandwidth;
+    }
+    s.clamp()
+}
+
+/// `seconds` of the background through `mixer`, from a send level of
+/// `send` on, with the first half second — the filter filling and the AGC
+/// settling on the send — left out.
+fn render(mixer: &mut BandMixer, send: f64, seconds: usize) -> Vec<f32> {
+    mixer.note_send_level(send);
+    let mut settle = vec![0.0f32; SR as usize / 2];
+    mixer.fill_background(&mut settle);
+    let mut out = vec![0.0f32; SR as usize * seconds];
+    mixer.fill_background(&mut out);
+    out
+}
+
+/// The background as heard, and what the audio floor added to it: the same
+/// band rendered again, to the sample, with the floor taken out. The floor
+/// joins after the AGC and the AGC never hears it, so the difference is the
+/// floor exactly as it was played.
+fn with_and_without_floor(settings: &TrainingSettings, send: f64, seconds: usize) -> Floored {
+    let heard = render(&mut BandMixer::new(SR, settings, STAGE_SEED), send, seconds);
+    let mut bare = BandMixer::new(SR, settings, STAGE_SEED);
+    bare.audio_floor = AudioFloor::new(SR, 0.0, 0);
+    let band = render(&mut bare, send, seconds);
+    let added = heard.iter().zip(&band).map(|(a, b)| a - b).collect();
+    Floored { heard, band, added }
+}
+
+struct Floored {
+    heard: Vec<f32>,
+    band: Vec<f32>,
+    added: Vec<f32>,
+}
+
+/// A real receiver is never silent outside its filter: its own audio stage
+/// hisses some thirty decibels under the band, from a couple of hundred
+/// hertz to the top of its audio. Ours was dead silent there — 80 dB down
+/// and more — which no recording of a radio is.
+///
+/// Measured against the hiss at the note, where the receiver is unity, so the
+/// floor sits in the same place whatever width the filter is set to: 32 dB
+/// down from 1.2 to 2.4 kHz, and gone by 5 kHz. Below 200 Hz it falls away
+/// as well, so it brings no rumble; that is measured on what the floor itself
+/// adds, because down there a wide filter's own skirt is far louder than the
+/// floor (27 dB down at the default 500 Hz, and in the passband at 1 kHz).
+/// And it is Gaussian like the hiss, so the band stays a hiss.
+#[test]
+fn the_receiver_hisses_faintly_outside_its_filter() {
+    let mut outside_at = Vec::new();
+    for bandwidth in [None, Some(150.0), Some(1_000.0)] {
+        let settings = hiss_only(bandwidth);
+        let pitch = settings.side_tone_center();
+        let width = settings.band.filter_bandwidth_hz;
+        let floored = with_and_without_floor(&settings, 0.0, STAGE_SECONDS);
+        let spectrum = welch(&floored.heard, STAGE_SEGMENT);
+        let added = welch(&floored.added, STAGE_SEGMENT);
+        let at_pitch = median_db(&spectrum, pitch - 20.0, pitch + 20.0);
+        let outside = median_db(&spectrum, 1_200.0, 2_400.0) - at_pitch;
+        let above = median_db(&spectrum, 5_000.0, 10_000.0) - at_pitch;
+        let below = median_db(&added, 100.0, 150.0) - at_pitch;
+        let k = kurtosis(&floored.heard);
+        let report = format!(
+            "{width} Hz wide: {outside:.2} dB at 1.2-2.4 kHz, {above:.2} dB at 5-10 kHz, \
+             {below:.2} dB added at 100-150 Hz, kurtosis {k:.3}"
+        );
+        assert!((outside + FLOOR_BELOW_DB).abs() < 1.5, "{report}");
+        assert!(above < -50.0, "{report}");
+        assert!(below < -38.0, "{report}");
+        assert!((k - 3.0).abs() < 0.1, "{report}");
+        outside_at.push(outside);
+    }
+    // Opening or closing the filter leaves the floor where it was.
+    for outside in &outside_at[1..] {
+        assert!(
+            (outside - outside_at[0]).abs() < 1.0,
+            "{outside_at:.2?} dB across 500, 150 and 1000 Hz"
+        );
+    }
+}
+
+/// The floor follows the noise control, so turning the noise off turns the
+/// receiver off with it: not a trace of the floor under the static.
+#[test]
+fn the_audio_floor_goes_with_the_noise() {
+    let mut off = only_qrn(0.6);
+    off.band.noise_level = 0.5;
+    for settings in [off, only_noise(0.0)] {
+        assert!(AudioFloor::from_settings(SR, &settings, 3).is_silent());
+        let floored = with_and_without_floor(&settings, 0.0, 5);
+        assert_eq!(floored.heard, floored.band);
+    }
+    let floored = with_and_without_floor(&only_qrn(0.6), 0.0, 5);
+    assert!(
+        floored.heard.iter().any(|s| *s != 0.0),
+        "the static should still be there"
+    );
+}
+
+/// The largest normalised cross-correlation of `x` and `y`, at any lag.
+fn cross_correlation_peak(x: &[f32], y: &[f32]) -> f64 {
+    let n = (x.len() + y.len()).next_power_of_two();
+    let (mut re, mut im) = (vec![0.0; n], vec![0.0; n]);
+    for (slot, v) in re.iter_mut().zip(x) {
+        *slot = f64::from(*v);
+    }
+    for (slot, v) in im.iter_mut().zip(y) {
+        *slot = f64::from(*v);
+    }
+    // Both spectra from one transform: X is the even part of Z, jY the odd.
+    fft(&mut re, &mut im);
+    for k in 0..=n / 2 {
+        let m = (n - k) % n;
+        let (zr, zi, wr, wi) = (re[k], im[k], re[m], -im[m]);
+        let (xr, xi) = ((zr + wr) / 2.0, (zi + wi) / 2.0);
+        let (yr, yi) = ((zi - wi) / 2.0, -(zr - wr) / 2.0);
+        // The cross-spectrum conj(X)·Y, which at n − k is its own conjugate.
+        let (cr, ci) = (xr * yr + xi * yi, xr * yi - xi * yr);
+        // Conjugated, so the forward transform does for the inverse.
+        (re[k], im[k]) = (cr, -ci);
+        (re[m], im[m]) = (cr, ci);
+    }
+    fft(&mut re, &mut im);
+    let energy = |v: &[f32]| v.iter().map(|s| f64::from(*s).powi(2)).sum::<f64>();
+    let scale = n as f64 * (energy(x) * energy(y)).sqrt();
+    re.iter().map(|r| (r / scale).abs()).fold(0.0, f64::max)
+}
+
+/// The floor is noise of its own, not the band's noise over again: anything
+/// shared between them would be a second copy of the hiss, filtered wide,
+/// and would show as a peak at some lag.
+#[test]
+fn the_audio_floor_is_its_own_noise() {
+    let floored = with_and_without_floor(&hiss_only(None), 0.0, STAGE_SECONDS);
+    let peak = cross_correlation_peak(&floored.band, &floored.added);
+    assert!(peak < 0.02, "the floor and the band correlate to {peak:.4}");
+    // And the measure would see the band in it, even at 40 dB down.
+    let shared: Vec<f32> = floored
+        .band
+        .iter()
+        .zip(&floored.added)
+        .map(|(b, a)| 0.01 * b + a)
+        .collect();
+    let seen = cross_correlation_peak(&floored.band, &shared);
+    assert!(seen > 0.1, "a shared noise correlates to only {seen:.4}");
+}
+
+/// The AGC turns the receiver down ahead of the audio stage, so under a
+/// strong station the hiss at the note drops by the AGC's duck while the
+/// floor outside the filter stays exactly where it was — as on a real
+/// receiver, where the audio stage's hiss is the one thing the AGC never
+/// touches.
+#[test]
+fn the_agc_ducks_the_hiss_but_not_the_audio_floor() {
+    let settings = hiss_only(None);
+    let pitch = settings.side_tone_center();
+    let knee = agc_knee(&settings).expect("the AGC is on by default");
+    let quiet = render(&mut BandMixer::new(SR, &settings, STAGE_SEED), 0.0, 10);
+    let mut mixer = BandMixer::new(SR, &settings, STAGE_SEED);
+    let under = render(&mut mixer, 10.0 * knee, 10);
+    let duck = 20.0 * mixer.agc_gain().log10();
+    // Ten times the knee is 20 dB over it, which the 2:1 law takes 10 dB off.
+    assert!((duck - agc_law_db(20.0)).abs() < 0.2, "ducked {duck:.2} dB");
+    let (quiet, under) = (welch(&quiet, STAGE_SEGMENT), welch(&under, STAGE_SEGMENT));
+    let change = |low: f64, high: f64| median_db(&under, low, high) - median_db(&quiet, low, high);
+    let hiss = change(pitch - 20.0, pitch + 20.0);
+    let floor = change(1_500.0, 2_400.0);
+    let report = format!("AGC {duck:.2} dB: hiss {hiss:.2} dB, floor {floor:.2} dB");
+    assert!((hiss - duck).abs() < 0.5, "{report}");
+    assert!(floor.abs() < 1.0, "{report}");
+}
+
+/// The browser's floor comes into the graph after the compressor and goes
+/// straight to the limiter, so it has none of the compressor's make-up gain
+/// to take back, and arrives at unity — as the native player adds it —
+/// whether the AGC is on or off. The receiver's output, which does carry the
+/// make-up gain, has it taken back off, and arrives at unity below the knee.
+#[test]
+fn the_browser_feeds_its_limiter_at_the_native_gains() {
+    let on = agc_knee(&TrainingSettings::default());
+    assert!(on.is_some(), "the AGC is on by default");
+    for knee in [None, on, Some(1e-4), Some(0.5)] {
+        let setting = agc_compressor(knee);
+        let feed = limiter_feed(&setting);
+        // The shaper maps its input back up by the headroom before limiting.
+        let floor = feed.audio_floor * SOFT_LIMIT_HEADROOM;
+        let receiver = 10f64.powf(setting.makeup_db / 20.0) * feed.receiver * SOFT_LIMIT_HEADROOM;
+        assert!((floor - 1.0).abs() < 1e-12, "{knee:?}: floor at {floor}");
+        assert!(
+            (receiver - 1.0).abs() < 1e-12,
+            "{knee:?}: receiver at {receiver}"
+        );
+    }
+    // With the AGC on there is a make-up gain to keep the floor clear of:
+    // through the receiver's feed it would have come out that much quieter.
+    let setting = agc_compressor(on);
+    assert!(setting.makeup_db > 1.0, "{} dB make-up", setting.makeup_db);
+    assert!(limiter_feed(&setting).receiver < limiter_feed(&setting).audio_floor);
+}
+
 // ------------------------------------------------------------------------ QSB
 
 #[test]

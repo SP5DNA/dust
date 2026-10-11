@@ -13,8 +13,12 @@
 //! and a sferic by how far its peak through that filter stands above the
 //! default floor. Everything is scaled by the sample rate so a band sounds
 //! the same at 44.1 kHz as at 48 kHz.
+//!
+//! One noise here comes in after the receiver rather than before it: the
+//! [`AudioFloor`], the faint wide hiss of the receiver's own audio stage,
+//! which the filter never touches.
 
-use std::f64::consts::{SQRT_2, TAU};
+use std::f64::consts::{PI, SQRT_2, TAU};
 
 use super::activity::BandActivity;
 use crate::rng::{FastrandRng, Rng};
@@ -129,14 +133,20 @@ pub struct NoiseFloor {
     sigma: f64,
 }
 
+/// Per-sample deviation of white noise that comes out of a
+/// [`REFERENCE_BANDWIDTH_HZ`] filter at `rms_in_reference`.
+fn white_sigma(sample_rate: u32, rms_in_reference: f64) -> f64 {
+    // White noise of variance σ² spreads its power evenly up to Nyquist, so a
+    // filter B wide passes σ²·2B/fs of it.
+    let fs = f64::from(sample_rate.max(1));
+    rms_in_reference.max(0.0) * (fs / (2.0 * REFERENCE_BANDWIDTH_HZ)).sqrt()
+}
+
 impl NoiseFloor {
     pub fn new(sample_rate: u32, rms_in_reference: f64, seed: u64) -> Self {
-        // White noise of variance σ² spreads its power evenly up to Nyquist,
-        // so a filter B wide passes σ²·2B/fs of it.
-        let fs = f64::from(sample_rate.max(1));
         Self {
             gaussian: Gaussian::new(seed),
-            sigma: rms_in_reference.max(0.0) * (fs / (2.0 * REFERENCE_BANDWIDTH_HZ)).sqrt(),
+            sigma: white_sigma(sample_rate, rms_in_reference),
         }
     }
 
@@ -158,6 +168,164 @@ impl NoiseFloor {
             return 0.0;
         }
         self.gaussian.sample() * self.sigma
+    }
+}
+
+/// How far the receiver's audio-stage floor sits under the band's hiss, in
+/// decibels: its density against the band noise's density at the pitch,
+/// where the receiver passes the band at unity. Recorded receivers put it
+/// 32 to 38 dB down (rig audio through a CWformer), 35 dB (Morse Walker's
+/// receiver) or as little as 13.5 to 28 dB (an FTdx101's USB audio); this is
+/// among the quieter of them, enough to fill the silence outside the filter
+/// without standing in for the hiss inside it.
+pub const FLOOR_BELOW_DB: f64 = 32.0;
+/// Where the audio stage's own band starts: a second-order roll-off below
+/// this, so the floor brings no rumble of its own.
+pub const FLOOR_HIGH_PASS_HZ: f64 = 200.0;
+/// Where it ends: a fourth-order roll-off above this, about where a
+/// receiver's audio stops, so the floor is a hiss rather than a fizz.
+pub const FLOOR_LOW_PASS_HZ: f64 = 2_700.0;
+
+/// What the audio floor's seed is turned by, so that its noise is never the
+/// band's noise over again however the band's seed is chosen.
+const AUDIO_FLOOR_SEED: u64 = 0xF100_D5EE;
+
+/// The receiver's own audio stage: a faint, wide hiss that the CW filter
+/// never touches.
+///
+/// Every recording of a real receiver's CW audio has it: a floor some thirty
+/// decibels under the hiss at the note, running flat from a couple of hundred
+/// hertz to where the audio stage rolls off. It is the noise of the
+/// amplifiers after the filter, so narrowing the filter cannot take it away,
+/// and the AGC, which works ahead of them, cannot duck it. Without it
+/// everything outside the passband is dead silence, which no radio makes, and
+/// the band sounds like a filter rather than a receiver.
+///
+/// Its level follows the band's noise ([`FLOOR_BELOW_DB`] under its density
+/// at the pitch), so the noise control turns the whole receiver up or down,
+/// and turning the noise off silences it too. Static does not feed it:
+/// lightning arrives at the antenna, and what the filter lets through of it
+/// is all the audio stage ever hears.
+///
+/// Allocation-free and constant-time per sample, because it runs inside the
+/// audio callback.
+#[derive(Clone, Debug)]
+pub struct AudioFloor {
+    gaussian: Gaussian,
+    sigma: f64,
+    /// The audio stage's band: one high-pass section, then the two sections
+    /// of the low-pass.
+    sections: [Biquad; 3],
+}
+
+impl AudioFloor {
+    /// The floor under a band whose noise comes out of a
+    /// [`REFERENCE_BANDWIDTH_HZ`] filter at `rms_in_reference`.
+    pub fn new(sample_rate: u32, rms_in_reference: f64, seed: u64) -> Self {
+        let fs = f64::from(sample_rate.max(1));
+        // Butterworth, each pair of poles at its own Q: 1/√2 for the
+        // second-order high-pass, 1/(2·cos(π/8)) and 1/(2·cos(3π/8)) for the
+        // two halves of the fourth-order low-pass.
+        let low_q = |k: f64| 1.0 / (2.0 * (k * PI / 8.0).cos());
+        Self {
+            gaussian: Gaussian::new(seed),
+            // The band noise is white at the antenna and the receiver passes
+            // it at unity at the pitch, so a floor this much quieter per
+            // sample, through filters of unity passband, has this much less
+            // density than the hiss at the note.
+            sigma: white_sigma(sample_rate, rms_in_reference) * 10f64.powf(-FLOOR_BELOW_DB / 20.0),
+            sections: [
+                Biquad::high_pass(fs, FLOOR_HIGH_PASS_HZ, SQRT_2.recip()),
+                Biquad::low_pass(fs, FLOOR_LOW_PASS_HZ, low_q(1.0)),
+                Biquad::low_pass(fs, FLOOR_LOW_PASS_HZ, low_q(3.0)),
+            ],
+        }
+    }
+
+    /// The floor for these settings. `seed` is the band's own: the floor
+    /// turns it into one of its own, so the two noises are independent.
+    pub fn from_settings(sample_rate: u32, settings: &TrainingSettings, seed: u64) -> Self {
+        let level = if settings.band.noise_enabled {
+            settings.band.noise_level
+        } else {
+            0.0
+        };
+        Self::new(sample_rate, noise_floor_rms(level), seed ^ AUDIO_FLOOR_SEED)
+    }
+
+    pub fn is_silent(&self) -> bool {
+        self.sigma <= 0.0
+    }
+
+    /// One sample of the audio stage's hiss, ready to add to the receiver's
+    /// output after its AGC.
+    pub fn next_sample(&mut self) -> f64 {
+        if self.is_silent() {
+            return 0.0;
+        }
+        let mut x = self.gaussian.sample() * self.sigma;
+        for section in &mut self.sections {
+            x = section.process(x);
+        }
+        x
+    }
+
+    pub fn fill(&mut self, out: &mut [f32]) {
+        for slot in out {
+            *slot = self.next_sample() as f32;
+        }
+    }
+}
+
+/// A second-order section, designed in the analogue domain and brought over
+/// by the bilinear transform, prewarped so its corner lands where it was
+/// asked for at any sample rate. Run in transposed direct form II.
+#[derive(Clone, Copy, Debug)]
+struct Biquad {
+    b: [f64; 3],
+    a: [f64; 2],
+    state: [f64; 2],
+}
+
+impl Biquad {
+    /// Unity at DC, falling off above `corner_hz`.
+    fn low_pass(sample_rate: f64, corner_hz: f64, q: f64) -> Self {
+        let k = Self::prewarp(sample_rate, corner_hz);
+        let norm = 1.0 / (1.0 + k / q + k * k);
+        let b0 = k * k * norm;
+        Self::new([b0, 2.0 * b0, b0], k, q, norm)
+    }
+
+    /// Unity at Nyquist, falling off below `corner_hz`.
+    fn high_pass(sample_rate: f64, corner_hz: f64, q: f64) -> Self {
+        let k = Self::prewarp(sample_rate, corner_hz);
+        let norm = 1.0 / (1.0 + k / q + k * k);
+        Self::new([norm, -2.0 * norm, norm], k, q, norm)
+    }
+
+    /// The prewarped corner, K = tan(π·f/fs). A corner at or past Nyquist
+    /// has no digital equivalent, so it is held below it; only a degenerate
+    /// sample rate ever gets there.
+    fn prewarp(sample_rate: f64, corner_hz: f64) -> f64 {
+        let corner = corner_hz.min(0.45 * sample_rate);
+        (PI * corner / sample_rate).tan()
+    }
+
+    /// Both prototypes share the denominator s² + s/Q + 1, which the
+    /// transform turns into this; `norm` makes its leading coefficient one.
+    fn new(b: [f64; 3], k: f64, q: f64, norm: f64) -> Self {
+        Self {
+            b,
+            a: [2.0 * (k * k - 1.0) * norm, (1.0 - k / q + k * k) * norm],
+            state: [0.0; 2],
+        }
+    }
+
+    fn process(&mut self, x: f64) -> f64 {
+        let y = self.b[0] * x + self.state[0];
+        self.state[0] = self.b[1] * x - self.a[0] * y + self.state[1];
+        self.state[1] = self.b[2] * x - self.a[1] * y;
+        y
     }
 }
 
@@ -829,6 +997,72 @@ mod tests {
         let mut off = Arrivals::new(0.0, fs, &mut random);
         assert!(off.is_off());
         assert!((0..10_000).all(|_| !off.arrived(fs, &mut random)));
+    }
+
+    /// The audio floor's gain at `hz`, from its sections' coefficients.
+    fn audio_floor_response(floor: &AudioFloor, sample_rate: u32, hz: f64) -> f64 {
+        let w = TAU * hz / f64::from(sample_rate);
+        // |c0 + c1·e^{-jw} + c2·e^{-2jw}|
+        let magnitude = |[c0, c1, c2]: [f64; 3]| {
+            let re = c0 + c1 * w.cos() + c2 * (2.0 * w).cos();
+            let im = -c1 * w.sin() - c2 * (2.0 * w).sin();
+            re.hypot(im)
+        };
+        floor
+            .sections
+            .iter()
+            .map(|s| magnitude(s.b) / magnitude([1.0, s.a[0], s.a[1]]))
+            .product()
+    }
+
+    /// The audio stage's band, at any rate a sound card runs at: unity in
+    /// the middle, 3 dB down at both corners, twelve decibels an octave
+    /// below and twenty-four above.
+    #[test]
+    fn the_audio_floor_has_the_audio_stages_band() {
+        for sample_rate in [16_000, 22_050, 44_100, 48_000, 96_000] {
+            let floor = AudioFloor::new(sample_rate, 0.01, 1);
+            for (hz, lowest, highest) in [
+                (800.0, -0.05, 0.05),
+                (FLOOR_HIGH_PASS_HZ, -3.06, -2.96),
+                (FLOOR_LOW_PASS_HZ, -3.06, -2.96),
+                (FLOOR_HIGH_PASS_HZ / 4.0, -24.6, -23.6),
+                // The transform squeezes everything above the corner towards
+                // Nyquist, which only ever steepens it.
+                (FLOOR_LOW_PASS_HZ * 2.0, f64::NEG_INFINITY, -23.6),
+            ] {
+                let db = 20.0 * audio_floor_response(&floor, sample_rate, hz).log10();
+                assert!(
+                    (lowest..=highest).contains(&db),
+                    "{sample_rate} Hz: {db:.3} dB at {hz} Hz"
+                );
+            }
+        }
+    }
+
+    /// The floor is [`FLOOR_BELOW_DB`] under the band's noise, sample for
+    /// sample before any filter, which through filters of unity gain is the
+    /// same distance between their densities.
+    #[test]
+    fn the_audio_floor_sits_under_the_band_noise() {
+        for level in [0.1, 0.5, 1.0] {
+            let rms = noise_floor_rms(level);
+            let band = NoiseFloor::new(SR, rms, 1).sigma;
+            let floor = AudioFloor::new(SR, rms, 1).sigma;
+            let below = 20.0 * (floor / band).log10();
+            assert!((below + FLOOR_BELOW_DB).abs() < 1e-9, "{below} dB");
+        }
+        let mut off = AudioFloor::new(SR, 0.0, 1);
+        assert!(off.is_silent());
+        assert!((0..1_000).all(|_| off.next_sample() == 0.0));
+        let mut settings = TrainingSettings::default();
+        settings.band.noise_enabled = false;
+        assert!(AudioFloor::from_settings(SR, &settings, 1).is_silent());
+        settings.band.noise_enabled = true;
+        assert!(!AudioFloor::from_settings(SR, &settings, 1).is_silent());
+        // A sample rate too low to hold the band still makes numbers.
+        let mut degenerate = AudioFloor::new(1, 0.1, 1);
+        assert!((0..1_000).all(|_| degenerate.next_sample().is_finite()));
     }
 
     #[test]
