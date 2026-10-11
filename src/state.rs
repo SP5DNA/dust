@@ -2,9 +2,8 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use cw_core::{
-    CALLSIGN_TIER_MAX, CharSamplingState, FastrandRng, GroupSession, SessionMachine, SessionResult,
-    StationVoice, TrainingSettings, Transmission, generate_callsign, resolve_pileup,
-    resolve_station,
+    CharSamplingState, FastrandRng, GroupSession, SessionMachine, SessionResult, StationVoice,
+    TrainingSettings, Transmission, resolve_pileup, resolve_station,
 };
 use dioxus::prelude::*;
 
@@ -124,23 +123,22 @@ impl AppState {
     }
 
     /// `text` from `voice`, with whoever else the settings have calling
-    /// across it: other stations sending their own calls, the way a pile-up
-    /// answers a CQ. Drawn afresh each time, like a session's groups.
+    /// across it, each sending what `say` gives it. Drawn afresh each time,
+    /// like a session's groups.
     pub fn pileup_for(
         &self,
         settings: &TrainingSettings,
         text: &str,
         voice: StationVoice,
+        mut say: impl FnMut(&mut FastrandRng) -> String,
     ) -> Transmission {
         let others = settings.band.stations_max.saturating_sub(1) as usize;
         if others == 0 {
             return Transmission::alone(text, voice);
         }
-        let draw = |rng: &mut FastrandRng| {
-            let calls: Vec<String> = (0..others)
-                .map(|_| generate_callsign(CALLSIGN_TIER_MAX, rng))
-                .collect();
-            resolve_pileup(settings, &voice, text, &calls, rng)
+        let mut draw = |rng: &mut FastrandRng| {
+            let texts: Vec<String> = (0..others).map(|_| say(rng)).collect();
+            resolve_pileup(settings, &voice, text, &texts, rng)
         };
         let others = match self.rng.try_borrow_mut() {
             Ok(mut rng) => draw(&mut rng),
@@ -283,10 +281,16 @@ mod tests {
         let h = Harness::new();
         let mut settings = test_settings();
         let voice = h.app.station(&settings);
-        assert!(h.app.pileup_for(&settings, "CQ", voice).others.is_empty());
+        let say = |_: &mut cw_core::FastrandRng| "DL1ABC".to_string();
+        assert!(
+            h.app
+                .pileup_for(&settings, "CQ", voice, say)
+                .others
+                .is_empty()
+        );
         settings.band.stations_min = 4;
         settings.band.stations_max = 4;
-        let call = h.app.pileup_for(&settings, "CQ", voice);
+        let call = h.app.pileup_for(&settings, "CQ", voice, say);
         assert_eq!(call.text, "CQ");
         assert_eq!(call.voice, voice);
         assert!(
@@ -294,6 +298,7 @@ mod tests {
             "{}",
             call.others.len()
         );
+        assert!(call.others.iter().all(|other| other.text == "DL1ABC"));
     }
 
     #[test]

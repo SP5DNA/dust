@@ -420,10 +420,32 @@ impl BandActivity {
 
     /// A pile-up is calling with `callers` stations besides yours: they come
     /// out of the count of stations that may key at once until it is over.
-    /// Stations already part way through an over finish it; nobody new starts
-    /// one until there is room.
+    /// Nobody new starts an over until there is room, and of the stations
+    /// already keying within earshot, any beyond what is left of the count
+    /// finish the character they are in and stand by — the way a station
+    /// hearing the frequency fill up breaks off.
     pub fn reserve(&mut self, callers: usize) {
         self.reserved = callers;
+        let mut keep = self.cap.saturating_sub(callers);
+        // Called every buffer: with room to spare, nobody is cut short.
+        if self.keying_heard() <= keep {
+            return;
+        }
+        let tuning = self.tuning;
+        for emitter in self
+            .emitters
+            .iter_mut()
+            .filter(|e| e.on_air() && tuning.heard(e.pitch_hz))
+        {
+            // One whose over is ending anyway is not kept; it just ends sooner.
+            // The choice among the rest is the same every call, so nobody kept
+            // once is cut the next time round.
+            if keep > 0 && !emitter.winding_up() {
+                keep -= 1;
+            } else {
+                emitter.wind_up();
+            }
+        }
     }
 
     pub fn next_sample(&mut self) -> f64 {
@@ -483,20 +505,32 @@ impl BandActivity {
             .cap
             .saturating_sub(self.reserved)
             .saturating_sub(self.keying_heard());
-        let give_up = (GIVE_UP_SEC * self.sample_rate) as u32;
         let tuning = self.tuning;
+        // Out of earshot never waits: it is not one of the stations you hear.
+        for emitter in self
+            .emitters
+            .iter_mut()
+            .filter(|e| e.ready && !tuning.heard(e.pitch_hz))
+        {
+            emitter.go();
+        }
+        // Whoever has waited longest goes first.
+        while room > 0 {
+            let next = self
+                .emitters
+                .iter_mut()
+                .filter(|e| e.ready)
+                .max_by_key(|e| e.waited);
+            let Some(emitter) = next else { break };
+            emitter.go();
+            room -= 1;
+        }
+        let give_up = (GIVE_UP_SEC * self.sample_rate) as u32;
         for emitter in self.emitters.iter_mut().filter(|e| e.ready) {
-            if !tuning.heard(emitter.pitch_hz) {
-                emitter.go();
-            } else if room > 0 {
-                emitter.go();
-                room -= 1;
-            } else {
-                emitter.waited = emitter.waited.saturating_add(CONTROL_SAMPLES);
-                if emitter.waited >= give_up {
-                    emitter.ready = false;
-                    emitter.overs_left = 0;
-                }
+            emitter.waited = emitter.waited.saturating_add(CONTROL_SAMPLES);
+            if emitter.waited >= give_up {
+                emitter.ready = false;
+                emitter.overs_left = 0;
             }
         }
     }
@@ -791,6 +825,8 @@ struct Emitter {
     /// many samples so far.
     ready: bool,
     waited: u32,
+    /// Making room for a pile-up: ending the over at the next character.
+    breaking_off: bool,
     /// Samples before a carrier or a sweep goes off; `u64::MAX` is never.
     life_left: u64,
 }
@@ -886,10 +922,21 @@ impl Emitter {
         self.kind == Kind::Keyed && self.overs_left > 0 && self.wait == 0 && !self.ready
     }
 
+    /// Its over is ending: it has run its length, or been told to break off.
+    fn winding_up(&self) -> bool {
+        self.breaking_off || self.over_elapsed >= self.over_target
+    }
+
+    /// Break the over off at the end of the character it is in.
+    fn wind_up(&mut self) {
+        self.breaking_off = true;
+    }
+
     /// Its turn, and room for it: start the over.
     fn go(&mut self) {
         self.ready = false;
         self.waited = 0;
+        self.breaking_off = false;
         self.begin_over();
     }
 
@@ -944,7 +991,7 @@ impl Emitter {
         let long_enough = self.over_elapsed >= self.over_target;
         if self.pos >= self.end {
             self.enter_phrase(traffic, self.next_phrase());
-            if long_enough {
+            if long_enough || self.breaking_off {
                 self.end_over();
             } else {
                 self.key_down = false;
@@ -954,7 +1001,8 @@ impl Emitter {
         }
         let code = traffic.code(self.pos);
         self.pos += 1;
-        if code == WORD_GAP && long_enough {
+        let between_characters = code == CHAR_GAP || code == WORD_GAP;
+        if (code == WORD_GAP && long_enough) || (between_characters && self.breaking_off) {
             self.end_over();
             return;
         }

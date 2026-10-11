@@ -547,22 +547,81 @@ fn a_pile_up_holds_the_band_back_while_it_calls() {
     assert!(after.iter().any(|c| *c > 0), "the band never came back");
 }
 
+/// While a pile-up calls, the band and the pile-up between them never have
+/// more keying than the rest of the count — once the stations caught keying
+/// when it starts have finished the character they were in.
+#[test]
+fn a_pile_up_and_the_band_together_stay_within_the_count() {
+    // A four-second send every ten seconds, the way a session runs.
+    const SEND_SEC: f64 = 4.0;
+    const EVERY_SEC: f64 = 10.0;
+    // The longest character at the slowest fist: five dahs at 12 WPM.
+    const BREAK_OFF_SEC: f64 = 2.5;
+    for stations in 2..=STATIONS_MAX {
+        let others = (stations - 1) as usize;
+        let mut band = BandActivity::from_settings(CENSUS_RATE, &calling(stations), 13);
+        let block = CONTROL_SAMPLES as usize;
+        let block_sec = block as f64 / f64::from(CENSUS_RATE);
+        let mut worst = 0;
+        for n in 0..(900.0 / block_sec) as usize {
+            let t = n as f64 * block_sec;
+            let into = t % EVERY_SEC;
+            let callers = if into < SEND_SEC { others } else { 0 };
+            // Every block, as the native player does every buffer.
+            band.reserve(callers);
+            for _ in 0..block {
+                band.next_sample();
+            }
+            if into >= BREAK_OFF_SEC {
+                worst = worst.max(band.keying_heard() + band.reserved);
+            }
+        }
+        assert!(
+            worst <= others,
+            "{stations} calling: {worst} on the air with the pile-up"
+        );
+    }
+}
+
 /// A station whose turn comes on a full band waits for a gap rather than
-/// piling in, and one that waits too long goes elsewhere rather than holding
-/// its slot for ever.
+/// piling in, and one that waits too long goes elsewhere, giving its slot up
+/// rather than holding it for ever.
 #[test]
 fn a_station_that_finds_the_band_full_waits_and_then_gives_up() {
     let mut band = BandActivity::from_settings(CENSUS_RATE, &calling(2), 9);
+    // A pile-up as big as the count: nobody heard may start at all.
     band.reserve(1);
     let give_up = (GIVE_UP_SEC * f64::from(CENSUS_RATE)) as u32;
-    let (mut someone_waited, mut longest) = (false, 0);
+    let mut before = band.emitters;
+    let (mut longest, mut gave_up) = (0, 0);
     for _ in 0..(300 * CENSUS_RATE) {
         band.next_sample();
-        for e in band.emitters.iter().filter(|e| e.ready) {
-            someone_waited |= e.waited > 0 && band.tuning.heard(e.pitch_hz);
-            longest = longest.max(e.waited);
+        for (now, then) in band.emitters.iter().zip(&before) {
+            if now.ready {
+                longest = longest.max(now.waited);
+            }
+            // Waiting a moment ago, and now done with the band without
+            // having started: it gave up, and its slot goes at the next look.
+            let same = now.kind == then.kind && now.pitch_hz == then.pitch_hz;
+            if same && then.ready && !now.ready && now.overs_left == 0 {
+                gave_up += 1;
+            }
         }
+        before = band.emitters;
     }
-    assert!(someone_waited, "nobody had to wait for a full band");
     assert!(longest < give_up, "a station waited {longest} samples");
+    assert!(gave_up > 0, "nobody ever gave up and freed a slot");
+}
+
+/// The band is told how many are calling on every buffer, pile-up or not; with
+/// room to spare that must leave every over to end where it would have.
+#[test]
+fn being_told_there_is_room_changes_nothing() {
+    let settings = calling(3);
+    let mut told = BandActivity::from_settings(CENSUS_RATE, &settings, 17);
+    let mut left = BandActivity::from_settings(CENSUS_RATE, &settings, 17);
+    for _ in 0..(600 * CENSUS_RATE) {
+        told.reserve(0);
+        assert_eq!(told.next_sample().to_bits(), left.next_sample().to_bits());
+    }
 }

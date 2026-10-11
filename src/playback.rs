@@ -2,8 +2,8 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use cw_core::{
-    CharSamplingState, FastrandRng, TrainingSettings, Transmission, compute_after_group_gap_ms,
-    generate_training_group,
+    CALLSIGN_TIER_MAX, CharSamplingState, FastrandRng, TrainingSettings, Transmission,
+    compute_after_group_gap_ms, generate_callsign, generate_training_group,
 };
 use dioxus::prelude::*;
 
@@ -205,7 +205,10 @@ pub async fn loop_preview_text(
             return;
         }
         let settings_now = settings().clamp();
-        let call = app.pileup_for(&settings_now, text, voice);
+        // A CQ is answered by callsigns.
+        let call = app.pileup_for(&settings_now, text, voice, |rng| {
+            generate_callsign(CALLSIGN_TIER_MAX, rng)
+        });
         if let Err(err) = play_text_now(&app, generation, &call, &settings_now).await {
             match err {
                 PlayError::Cancelled => return,
@@ -259,8 +262,13 @@ pub async fn loop_stream_groups(
             }
             continue;
         }
-        // Across it, whoever else the settings have calling, as in a session.
-        let call = app.pileup_for(&settings_now, &group, voice);
+        // Across it, whoever else the settings have calling, sending groups
+        // of their own as a session's callers do: from the same curriculum,
+        // off a blank slate, so they never teach the sampler anything.
+        let elsewhere = CharSamplingState::default();
+        let call = app.pileup_for(&settings_now, &group, voice, |rng| {
+            generate_training_group(&settings_now, &elsewhere, rng).0
+        });
         let played = play_text_now(&app, generation, &call, &settings_now).await;
         if app.session_gen.get() != generation {
             return;

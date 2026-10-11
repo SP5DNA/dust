@@ -333,6 +333,14 @@ impl BandStream {
         })
     }
 
+    /// The pile-up the band is making room for, if any.
+    fn pileup(&self) -> Option<(usize, f64)> {
+        self.state
+            .try_borrow()
+            .ok()
+            .and_then(|stream| stream.pileup)
+    }
+
     /// `callers` other stations are calling across a send until `until`, on
     /// the context clock. None at all clears it, as a stopped send does.
     fn reserve(&self, callers: usize, until: f64) {
@@ -615,13 +623,19 @@ impl MorsePlayer {
         if signature == self.band.signature {
             return Ok(());
         }
+        // A send in flight keeps its pile-up when the band under it changes.
+        let pileup = self.band.stream.as_ref().and_then(BandStream::pileup);
         self.retire_band();
         if self.ctx.state() == AudioContextState::Closed {
             return Ok(());
         }
         add_qsb(&self.ctx, &self.cw_gain, settings, &mut self.band)?;
         if BandMixer::needs_background(settings) {
-            self.band.stream = Some(BandStream::start(&self.ctx, &self.mix_gain, settings)?);
+            let stream = BandStream::start(&self.ctx, &self.mix_gain, settings)?;
+            if let Some((callers, until)) = pileup {
+                stream.reserve(callers, until);
+            }
+            self.band.stream = Some(stream);
         }
         self.tune_agc(settings);
         self.band.signature = signature;

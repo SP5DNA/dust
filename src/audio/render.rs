@@ -410,6 +410,25 @@ mod tests {
             playback.mix_into(&mut out, 1);
         }
         assert_eq!(agc.callers(), 0, "still holding room after the send");
+
+        // Stopped part way: it lets go once its release has run.
+        let stop = Arc::new(AtomicBool::new(false));
+        let playback = TonePlayback::new(
+            vec![0.1; 8_000],
+            8_000,
+            0.0,
+            LiveQsb::new(),
+            Arc::clone(&stop),
+            Arc::clone(&agc),
+        )
+        .with_callers(3);
+        playback.mix_into(&mut out, 1);
+        assert_eq!(agc.callers(), 3);
+        stop.store(true, Ordering::SeqCst);
+        for _ in 0..4 {
+            playback.mix_into(&mut out, 1);
+        }
+        assert_eq!(agc.callers(), 0, "still holding room after a stop");
     }
 
     fn plan(text: &str) -> PlaybackPlan {

@@ -147,6 +147,9 @@ impl MorsePlayer {
 
     fn set_tone(&self, tone: Option<Arc<TonePlayback>>) {
         let previous = std::mem::replace(&mut *lock_slot(&self.slots.tone), tone);
+        // A send taken out before it finished cannot clear its own callers;
+        // the one replacing it, if any, publishes its own on its first buffer.
+        self.agc.note_callers(0);
         // A send's samples can run to megabytes; let them go here, not inside
         // the audio callback.
         drop(previous);
