@@ -1051,3 +1051,35 @@ fn the_default_hiss_rings_at_the_note() {
         100.0 * inside
     );
 }
+
+/// Where no width passes a wide side-tone range — the other sideband folding
+/// back takes the bottom of it down however wide the filter is built — the
+/// receiver is not built wider for nothing: a wider build is used only when
+/// it nearly passes, and otherwise the width asked for stands.
+#[test]
+fn a_receiver_that_cannot_pass_the_range_is_not_widened_for_nothing() {
+    use crate::settings::{FilterShape, TrainingSettings};
+    for (low, high, asked) in [
+        (200.0, 1_000.0, 1_900.0),
+        (200.0, 1_000.0, 2_000.0),
+        (200.0, 1_050.0, 2_000.0),
+    ] {
+        let mut settings = TrainingSettings::default();
+        settings.band.filter_shape = FilterShape::Sharp;
+        settings.band.side_tone_min = low;
+        settings.band.side_tone_max = high;
+        settings.band.filter_width_hz = asked;
+        let settings = settings.clamp();
+        let built = crate::band::receiver_width_hz(&settings);
+        let design = FilterDesign::from_settings(&settings);
+        let quietest = (0..=32)
+            .map(|i| design.response_at(low + (high - low) * f64::from(i) / 32.0))
+            .fold(f64::INFINITY, f64::min);
+        let passes = 20.0 * quietest.log10() >= -1.0 - 1e-6;
+        assert!(
+            passes || (built - asked).abs() < 1e-9 || 20.0 * quietest.log10() >= -1.5,
+            "{low}-{high} asked {asked}: built {built:.0} Hz and still {:.2} dB down",
+            20.0 * quietest.log10()
+        );
+    }
+}

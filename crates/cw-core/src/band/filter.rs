@@ -821,6 +821,9 @@ const COVERAGE_POINTS: usize = 9;
 /// make, enough to reach [`MAX_RECEIVER_WIDTH_HZ`].
 const COVERAGE_STEP: f64 = 1.01;
 const COVERAGE_STEPS: usize = 128;
+/// How close to passing the side-tone range a widened receiver has to come,
+/// when none passes it, to be worth building that wide.
+const NEARLY_PASSES_DB: f64 = 0.5;
 
 /// The width the receiver is built at, in hertz at 6 dB: the one asked for,
 /// or wider, if that would not pass the whole side-tone range.
@@ -878,8 +881,11 @@ pub fn receiver_width_hz(settings: &TrainingSettings) -> f64 {
             })
             .fold(f64::INFINITY, f64::min)
     };
-    // Where the range runs so close to zero beat that no width passes it,
-    // the one that comes closest.
+    // Where the range runs so close to zero beat that no width passes it, a
+    // wider build is only worth the noise it lets in if it nearly does —
+    // within half a decibel. Otherwise the width it started from stands.
+    let start = width;
+    let nearly = level * 10f64.powf(-NEARLY_PASSES_DB / 20.0);
     let mut closest = (f64::NEG_INFINITY, width);
     for _ in 0..COVERAGE_STEPS {
         let level_here = quietest(width);
@@ -894,7 +900,11 @@ pub fn receiver_width_hz(settings: &TrainingSettings) -> f64 {
         }
         width = (width * COVERAGE_STEP).min(MAX_RECEIVER_WIDTH_HZ);
     }
-    closest.1
+    if closest.0 >= nearly {
+        closest.1
+    } else {
+        start
+    }
 }
 
 fn finite_or(value: f64, fallback: f64) -> f64 {

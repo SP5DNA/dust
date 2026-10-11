@@ -341,12 +341,19 @@ pub fn resolve_pileup(
             (true, false) => free_above,
             (true, true) => continue,
         };
-        // Each one is its own operator, and its own distance away.
+        // Each one is its own operator, and its own distance away — a margin
+        // that holds as heard, through the receiver. The placement rules keep
+        // a caller no louder through the filter than the station you want on
+        // a symmetric filter; a peaked one, opened wide enough to reach zero
+        // beat, is not quite symmetric there, so the margin is taken against
+        // what the filter really does to the two of them.
         let extra_db = rng.pick_in_range(0.0, 5.0);
         let gain = 10f64.powf(-(down_db + extra_db) / 20.0);
         let mut voice = resolve_station(settings, rng);
         voice.tone_hz = pick_in_room(&side, rng).max(20.0);
-        voice.volume = (wanted.volume * gain).clamp(0.0, 1.0);
+        let through = receiver.response_at(wanted.tone_hz)
+            / receiver.response_at(voice.tone_hz).max(f64::MIN_POSITIVE);
+        voice.volume = (wanted.volume * gain * through.min(1.0)).clamp(0.0, 1.0);
         others.push(Interferer {
             text: text.clone(),
             voice,
@@ -1418,6 +1425,50 @@ mod pileup_tests {
     /// What you hear is after it, and a filter does not treat every pitch
     /// alike — so this is the one that matters: whatever the tuning, the
     /// width and the shape, the station you want comes out on top.
+    /// Through any receiver the controls build — every shape, wide open, over
+    /// wide side-tone ranges, at the smallest margin and the widest spread —
+    /// each caller is heard at least the margin below the station you want.
+    /// A peaked receiver wide enough to reach zero beat is not symmetric
+    /// there, which the placement alone would not allow for.
+    #[test]
+    fn every_caller_is_heard_the_margin_below_the_station_you_want() {
+        use crate::settings::{FilterShape, PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX};
+        let mut worst = f64::INFINITY;
+        for shape in [FilterShape::Sharp, FilterShape::Soft, FilterShape::Peaked] {
+            for width in [300.0, 1_000.0, 1_500.0, 1_700.0, FILTER_WIDTH_MAX] {
+                for (low, high) in [(400.0, 600.0), (300.0, 700.0), (200.0, 800.0)] {
+                    let mut s = TrainingSettings::default();
+                    s.band.stations_min = STATIONS_MAX;
+                    s.band.stations_max = STATIONS_MAX;
+                    s.band.filter_shape = shape;
+                    s.band.filter_width_hz = width;
+                    s.band.side_tone_min = low;
+                    s.band.side_tone_max = high;
+                    s.band.pileup_level_db = PILEUP_LEVEL_MIN_DB;
+                    s.band.pileup_spread_hz = PILEUP_SPREAD_MAX;
+                    let s = s.clamp();
+                    let receiver = crate::band::FilterDesign::from_settings(&s);
+                    for seed in 0..200u64 {
+                        let mut rng = FastrandRng(
+                            seed.wrapping_mul(2_862_933_555_777_941_757).wrapping_add(3),
+                        );
+                        let wanted = resolve_station(&s, &mut rng);
+                        let yours = wanted.volume * receiver.response_at(wanted.tone_hz);
+                        for other in resolve_pileup(&s, &wanted, "W1AW", &texts(4), &mut rng) {
+                            let theirs =
+                                other.voice.volume * receiver.response_at(other.voice.tone_hz);
+                            worst = worst.min(20.0 * (yours / theirs).log10());
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            worst >= PILEUP_LEVEL_MIN_DB - 1e-9,
+            "a caller came within {worst:.2} dB of the station you want"
+        );
+    }
+
     #[test]
     fn the_station_you_want_is_still_the_strongest_through_the_filter() {
         use crate::band::ReceiverFilter;

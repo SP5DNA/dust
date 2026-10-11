@@ -109,6 +109,9 @@ const LEVEL_CEILING_DB: f64 = 50.0;
 /// keeps the wanted station the one you hear.
 const GUARD_KEYED_DB: f64 = 6.0;
 const GUARD_CARRIER_DB: f64 = 10.0;
+/// How many points across the side-tone range the guard checks the receiver
+/// at, for the pitch it passes least well.
+const GUARD_POINTS: usize = 16;
 /// How far either side of the wanted station's pitch range the guard reaches.
 const GUARD_MARGIN_HZ: f64 = 150.0;
 
@@ -312,10 +315,24 @@ impl Tuning {
         let (_, upper_edge) = passband_edges(center, design.width_hz());
         let (heard_low_hz, heard_high_hz) = design.edges_at(HEARD_DB);
         let high = (center + SPAWN_ABOVE_PITCH_HZ).max(upper_edge + SPAWN_ABOVE_EDGE_HZ);
-        // The quietest the wanted station is ever sent, against the floor
-        // every level here is measured from.
+        // The quietest the wanted station is ever heard, against the floor
+        // every level here is measured from: its quietest send, at the pitch
+        // the receiver passes least well, set against a background station at
+        // the pitch it passes best anywhere the guard reaches. A peaked
+        // receiver takes a few decibels off the ends of the side-tone range,
+        // and the guard has to hold there too: the margin is as heard, not as
+        // sent.
         let volume = finite(band.volume_min, defaults.volume_min).clamp(0.1, 1.0);
-        let wanted_rms = SIGNAL_RMS * volume;
+        let receiver = &design;
+        let response_over = |low: f64, high: f64| {
+            (0..=GUARD_POINTS).map(move |i| {
+                receiver.response_at(low + (high - low) * i as f64 / GUARD_POINTS as f64)
+            })
+        };
+        let weakest = response_over(tone_min, tone_max).fold(1.0f64, f64::min);
+        let loudest = response_over(tone_min - GUARD_MARGIN_HZ, tone_max + GUARD_MARGIN_HZ)
+            .fold(1.0f64, f64::max);
+        let wanted_rms = SIGNAL_RMS * volume * (weakest / loudest).max(1e-6);
         Self {
             low_hz: SPAWN_LOW_HZ,
             high_hz: high.max(SPAWN_LOW_HZ + 500.0),

@@ -9,7 +9,9 @@ watch_path = ["src", "assets", "crates"]
 
 [web.resource]
 # Do not list styles.css here. `dx bundle` injects the <link> but does not
-# copy the file; AppHead loads the sheet through `asset!` instead.
+# copy the file. The app declares the sheet as a static-head `asset!`
+# instead (src/app.rs), which `dx bundle` both copies and links from the
+# <head> of index.html.
 style = []
 script = []
 

@@ -415,7 +415,9 @@ fn through_receiver(
 /// receiver they describe.
 fn heard_with(settings: &TrainingSettings) -> (f64, f64) {
     let center = settings.side_tone_center();
-    let seeds = [21, 22, 23];
+    // Six ten-minute sessions: with three, one step of the setting could not
+    // be told from the next by more than chance.
+    let seeds = [21, 22, 23, 24, 25, 26];
     let (mut near, mut inside) = (0.0, 0.0);
     for seed in seeds {
         let band = BandActivity::from_settings(LISTEN_RATE, settings, seed);
@@ -553,11 +555,14 @@ fn never_more_than_the_rest_of_the_count_key_at_once() {
             let others = (stations - 1) as usize;
             let (mut on, mut full) = (0.0, 0.0);
             let mut most = 0;
-            for seed in [41, 42, 43] {
+            // Twelve independent bands: three were too few to tell one step
+            // of the setting from the next by more than chance.
+            const SEEDS: u64 = 12;
+            for seed in 41..41 + SEEDS {
                 let mut band = BandActivity::from_settings(CENSUS_RATE, &settings(stations), seed);
-                let counts = keying_over(&mut band, 1_200.0);
+                let counts = keying_over(&mut band, 900.0);
                 most = most.max(counts.iter().copied().max().unwrap_or(0));
-                let n = counts.len() as f64 * 3.0;
+                let n = counts.len() as f64 * SEEDS as f64;
                 on += counts.iter().filter(|c| **c > 0).count() as f64 / n;
                 full += counts.iter().filter(|c| **c >= others).count() as f64 / n;
             }
@@ -673,5 +678,68 @@ fn being_told_there_is_room_changes_nothing() {
     for _ in 0..(600 * CENSUS_RATE) {
         told.reserve(0);
         assert_eq!(told.next_sample().to_bits(), left.next_sample().to_bits());
+    }
+}
+
+/// Inside the wanted station's pitch range nothing keyed is heard within 6 dB
+/// of it — as heard, through the receiver, with the wanted station at the
+/// pitch the receiver passes least well and its quietest send. A peaked
+/// receiver takes a few decibels off the ends of the range; the guard has to
+/// hold there as well as in the middle.
+#[test]
+fn nothing_keyed_is_heard_near_the_station_you_want() {
+    use crate::band::FilterDesign;
+    use crate::settings::FilterShape;
+    for shape in [FilterShape::Peaked, FilterShape::Sharp, FilterShape::Soft] {
+        for (low, high) in [
+            (400.0, 600.0),
+            (400.0, 800.0),
+            (300.0, 900.0),
+            (200.0, 1_200.0),
+        ] {
+            let mut settings = calling(STATIONS_MAX);
+            settings.band.filter_shape = shape;
+            settings.band.side_tone_min = low;
+            settings.band.side_tone_max = high;
+            let settings = settings.clamp();
+            let design = FilterDesign::from_settings(&settings);
+            let weakest = (0..=64)
+                .map(|i| design.response_at(low + (high - low) * f64::from(i) / 64.0))
+                .fold(f64::INFINITY, f64::min);
+            let volume = settings.band.volume_min.clamp(0.1, 1.0);
+            let wanted_heard = 20.0 * (SIGNAL_RMS * volume * weakest / reference_rms()).log10()
+                + bin_over_reference_db();
+            let (band, drawn) = {
+                let mut band = BandActivity::from_settings(48_000, &settings, 23);
+                let drawn: Vec<Emitter> = (0..3_000).map(|_| band.new_station()).collect();
+                (band, drawn)
+            };
+            let guard = (low - GUARD_MARGIN_HZ)..=(high + GUARD_MARGIN_HZ);
+            for station in drawn.iter().filter(|e| guard.contains(&e.pitch_hz)) {
+                // At the top of its own fading, and wherever drift or a new
+                // over can take it within the guard.
+                let reach = OVER_PITCH_JITTER_HZ
+                    + if station.drift_hz_per_sec == 0.0 {
+                        0.0
+                    } else {
+                        DRIFT_MAX_HZ
+                    };
+                let loudest = (0..=8)
+                    .map(|i| {
+                        design.response_at(
+                            station.pitch_hz - reach + 2.0 * reach * f64::from(i) / 8.0,
+                        )
+                    })
+                    .fold(0.0f64, f64::max);
+                let heard =
+                    level_db(&band, station) + station.fade.swing_db + 20.0 * loudest.log10();
+                assert!(
+                    heard <= wanted_heard - GUARD_KEYED_DB + 0.1,
+                    "{shape:?} {low}-{high}: a station at {:.0} Hz is heard {:.2} dB under the one you want",
+                    station.pitch_hz,
+                    wanted_heard - heard
+                );
+            }
+        }
     }
 }
