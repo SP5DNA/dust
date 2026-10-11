@@ -483,7 +483,6 @@ mod tests {
         s.band.side_tone_max = 600.0;
         s.band.qrn_enabled = false;
         s.band.qsb_enabled = false;
-        s.band.activity_enabled = false;
         s.clamp()
     }
 

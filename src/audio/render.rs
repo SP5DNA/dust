@@ -54,6 +54,10 @@ pub struct LiveAgc {
     gain_bits: AtomicU64,
     /// How loud the send itself is right now, before the AGC has had it.
     send_bits: AtomicU64,
+    /// How many stations are calling across the send right now. The band's
+    /// own traffic makes room for them: between them they never have more
+    /// keying at once than the settings allow.
+    callers: AtomicUsize,
 }
 
 impl LiveAgc {
@@ -61,7 +65,16 @@ impl LiveAgc {
         Arc::new(Self {
             gain_bits: AtomicU64::new(1.0f64.to_bits()),
             send_bits: AtomicU64::new(0.0f64.to_bits()),
+            callers: AtomicUsize::new(0),
         })
+    }
+
+    pub fn note_callers(&self, callers: usize) {
+        self.callers.store(callers, Ordering::Relaxed);
+    }
+
+    pub fn callers(&self) -> usize {
+        self.callers.load(Ordering::Relaxed)
     }
 
     pub fn store(&self, gain: f64) {
@@ -193,6 +206,8 @@ pub struct TonePlayback {
     qsb: Arc<LiveQsb>,
     /// What the receiver's AGC is doing to everything, this send included.
     agc: Arc<LiveAgc>,
+    /// How many other stations are calling across this send.
+    callers: usize,
 }
 
 impl TonePlayback {
@@ -214,7 +229,15 @@ impl TonePlayback {
             stop,
             qsb,
             agc,
+            callers: 0,
         }
+    }
+
+    /// This send carries a pile-up of `callers` other stations, which the
+    /// band's own traffic has to make room for while it plays.
+    pub fn with_callers(mut self, callers: usize) -> Self {
+        self.callers = callers;
+        self
     }
 
     pub fn finished_flag(&self) -> Arc<AtomicBool> {
@@ -250,11 +273,14 @@ impl TonePlayback {
             faded * self.agc.gain()
         });
         self.pos.store(i, Ordering::SeqCst);
-        // What the receiver has to ride, alongside the noise.
+        // What the receiver has to ride, alongside the noise, and who else
+        // is on the air with it.
         self.agc.note_send(f64::from(loudest));
+        self.agc.note_callers(self.callers);
         if i >= self.samples.len() {
             self.finished.store(true, Ordering::SeqCst);
             self.agc.note_send(0.0);
+            self.agc.note_callers(0);
         }
     }
 
@@ -283,6 +309,7 @@ impl TonePlayback {
         self.released.store(done, Ordering::SeqCst);
         if done >= total {
             self.finished.store(true, Ordering::SeqCst);
+            self.agc.note_callers(0);
         }
     }
 }
@@ -328,6 +355,7 @@ impl BandPlayback {
             let send = self.agc.send_level();
             let mixer = &mut self.mixer;
             mixer.note_send_level(send);
+            mixer.reserve_stations(self.agc.callers());
             write_interleaved(out, channels, true, || mixer.next_background());
             // Published once a buffer rather than once a sample: the release
             // runs over the best part of a second, so a buffer's worth of lag
@@ -358,6 +386,31 @@ impl BandPlayback {
 mod tests {
     use super::*;
     use cw_core::{FastrandRng, plan_morse_playback};
+
+    /// A send carrying a pile-up tells the band how many are calling across
+    /// it for as long as it plays, and lets go when it is done — so the
+    /// band's own stations make room only while the callers are on the air.
+    #[test]
+    fn a_send_holds_room_for_its_callers_until_it_ends() {
+        let agc = LiveAgc::new();
+        let stop = Arc::new(AtomicBool::new(false));
+        let playback = TonePlayback::new(
+            vec![0.1; 400],
+            8_000,
+            0.0,
+            LiveQsb::new(),
+            stop,
+            Arc::clone(&agc),
+        )
+        .with_callers(2);
+        let mut out = vec![0.0f32; 160];
+        playback.mix_into(&mut out, 1);
+        assert_eq!(agc.callers(), 2);
+        for _ in 0..3 {
+            playback.mix_into(&mut out, 1);
+        }
+        assert_eq!(agc.callers(), 0, "still holding room after the send");
+    }
 
     fn plan(text: &str) -> PlaybackPlan {
         let mut settings = TrainingSettings::default();

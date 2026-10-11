@@ -47,7 +47,7 @@ pub use noise::{
 };
 pub use qsb::{QSB_MIN_GAIN, QSB_PATHS, QSB_SPREAD, qsb_gain_at, qsb_path};
 
-use crate::settings::TrainingSettings;
+use crate::settings::{STATIONS_MIN, TrainingSettings};
 
 /// What a receiver does with a loud crash: catches it, rather than letting it
 /// square off. Linear up to the knee, asymptotic to full scale above it — so
@@ -103,7 +103,10 @@ pub fn band_standing_level(sample_rate: u32, settings: &TrainingSettings) -> f64
     let sample_rate = sample_rate.max(1);
     let sr = f64::from(sample_rate);
     let mut floor = settings.clone().clamp();
-    floor.band.activity_enabled = false;
+    // The floor is the band without its stations: they are what the knee is
+    // there to answer, so they cannot be part of setting it.
+    floor.band.stations_min = STATIONS_MIN;
+    floor.band.stations_max = STATIONS_MIN;
     let mut source = BandSource::new(sample_rate, &floor, SEED);
     let mut receiver = ReceiverFilter::from_settings(sample_rate, &floor);
     let fall = (-1.0 / (FOLLOWER_SEC * sr)).exp();
@@ -163,7 +166,8 @@ fn reference_floor_level() -> f64 {
         settings.band.noise_enabled = true;
         settings.band.noise_level = noise::QRN_REFERENCE_NOISE_LEVEL;
         settings.band.qrn_enabled = false;
-        settings.band.activity_enabled = false;
+        settings.band.stations_min = STATIONS_MIN;
+        settings.band.stations_max = STATIONS_MIN;
         settings.band.filter_bandwidth_hz = REFERENCE_BANDWIDTH_HZ;
         band_standing_level(FLOOR_MEASURE_RATE, &settings)
     })
@@ -201,7 +205,7 @@ impl BandMixer {
         let band = &settings.band;
         (band.qrn_enabled && band.qrn_level > 0.0)
             || (band.noise_enabled && band.noise_level > 0.0)
-            || (band.activity_enabled && band.activity_level > 0.0)
+            || band.stations_max > STATIONS_MIN
     }
 
     pub fn next_background(&mut self) -> f32 {
@@ -212,6 +216,13 @@ impl BandMixer {
         // pulled down and which everything else has to come down with —
         // including the send, which reads this through `agc_gain`.
         soft_limit(self.agc.process(heard, self.send_level)) as f32
+    }
+
+    /// A pile-up is calling with this many stations besides yours: they come
+    /// out of how many of the band's own stations may key at once, for as
+    /// long as they call. Zero when the send is over.
+    pub fn reserve_stations(&mut self, callers: usize) {
+        self.source.reserve_stations(callers);
     }
 
     /// How loud the send is — its peak, as the native player hands it over a

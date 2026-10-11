@@ -195,16 +195,18 @@ pub async fn loop_preview_text(
     gap_ms: u32,
     mut toast: Signal<Option<String>>,
 ) {
-    // One station calling, so moving a band slider changes the band and not
-    // the signal you are judging it against.
+    // One station, kept, so moving a band slider changes the band and not
+    // the signal you are judging it against. Whoever calls across it is drawn
+    // afresh each time, from the settings as they are now, so the pile-up is
+    // heard here just as a session would send it.
     let voice = app.station(&settings().clamp());
     loop {
         if app.session_gen.get() != generation {
             return;
         }
         let settings_now = settings().clamp();
-        let alone = Transmission::alone(text, voice);
-        if let Err(err) = play_text_now(&app, generation, &alone, &settings_now).await {
+        let call = app.pileup_for(&settings_now, text, voice);
+        if let Err(err) = play_text_now(&app, generation, &call, &settings_now).await {
             match err {
                 PlayError::Cancelled => return,
                 PlayError::Failed(message) => {
@@ -257,8 +259,9 @@ pub async fn loop_stream_groups(
             }
             continue;
         }
-        let alone = Transmission::alone(group.clone(), voice);
-        let played = play_text_now(&app, generation, &alone, &settings_now).await;
+        // Across it, whoever else the settings have calling, as in a session.
+        let call = app.pileup_for(&settings_now, &group, voice);
+        let played = play_text_now(&app, generation, &call, &settings_now).await;
         if app.session_gen.get() != generation {
             return;
         }
@@ -453,6 +456,45 @@ mod tests {
             let played = h.texts().len();
             h.advance(5_000).await;
             assert_eq!(h.texts().len(), played);
+        });
+    }
+
+    /// "Stations calling" is heard in the preview too: each CQ comes with a
+    /// fresh pile-up of as many others as the settings ask for, none of them
+    /// sending what the wanted station sends.
+    #[test]
+    fn the_band_preview_brings_the_pile_up_the_settings_ask_for() {
+        run(|| async {
+            let mut settings = test_settings();
+            settings.band.stations_min = 3;
+            settings.band.stations_max = 3;
+            let mut h = Harness::with_settings(settings.clone());
+            let generation = h.app.takeover_audio(&settings).expect("player");
+            let app = h.app.clone();
+            let (settings_sig, toast) = (h.settings, h.toast);
+            h.in_app(|| {
+                spawn(loop_preview_text(
+                    app,
+                    generation,
+                    settings_sig,
+                    "CQ",
+                    100,
+                    toast,
+                ));
+            });
+            h.pump();
+            assert!(h.run_until(20_000, |h| h.texts().len() >= 3).await);
+            h.app.bump_session();
+            let sent = h.recorder.sent.borrow().clone();
+            assert!(sent.iter().all(|t| t.text == "CQ" && t.others.len() <= 2));
+            assert!(sent.iter().any(|t| t.others.len() == 2), "no pile-up");
+            assert!(
+                sent.iter()
+                    .flat_map(|t| t.others.iter())
+                    .all(|other| other.text != "CQ" && !other.text.is_empty())
+            );
+            // The same station calls every time: only the pile-up is new.
+            assert!(sent.windows(2).all(|w| w[0].voice == w[1].voice));
         });
     }
 

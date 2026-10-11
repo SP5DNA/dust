@@ -2,8 +2,9 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use cw_core::{
-    CharSamplingState, FastrandRng, GroupSession, SessionMachine, SessionResult, StationVoice,
-    TrainingSettings, resolve_station,
+    CALLSIGN_TIER_MAX, CharSamplingState, FastrandRng, GroupSession, SessionMachine, SessionResult,
+    StationVoice, TrainingSettings, Transmission, generate_callsign, resolve_pileup,
+    resolve_station,
 };
 use dioxus::prelude::*;
 
@@ -119,6 +120,37 @@ impl AppState {
             // Only reachable if a send were started from inside another; the
             // point is a usable voice, not which one.
             Err(_) => resolve_station(settings, &mut FastrandRng(crate::time::seed_rng())),
+        }
+    }
+
+    /// `text` from `voice`, with whoever else the settings have calling
+    /// across it: other stations sending their own calls, the way a pile-up
+    /// answers a CQ. Drawn afresh each time, like a session's groups.
+    pub fn pileup_for(
+        &self,
+        settings: &TrainingSettings,
+        text: &str,
+        voice: StationVoice,
+    ) -> Transmission {
+        let others = settings.band.stations_max.saturating_sub(1) as usize;
+        if others == 0 {
+            return Transmission::alone(text, voice);
+        }
+        let draw = |rng: &mut FastrandRng| {
+            let calls: Vec<String> = (0..others)
+                .map(|_| generate_callsign(CALLSIGN_TIER_MAX, rng))
+                .collect();
+            resolve_pileup(settings, &voice, text, &calls, rng)
+        };
+        let others = match self.rng.try_borrow_mut() {
+            Ok(mut rng) => draw(&mut rng),
+            // As for `station`: only reachable from inside another send.
+            Err(_) => draw(&mut FastrandRng(crate::time::seed_rng())),
+        };
+        Transmission {
+            text: text.into(),
+            voice,
+            others,
         }
     }
 
@@ -244,6 +276,24 @@ mod tests {
             h.app.apply_band_live(&settings);
             assert_eq!(h.calls(), vec![Call::Band(settings.band_signature())]);
         });
+    }
+
+    #[test]
+    fn one_station_calling_is_sent_alone_and_more_bring_a_pile_up() {
+        let h = Harness::new();
+        let mut settings = test_settings();
+        let voice = h.app.station(&settings);
+        assert!(h.app.pileup_for(&settings, "CQ", voice).others.is_empty());
+        settings.band.stations_min = 4;
+        settings.band.stations_max = 4;
+        let call = h.app.pileup_for(&settings, "CQ", voice);
+        assert_eq!(call.text, "CQ");
+        assert_eq!(call.voice, voice);
+        assert!(
+            (1..=3).contains(&call.others.len()),
+            "{}",
+            call.others.len()
+        );
     }
 
     #[test]

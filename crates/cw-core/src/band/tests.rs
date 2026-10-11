@@ -59,7 +59,6 @@ fn quiet() -> TrainingSettings {
     let mut s = TrainingSettings::default();
     s.band.qrn_enabled = false;
     s.band.noise_enabled = false;
-    s.band.activity_enabled = false;
     s
 }
 
@@ -1137,7 +1136,9 @@ fn a_zero_sample_rate_is_treated_as_one() {
 /// deterministic for a seed.
 #[test]
 fn the_source_is_the_same_band_for_the_same_seed() {
-    let settings = TrainingSettings::default();
+    // A busy band, so the stations are part of what has to repeat.
+    let mut settings = TrainingSettings::default();
+    settings.band.stations_max = crate::settings::STATIONS_MAX;
     let mut a = BandSource::new(SR, &settings, 5);
     let mut b = BandSource::new(SR, &settings, 5);
     let mut c = BandSource::new(SR, &settings, 6);
@@ -1154,8 +1155,7 @@ fn the_source_is_the_same_band_for_the_same_seed() {
     // Before the filter the floor is white: neighbouring samples are
     // uncorrelated. Heard without the other stations, whose tones are
     // pitched by nature.
-    let mut floor = settings;
-    floor.band.activity_enabled = false;
+    let floor = TrainingSettings::default();
     let mut x = vec![0.0f32; 4_096];
     BandSource::new(SR, &floor, 5).fill(&mut x);
     let lag1: f64 = x

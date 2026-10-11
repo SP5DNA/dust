@@ -286,6 +286,9 @@ struct StreamState {
     next_start: f64,
     /// Buffers scheduled and not yet over, with the time each one ends.
     queued: VecDeque<(AudioBufferSourceNode, f64)>,
+    /// A pile-up calling across the send, and the context time it stops: the
+    /// band's own traffic makes room for its callers until then.
+    pileup: Option<(usize, f64)>,
 }
 
 impl BandStream {
@@ -313,6 +316,7 @@ impl BandStream {
             chunk: vec![0.0; chunk],
             next_start: now,
             queued: VecDeque::new(),
+            pileup: None,
         }));
         state.borrow_mut().top_up()?;
         let ticking = Rc::clone(&state);
@@ -327,6 +331,14 @@ impl BandStream {
             state,
             _ticker: ticker,
         })
+    }
+
+    /// `callers` other stations are calling across a send until `until`, on
+    /// the context clock. None at all clears it, as a stopped send does.
+    fn reserve(&self, callers: usize, until: f64) {
+        if let Ok(mut stream) = self.state.try_borrow_mut() {
+            stream.pileup = (callers > 0).then_some((callers, until));
+        }
     }
 
     /// Fade out and stop. Dropping `self` here stops the ticker; the output
@@ -369,6 +381,13 @@ impl StreamState {
         };
         let sample_rate = self.ctx.sample_rate();
         while self.next_start < now + lead {
+            // Each buffer is generated for the moment it will play, so the
+            // pile-up's callers are made room for exactly while they call.
+            let callers = match self.pileup {
+                Some((callers, until)) if self.next_start < until => callers,
+                _ => 0,
+            };
+            self.source.reserve_stations(callers);
             self.source.fill(&mut self.chunk);
             let buffer = self
                 .ctx
@@ -709,6 +728,9 @@ impl MorsePlayer {
         let plan = &planned.wanted;
         let started_at = self.ctx.current_time();
         self.schedule_plan(&planned)?;
+        if let Some(stream) = &self.band.stream {
+            stream.reserve(planned.others.len(), started_at + plan.duration_sec);
+        }
         Ok(PlaybackWait::new(
             plan.duration_sec,
             plan.resolved_char_wpm,
@@ -808,6 +830,9 @@ impl MorseBackend for MorsePlayer {
         self.bump_epoch();
         self.stop_flag.set(true);
         self.release_group_gain();
+        if let Some(stream) = &self.band.stream {
+            stream.reserve(0, 0.0);
+        }
     }
 
     fn shutdown(&mut self) {

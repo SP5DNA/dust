@@ -567,6 +567,12 @@ impl BandSource {
         self.floor.is_silent() && self.atmospherics.is_silent() && self.activity.is_silent()
     }
 
+    /// A pile-up is calling with this many stations besides yours, and they
+    /// count against how many of the band's own may key at once.
+    pub fn reserve_stations(&mut self, callers: usize) {
+        self.activity.reserve(callers);
+    }
+
     pub fn next_sample(&mut self) -> f64 {
         self.floor.next_sample() + self.atmospherics.next_sample() + self.activity.next_sample()
     }
@@ -710,7 +716,6 @@ mod tests {
         let mut settings = TrainingSettings::default();
         settings.band.side_tone_min = 600.0;
         settings.band.side_tone_max = 600.0;
-        settings.band.activity_enabled = false;
         let settings = settings.clamp();
         let mut source = BandSource::new(RATE, &settings, 101);
         let mut receiver = super::super::ReceiverFilter::from_settings(RATE, &settings);

@@ -127,14 +127,14 @@ pub fn BandConditionsCard(
                 min_bound: f64::from(STATIONS_MIN),
                 max_bound: f64::from(STATIONS_MAX),
                 step: 1.0,
-                hint: "How many call at once, drawn afresh for each group. Hold both ends together for the same number every time, or open them up so you never know what you are walking into.".to_string(),
+                hint: "How many call at once, yours included, drawn afresh for each group. At 1 the band is just your station; above that the others call across it, and the band has its own traffic around it — never more than the rest of the count keying at once. Hold both ends together for the same number every time, or open them up so you never know what you are walking into.".to_string(),
                 on_min: move |v| settings.write().set_range_min(RangeSetting::Stations, v),
                 on_max: move |v| settings.write().set_range_max(RangeSetting::Stations, v),
                 on_link: move |on| settings.write().set_range_linked(RangeSetting::Stations, on),
             }
             if s.band.stations_max > STATIONS_MIN {
                 p { class: "muted", style: "margin: 0;",
-                    "The others sit either side of the one you want, further out and a good way under it, and only ever where your filter passes them — copy the strongest, and narrow the filter until the rest drop away."
+                    "The others sit either side of the one you want, further out and a good way under it, and only ever where your filter passes them — copy the strongest, and narrow the filter until the rest drop away. Between groups the band carries on: other stations working each other at their own pitches and speeds, coming and going."
                 }
                 div { class: "field-grid",
                     SliderField {
@@ -205,23 +205,6 @@ pub fn BandConditionsCard(
                 onchange: move |v| settings.write().band.qrn_level = v,
             }
             Switch {
-                title: "Band activity".to_string(),
-                description: "Other stations: faint CW at other pitches, coming and going.".to_string(),
-                checked: s.band.activity_enabled,
-                onchange: move |on| settings.write().band.activity_enabled = on,
-            }
-            SliderField {
-                label: "Busy".to_string(),
-                id: "slider-activity-level".to_string(),
-                value_label: activity_reading(s.band.activity_level),
-                value: s.band.activity_level,
-                min: 0.0,
-                max: 1.0,
-                step: 0.05,
-                disabled: !s.band.activity_enabled,
-                onchange: move |v| settings.write().band.activity_level = v,
-            }
-            Switch {
                 title: "Band noise".to_string(),
                 description: "The steady hiss of the band, through your filter.".to_string(),
                 checked: s.band.noise_enabled,
@@ -246,16 +229,4 @@ pub fn BandConditionsCard(
             }
         }
     }
-}
-
-/// The busy-ness control, in words a ham would use.
-fn activity_reading(level: f64) -> String {
-    match level {
-        l if l <= 0.0 => "Off",
-        l if l < 0.3 => "Quiet",
-        l if l < 0.7 => "Normal",
-        l if l < 0.9 => "Busy",
-        _ => "Contest",
-    }
-    .to_string()
 }

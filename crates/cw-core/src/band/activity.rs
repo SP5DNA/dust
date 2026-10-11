@@ -19,9 +19,10 @@
 //! - **How busy.** Another station is audible in 0.12-0.53 of all one-second
 //!   stretches across the recordings, and inside the passband itself in
 //!   0.10-0.30 of them; tuned to random spots, the seven recordings average
-//!   0.44. The normal band here sits at about 0.3, in the middle of that. A
-//!   quiet band is about 0.05; a contest 0.5-0.7. That is 0.3-0.6 stations
-//!   transmitting per kHz at once on a normal band, about 0.8 in a contest.
+//!   0.44. With one other station allowed to call, the band here sits at
+//!   about 0.3, in the middle of that; with the most, at a contest's 0.5-0.7.
+//!   That is 0.3-0.6 stations transmitting per kHz at once on a normal band,
+//!   about 0.8 in a contest.
 //! - **How loud.** Per 5.86 Hz analysis bin, over the noise in that bin: a
 //!   median of about 22 dB with a spread of 9 dB, from barely there to 50 dB.
 //!   Contest stations run about 8 dB louder.
@@ -37,6 +38,15 @@
 //!   fading, and some of those go away again. Very occasionally something
 //!   sweeps across the band in under a second.
 //!
+//! How many of them there are is the same setting as the pile-up: "stations
+//! calling at once". At one — just the station you are copying — the band is
+//! empty. Above that, never more than the rest of that count are keying at
+//! once within earshot of the filter, and a pile-up's callers come out of the
+//! same count while they call: a station whose turn comes when the band is
+//! full waits for a gap, the way an operator waits for a clear moment. The
+//! more that may call, the busier the band, from an ordinary evening at two
+//! to a contest at the top.
+//!
 //! What it deliberately does not do is crowd the station you are copying. This
 //! is a trainer: inside that station's pitch range nothing else is allowed
 //! within 6 dB of it, and no carrier within 10 dB.
@@ -51,7 +61,7 @@ use super::noise::{REFERENCE_BANDWIDTH_HZ, SIGNAL_RMS, noise_floor_rms};
 use crate::callsign::generate_callsign;
 use crate::morse::morse_for;
 use crate::rng::{FastrandRng, Rng};
-use crate::settings::{BandSettings, TrainingSettings};
+use crate::settings::{BandSettings, STATIONS_MAX, STATIONS_MIN, TrainingSettings};
 
 /// Transmitters that can be on the air at once, carriers included. Busier
 /// than the busiest contest preset ever needs through the widest filter; a
@@ -102,14 +112,11 @@ const GUARD_MARGIN_HZ: f64 = 150.0;
 
 // ----------------------------------------------------------------- arrivals
 
-/// Stations arriving per kHz per minute at the quiet end of the control, in
-/// the middle and at a contest, spread on a log scale in between. Chosen so a
-/// 500 Hz filter hears another station in about 8%, 30% and 53% of one-second
-/// stretches, which is where the recordings put a quiet band, an ordinary one
-/// and a contest.
-const ARRIVALS_QUIET: f64 = 0.55;
+/// Stations arriving per kHz per minute for each station besides yours that
+/// may call. Chosen so that with one, a 500 Hz filter hears another station
+/// in about 30% of one-second stretches, where the recordings put an ordinary
+/// band; with two, about 55%, where they put a contest.
 const ARRIVALS_NORMAL: f64 = 3.5;
-const ARRIVALS_CONTEST: f64 = 7.2;
 
 /// Where stations land: from just above the bottom of the audio passband to
 /// well past the filter. Below about 100 Hz is the other sideband; far above
@@ -233,8 +240,35 @@ pub struct BandActivity {
     next_station: u64,
     next_chirp: u64,
     control_left: u32,
+    /// The most stations that may be keying at once within earshot, and how
+    /// many of those a pile-up is using right now.
+    cap: usize,
+    reserved: usize,
     traffic: Traffic,
     emitters: [Emitter; MAX_EMITTERS],
+}
+
+/// How long a station waits for a clear moment before it gives up and goes
+/// elsewhere, in seconds.
+const GIVE_UP_SEC: f64 = 20.0;
+
+/// What kind of band it is when `others` stations besides yours may call at
+/// once: an ordinary evening's traffic for one, a contest's — louder, faster,
+/// contest exchanges — for the most the setting allows, evenly in between.
+fn level_for(others: u32) -> f64 {
+    let most = STATIONS_MAX - STATIONS_MIN;
+    match others {
+        0 => 0.0,
+        n => 0.5 + 0.5 * f64::from(n.min(most) - 1) / f64::from((most - 1).max(1)),
+    }
+}
+
+/// How many stations arrive per kHz per minute when `others` may call at
+/// once: an ordinary band's worth for each of them, so every step of the
+/// setting is a band audibly busier than the last and the count is one the
+/// band actually reaches.
+fn arrivals_for(others: u32) -> f64 {
+    ARRIVALS_NORMAL * f64::from(others)
 }
 
 /// Where the band is listened to from: which pitches stations may land on,
@@ -245,6 +279,11 @@ struct Tuning {
     high_hz: f64,
     guard_low_hz: f64,
     guard_high_hz: f64,
+    /// Where a station is near enough the filter to be heard, and so to count
+    /// against how many may be keying at once: the passband and half its
+    /// width again either side, where the skirts have it 40-50 dB down.
+    heard_low_hz: f64,
+    heard_high_hz: f64,
     /// The wanted station's key-down level per bin over the reference floor.
     wanted_db: f64,
 }
@@ -259,7 +298,8 @@ impl Tuning {
         let tone_min = finite(band.side_tone_min, defaults.side_tone_min).max(100.0);
         let tone_max = finite(band.side_tone_max, defaults.side_tone_max).max(tone_min);
         let center = tone_min + (tone_max - tone_min) / 2.0;
-        let (_, upper_edge) = passband_edges(center, band.filter_bandwidth_hz);
+        let (lower_edge, upper_edge) = passband_edges(center, band.filter_bandwidth_hz);
+        let half = (upper_edge - lower_edge) / 2.0;
         let high = (center + SPAWN_ABOVE_PITCH_HZ).max(upper_edge + SPAWN_ABOVE_EDGE_HZ);
         // The quietest the wanted station is ever sent, against the floor
         // every level here is measured from.
@@ -270,12 +310,18 @@ impl Tuning {
             high_hz: high.max(SPAWN_LOW_HZ + 500.0),
             guard_low_hz: tone_min - GUARD_MARGIN_HZ,
             guard_high_hz: tone_max + GUARD_MARGIN_HZ,
+            heard_low_hz: lower_edge - half,
+            heard_high_hz: upper_edge + half,
             wanted_db: 20.0 * (wanted_rms / reference_rms()).log10() + bin_over_reference_db(),
         }
     }
 
     fn width_khz(&self) -> f64 {
         (self.high_hz - self.low_hz) / 1_000.0
+    }
+
+    fn heard(&self, hz: f64) -> bool {
+        (self.heard_low_hz..=self.heard_high_hz).contains(&hz)
     }
 
     /// The loudest a transmitter spanning `low..=high` hertz may be: the
@@ -298,25 +344,31 @@ fn reference_rms() -> f64 {
 }
 
 impl BandActivity {
-    pub fn new(sample_rate: u32, level: f64, seed: u64) -> Self {
+    /// The band these settings describe: as busy as the number of stations
+    /// that may call at once allows, and empty when that is only yours.
+    pub fn from_settings(sample_rate: u32, settings: &TrainingSettings, seed: u64) -> Self {
+        let others = settings.band.stations_max.clamp(STATIONS_MIN, STATIONS_MAX) - STATIONS_MIN;
         Self::tuned(
             sample_rate,
-            level,
-            Tuning::from_settings(&TrainingSettings::default()),
+            level_for(others),
+            arrivals_for(others),
+            others as usize,
+            Tuning::from_settings(settings),
             seed,
         )
     }
 
-    pub fn from_settings(sample_rate: u32, settings: &TrainingSettings, seed: u64) -> Self {
-        let level = if settings.band.activity_enabled {
-            settings.band.activity_level
-        } else {
-            0.0
-        };
-        Self::tuned(sample_rate, level, Tuning::from_settings(settings), seed)
-    }
-
-    fn tuned(sample_rate: u32, level: f64, tuning: Tuning, seed: u64) -> Self {
+    /// The band at a busy-ness `level` (0 off, 0.5 an ordinary evening, 1 a
+    /// contest), with `per_khz_minute` stations arriving and at most `cap`
+    /// keying at once within earshot.
+    fn tuned(
+        sample_rate: u32,
+        level: f64,
+        per_khz_minute: f64,
+        cap: usize,
+        tuning: Tuning,
+        seed: u64,
+    ) -> Self {
         let level = if level.is_finite() {
             level.clamp(0.0, 1.0)
         } else {
@@ -325,7 +377,11 @@ impl BandActivity {
         let fs = f64::from(sample_rate.max(1));
         let contest = ((level - 0.5) / 0.5).clamp(0.0, 1.0);
         let random = Draw(seed ^ 0xB4D5_AC71_7174_C0DE);
-        let per_khz_minute = arrivals_per_khz_minute(level);
+        let per_khz_minute = if per_khz_minute.is_finite() {
+            per_khz_minute.max(0.0)
+        } else {
+            0.0
+        };
         let mut band = Self {
             level,
             sample_rate: fs,
@@ -338,6 +394,8 @@ impl BandActivity {
             next_station: u64::MAX,
             next_chirp: u64::MAX,
             control_left: 0,
+            cap,
+            reserved: 0,
             traffic: Traffic::default(),
             emitters: [Emitter::default(); MAX_EMITTERS],
             random,
@@ -358,6 +416,14 @@ impl BandActivity {
     /// moment is still a band — someone will be along.
     pub fn is_silent(&self) -> bool {
         self.level <= 0.0
+    }
+
+    /// A pile-up is calling with `callers` stations besides yours: they come
+    /// out of the count of stations that may key at once until it is over.
+    /// Stations already part way through an over finish it; nobody new starts
+    /// one until there is room.
+    pub fn reserve(&mut self, callers: usize) {
+        self.reserved = callers;
     }
 
     pub fn next_sample(&mut self) -> f64 {
@@ -397,6 +463,41 @@ impl BandActivity {
         let dt = f64::from(CONTROL_SAMPLES) / self.sample_rate;
         for emitter in &mut self.emitters {
             emitter.control(dt, CONTROL_SAMPLES);
+        }
+        self.let_stations_on();
+    }
+
+    /// Stations within earshot keying right now.
+    fn keying_heard(&self) -> usize {
+        self.emitters
+            .iter()
+            .filter(|e| e.on_air() && self.tuning.heard(e.pitch_hz))
+            .count()
+    }
+
+    /// Let stations whose turn has come start their overs, as far as the
+    /// count allows. One out of earshot never waits: it is not one of the
+    /// stations you are hearing.
+    fn let_stations_on(&mut self) {
+        let mut room = self
+            .cap
+            .saturating_sub(self.reserved)
+            .saturating_sub(self.keying_heard());
+        let give_up = (GIVE_UP_SEC * self.sample_rate) as u32;
+        let tuning = self.tuning;
+        for emitter in self.emitters.iter_mut().filter(|e| e.ready) {
+            if !tuning.heard(emitter.pitch_hz) {
+                emitter.go();
+            } else if room > 0 {
+                emitter.go();
+                room -= 1;
+            } else {
+                emitter.waited = emitter.waited.saturating_add(CONTROL_SAMPLES);
+                if emitter.waited >= give_up {
+                    emitter.ready = false;
+                    emitter.overs_left = 0;
+                }
+            }
         }
     }
 
@@ -491,7 +592,8 @@ impl BandActivity {
         };
         station.start(self.random.f64());
         station.enter_phrase(&self.traffic, first);
-        station.begin_over();
+        // On the air as soon as there is room for it.
+        station.ready = true;
         station
     }
 
@@ -602,32 +704,23 @@ impl BandActivity {
             let mut station = self.new_station();
             let overs = usize::from(station.overs_left);
             station.overs_left = (self.random.index(overs) + 1) as u8;
-            // About as long between overs as in them.
-            if self.random.chance(0.5) {
+            // About as long between overs as in them — and only part way
+            // through one if the count leaves room for it.
+            let room = !self.tuning.heard(station.pitch_hz)
+                || self.keying_heard() < self.cap.saturating_sub(self.reserved);
+            if room && self.random.chance(0.5) {
+                station.go();
                 let (first, last) = station.script;
                 let phrase = first + self.random.index((last - first) as usize) as u32;
                 station.enter_phrase(&self.traffic, phrase);
                 station.over_target = (f64::from(station.over_target) * self.random.f64()) as u32;
             } else {
+                station.ready = false;
                 let gap = self.random.between(0.0, OVER_GAP_SEC.1);
                 station.wait = (gap * self.sample_rate).round() as u32 + 1;
             }
             self.place(station);
         }
-    }
-}
-
-/// Arrivals per kHz per minute at `level`: quiet at the bottom, normal in the
-/// middle, contest at the top, multiplying evenly in between.
-fn arrivals_per_khz_minute(level: f64) -> f64 {
-    if level <= 0.0 {
-        return 0.0;
-    }
-    let between = |low: f64, high: f64, t: f64| low * (high / low).powf(t.clamp(0.0, 1.0));
-    if level <= 0.5 {
-        between(ARRIVALS_QUIET, ARRIVALS_NORMAL, level / 0.5)
-    } else {
-        between(ARRIVALS_NORMAL, ARRIVALS_CONTEST, (level - 0.5) / 0.5)
     }
 }
 
@@ -694,6 +787,10 @@ struct Emitter {
     overs_left: u8,
     /// Samples of silence before the next over.
     wait: u32,
+    /// Its turn has come and it is waiting for a clear moment, and for how
+    /// many samples so far.
+    ready: bool,
+    waited: u32,
     /// Samples before a carrier or a sweep goes off; `u64::MAX` is never.
     life_left: u64,
 }
@@ -770,8 +867,11 @@ impl Emitter {
         if self.wait > 0 {
             self.wait -= 1;
             if self.wait == 0 {
-                self.begin_over();
+                self.ready = true;
             }
+            return;
+        }
+        if self.ready {
             return;
         }
         self.over_elapsed = self.over_elapsed.saturating_add(1);
@@ -779,6 +879,18 @@ impl Emitter {
             self.next_element(traffic);
         }
         self.element_left = self.element_left.saturating_sub(1);
+    }
+
+    /// Keying an over right now, gaps between its characters included.
+    fn on_air(&self) -> bool {
+        self.kind == Kind::Keyed && self.overs_left > 0 && self.wait == 0 && !self.ready
+    }
+
+    /// Its turn, and room for it: start the over.
+    fn go(&mut self) {
+        self.ready = false;
+        self.waited = 0;
+        self.begin_over();
     }
 
     fn begin_over(&mut self) {

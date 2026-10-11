@@ -234,14 +234,17 @@ impl MorseBackend for MorsePlayer {
         );
         let armed = self.state.arm();
         let samples = render_send(&planned, settings, self.sample_rate);
-        let playback = Arc::new(TonePlayback::new(
-            samples,
-            self.sample_rate,
-            self.opened_at.elapsed().as_secs_f64(),
-            Arc::clone(&self.qsb),
-            Arc::clone(armed.stop_flag()),
-            Arc::clone(&self.agc),
-        ));
+        let playback = Arc::new(
+            TonePlayback::new(
+                samples,
+                self.sample_rate,
+                self.opened_at.elapsed().as_secs_f64(),
+                Arc::clone(&self.qsb),
+                Arc::clone(armed.stop_flag()),
+                Arc::clone(&self.agc),
+            )
+            .with_callers(planned.others.len()),
+        );
         let finished = playback.finished_flag();
         self.set_tone(Some(playback));
         Ok(PlaybackWait::new(
@@ -619,7 +622,6 @@ mod device_tests {
         // A silent band tears the stream down without complaining.
         settings.band.qrn_enabled = false;
         settings.band.noise_enabled = false;
-        settings.band.activity_enabled = false;
         player.apply_band(&settings).expect("silent band");
         player.shutdown();
     }
@@ -638,7 +640,6 @@ mod device_tests {
         player.agc.store(0.3);
         settings.band.qrn_enabled = false;
         settings.band.noise_enabled = false;
-        settings.band.activity_enabled = false;
         player.apply_band(&settings).expect("silent band");
         assert!(lock_slot(&player.slots.band).is_none());
         assert!(
