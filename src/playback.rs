@@ -470,12 +470,18 @@ mod tests {
     /// "Stations calling" is heard in the preview too: each CQ comes with a
     /// fresh pile-up of as many others as the settings ask for, none of them
     /// sending what the wanted station sends.
+    ///
+    /// Through a wide filter, so there is room for every one of them: the
+    /// default 300 Hz receiver often has room for only one caller beside a
+    /// station a little off the middle of the side-tone range, and drops the
+    /// rest, as a narrow filter does.
     #[test]
     fn the_band_preview_brings_the_pile_up_the_settings_ask_for() {
         run(|| async {
             let mut settings = test_settings();
             settings.band.stations_min = 3;
             settings.band.stations_max = 3;
+            settings.band.filter_width_hz = cw_core::FILTER_WIDTH_MAX;
             let mut h = Harness::with_settings(settings.clone());
             let generation = h.app.takeover_audio(&settings).expect("player");
             let app = h.app.clone();

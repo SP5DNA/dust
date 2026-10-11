@@ -71,11 +71,11 @@ pub use session::{
     SessionTiming, SessionView, answer_length_matches, build_session_result,
 };
 pub use settings::{
-    AutoLevelSettings, BandSettings, CharSetMode, CurriculumSettings, FILTER_BANDWIDTH_MAX,
-    FILTER_BANDWIDTH_MIN, FilterShape, GROUP_REPEAT_MAX, GROUP_REPEAT_MIN, MixedAutoLevelAxis,
-    PILEUP_LEVEL_MAX_DB, PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN,
-    PlaybackSettings, PracticeWindow, RangeSetting, RangeValues, STATIONS_MAX, STATIONS_MIN,
-    SettingsSection, TrainingSettings,
+    AutoLevelSettings, BandSettings, CharSetMode, CurriculumSettings, DEFAULT_FILTER_WIDTH_HZ,
+    FILTER_WIDTH_MAX, FILTER_WIDTH_MIN, FilterShape, GROUP_REPEAT_MAX, GROUP_REPEAT_MIN,
+    MixedAutoLevelAxis, PILEUP_LEVEL_MAX_DB, PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX,
+    PILEUP_SPREAD_MIN, PlaybackSettings, PracticeWindow, RangeSetting, RangeValues, STATIONS_MAX,
+    STATIONS_MIN, SettingsSection, TrainingSettings,
 };
 pub use stats::{
     AccuracyPoint, BigramHeatmap, CharacterDiagnostic, ConfusionEntry, GROUP_START_BIGRAM_TOKEN,

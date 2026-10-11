@@ -14,7 +14,9 @@
 //!
 //! Everything is calibrated against off-air recordings of the 20 m CW band
 //! (KiwiSDR, Hermes-Lite 2 and contest captures), measured the way an
-//! operator would hear them through this receiver's 500 Hz filter:
+//! operator would hear them through a 500 Hz filter — this receiver's old
+//! default, sharp and 500 Hz wide at 3 dB. A narrower receiver hears less of
+//! the same band, as a real one does:
 //!
 //! - **How busy.** Another station is audible in 0.12-0.53 of all one-second
 //!   stretches across the recordings, and inside the passband itself in
@@ -56,7 +58,7 @@
 
 use std::f64::consts::{PI, SQRT_2, TAU};
 
-use super::filter::passband_edges;
+use super::filter::{FilterDesign, passband_edges};
 use super::noise::{REFERENCE_BANDWIDTH_HZ, SIGNAL_RMS, noise_floor_rms};
 use crate::callsign::generate_callsign;
 use crate::morse::morse_for;
@@ -109,6 +111,11 @@ const GUARD_KEYED_DB: f64 = 6.0;
 const GUARD_CARRIER_DB: f64 = 10.0;
 /// How far either side of the wanted station's pitch range the guard reaches.
 const GUARD_MARGIN_HZ: f64 = 150.0;
+
+/// How far down the receiver's response a station still counts as heard, in
+/// decibels. The loudest stations here are 50 dB over the noise per bin, so
+/// 45 dB down they are at most a whisper in it; further out they are gone.
+const HEARD_DB: f64 = -45.0;
 
 // ----------------------------------------------------------------- arrivals
 
@@ -280,8 +287,9 @@ struct Tuning {
     guard_low_hz: f64,
     guard_high_hz: f64,
     /// Where a station is near enough the filter to be heard, and so to count
-    /// against how many may be keying at once: the passband and half its
-    /// width again either side, where the skirts have it 40-50 dB down.
+    /// against how many may be keying at once: wherever the receiver's real
+    /// response is no more than [`HEARD_DB`] down. Past that even the loudest
+    /// station on the band is down at the noise.
     heard_low_hz: f64,
     heard_high_hz: f64,
     /// The wanted station's key-down level per bin over the reference floor.
@@ -298,8 +306,11 @@ impl Tuning {
         let tone_min = finite(band.side_tone_min, defaults.side_tone_min).max(100.0);
         let tone_max = finite(band.side_tone_max, defaults.side_tone_max).max(tone_min);
         let center = tone_min + (tone_max - tone_min) / 2.0;
-        let (lower_edge, upper_edge) = passband_edges(center, band.filter_bandwidth_hz);
-        let half = (upper_edge - lower_edge) / 2.0;
+        // The filter as it is really built: at least wide enough for the
+        // side-tone range, and with the skirts its shape gives it.
+        let design = FilterDesign::from_settings(settings);
+        let (_, upper_edge) = passband_edges(center, design.width_hz());
+        let (heard_low_hz, heard_high_hz) = design.edges_at(HEARD_DB);
         let high = (center + SPAWN_ABOVE_PITCH_HZ).max(upper_edge + SPAWN_ABOVE_EDGE_HZ);
         // The quietest the wanted station is ever sent, against the floor
         // every level here is measured from.
@@ -310,8 +321,8 @@ impl Tuning {
             high_hz: high.max(SPAWN_LOW_HZ + 500.0),
             guard_low_hz: tone_min - GUARD_MARGIN_HZ,
             guard_high_hz: tone_max + GUARD_MARGIN_HZ,
-            heard_low_hz: lower_edge - half,
-            heard_high_hz: upper_edge + half,
+            heard_low_hz,
+            heard_high_hz,
             wanted_db: 20.0 * (wanted_rms / reference_rms()).log10() + bin_over_reference_db(),
         }
     }

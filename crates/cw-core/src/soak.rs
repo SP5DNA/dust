@@ -9,8 +9,8 @@
 
 use crate::machine::{SessionEffect, SessionEvent, SessionMachine, SessionPhase};
 use crate::{
-    AutoLevelCounters, CALLSIGN_TIER_MAX, CALLSIGN_TIER_MIN, CharSetMode, FILTER_BANDWIDTH_MAX,
-    FILTER_BANDWIDTH_MIN, FastrandRng, LEVEL_MIN, PILEUP_LEVEL_MAX_DB, PILEUP_LEVEL_MIN_DB,
+    AutoLevelCounters, CALLSIGN_TIER_MAX, CALLSIGN_TIER_MIN, CharSetMode, FILTER_WIDTH_MAX,
+    FILTER_WIDTH_MIN, FastrandRng, LEVEL_MIN, PILEUP_LEVEL_MAX_DB, PILEUP_LEVEL_MIN_DB,
     PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN, Rng, STATIONS_MAX, STATIONS_MIN, SessionId,
     TrainingSettings, Transmission, align_group, apply_auto_level, build_session_result,
     calculate_group_letter_accuracy, calculate_overall_character_accuracy, compute_char_pool,
@@ -65,12 +65,12 @@ fn wild_settings(rng: &mut FastrandRng) -> TrainingSettings {
     s.band.qrn_level = rng.pick_in_range(-1.0, 4.0);
     s.band.noise_level = rng.pick_in_range(-1.0, 4.0);
     s.band.agc_enabled = rng.f64() < 0.5;
-    s.band.filter_shape = if rng.f64() < 0.5 {
-        crate::settings::FilterShape::Soft
-    } else {
-        crate::settings::FilterShape::Sharp
+    s.band.filter_shape = match rng.usize_in(0, 2) {
+        0 => crate::settings::FilterShape::Soft,
+        1 => crate::settings::FilterShape::Sharp,
+        _ => crate::settings::FilterShape::Peaked,
     };
-    s.band.filter_bandwidth_hz = rng.pick_in_range(-500.0, 6_000.0);
+    s.band.filter_width_hz = rng.pick_in_range(-500.0, 6_000.0);
     s.band.stations_min = rng.usize_in(0, 12) as u32;
     s.band.stations_max = rng.usize_in(0, 12) as u32;
     s.band.pileup_spread_hz = rng.pick_in_range(-100.0, 2_000.0);
@@ -136,9 +136,17 @@ fn check_clamped(s: &TrainingSettings, seed: u64) {
         "seed {seed}"
     );
     assert!(
-        (FILTER_BANDWIDTH_MIN..=FILTER_BANDWIDTH_MAX).contains(&b.filter_bandwidth_hz),
+        (FILTER_WIDTH_MIN..=FILTER_WIDTH_MAX).contains(&b.filter_width_hz),
         "seed {seed}: the receiver came out {} Hz wide",
-        b.filter_bandwidth_hz
+        b.filter_width_hz
+    );
+    // And what is built from it passes the whole side-tone range, however
+    // the two were set, without ever going wider than a receiver is built.
+    let built = crate::band::receiver_width_hz(&once);
+    assert!(
+        built >= b.filter_width_hz && built <= crate::band::MAX_RECEIVER_WIDTH_HZ,
+        "seed {seed}: asked for {} Hz, built {built} Hz",
+        b.filter_width_hz
     );
     assert!(
         (0.0..=1.0).contains(&b.noise_level) && (0.0..=1.0).contains(&b.qrn_level),

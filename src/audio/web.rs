@@ -4,8 +4,8 @@ use std::rc::Rc;
 
 use cw_core::band::{
     AGC_ATTACK_SEC, AGC_COMPRESSOR_KNEE_DB, AGC_RELEASE_SEC, BandMixer, BandSource, FilterDesign,
-    QSB_MIN_GAIN, QSB_PATHS, QSB_SPREAD, RECEIVER_SECTIONS, SOFT_LIMIT_HEADROOM, Section,
-    agc_compressor, agc_knee, qsb_path, soft_limit_curve,
+    MAX_RECEIVER_SECTIONS, QSB_MIN_GAIN, QSB_PATHS, QSB_SPREAD, SOFT_LIMIT_HEADROOM, Section,
+    agc_compressor, agc_knee, qsb_path, receiver_width_hz, soft_limit_curve,
 };
 use cw_core::{
     FilterShape, PlannedTransmission, TrainingSettings, Transmission, plan_transmission,
@@ -156,7 +156,9 @@ impl BandGraph {
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct ReceiverKey {
     pitch_hz: f64,
-    bandwidth_hz: f64,
+    /// The width it is really built at, which the side-tone range can widen
+    /// past the one on the control.
+    width_hz: f64,
     shape: FilterShape,
 }
 
@@ -164,7 +166,7 @@ impl ReceiverKey {
     fn of(settings: &TrainingSettings) -> Self {
         Self {
             pitch_hz: settings.side_tone_center(),
-            bandwidth_hz: settings.band.filter_bandwidth_hz,
+            width_hz: receiver_width_hz(settings),
             shape: settings.band.filter_shape,
         }
     }
@@ -211,10 +213,12 @@ impl ReceiverBank {
             .map_err(|e| format!("receiver output set: {e:?}"))?;
         let mut bank = Self {
             key,
-            sections: Vec::with_capacity(RECEIVER_SECTIONS),
+            sections: Vec::with_capacity(MAX_RECEIVER_SECTIONS),
             output,
         };
         let sample_rate = f64::from(ctx.sample_rate());
+        // Only the design's own sections — eight, or nine with the peak
+        // filter — each one node.
         for section in design.sections(sample_rate) {
             if let Err(e) = bank.add_section(ctx, input, section) {
                 bank.disconnect(input);

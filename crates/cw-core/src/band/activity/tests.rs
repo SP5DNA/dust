@@ -8,7 +8,7 @@
 
 use super::*;
 use crate::band::ReceiverFilter;
-use crate::settings::FILTER_BANDWIDTH_MAX;
+use crate::settings::FILTER_WIDTH_MAX;
 
 /// Rate for the bookkeeping tests, which never listen: a station's dits are
 /// still ten samples long, and an hour of band costs next to nothing.
@@ -36,6 +36,15 @@ fn uncapped(sample_rate: u32, settings: &TrainingSettings, level: f64, seed: u64
 fn calling(stations: u32) -> TrainingSettings {
     let mut s = TrainingSettings::default();
     s.band.stations_max = stations;
+    s.clamp()
+}
+
+/// The same, through the receiver the off-air recordings were measured
+/// through: the old default, a sharp filter 500 Hz wide at 3 dB.
+fn calling_through_500_hz(stations: u32) -> TrainingSettings {
+    let mut s = calling(stations);
+    s.band.filter_width_hz = crate::band::filter::reference_width_hz();
+    s.band.filter_shape = crate::settings::FilterShape::Sharp;
     s.clamp()
 }
 
@@ -402,31 +411,33 @@ fn through_receiver(
         .collect()
 }
 
-/// Three ten-minute sessions with up to `stations` calling at once, through
-/// the default receiver.
-fn heard_with(stations: u32) -> (f64, f64) {
-    let settings = calling(stations);
+/// Three ten-minute sessions of the band `settings` describe, through the
+/// receiver they describe.
+fn heard_with(settings: &TrainingSettings) -> (f64, f64) {
     let center = settings.side_tone_center();
     let seeds = [21, 22, 23];
     let (mut near, mut inside) = (0.0, 0.0);
     for seed in seeds {
-        let band = BandActivity::from_settings(LISTEN_RATE, &settings, seed);
-        let x = through_receiver(band, &settings, LISTEN_RATE, 600.0);
+        let band = BandActivity::from_settings(LISTEN_RATE, settings, seed);
+        let x = through_receiver(band, settings, LISTEN_RATE, 600.0);
         let heard = listen(&x, LISTEN_RATE, LISTEN_POINTS, 0.1, center);
         near += heard.near / seeds.len() as f64;
         inside += heard.inside / seeds.len() as f64;
     }
-    eprintln!("{stations} calling: near {near:.3} inside {inside:.3}");
+    eprintln!(
+        "{} calling, {:?} {:.0} Hz: near {near:.3} inside {inside:.3}",
+        settings.band.stations_max, settings.band.filter_shape, settings.band.filter_width_hz
+    );
     (near, inside)
 }
 
-/// The calibration target. Through the default 500 Hz filter another station
-/// is heard in 0.12-0.53 of one-second stretches on the 20 m recordings, and
-/// inside the passband in 0.10-0.30. With one other station allowed to call,
-/// the band sits in the middle of that.
+/// The calibration target. Through a 500 Hz filter — the one the 20 m
+/// recordings were measured through — another station is heard in 0.12-0.53
+/// of one-second stretches, and inside the passband in 0.10-0.30. With one
+/// other station allowed to call, the band sits in the middle of that.
 #[test]
 fn one_other_station_is_an_ordinary_band() {
-    let (near, inside) = heard_with(2);
+    let (near, inside) = heard_with(&calling_through_500_hz(2));
     assert!((0.15..0.4).contains(&near), "occupied {near:.3}");
     assert!(
         (0.1..0.3).contains(&inside),
@@ -438,9 +449,32 @@ fn one_other_station_is_an_ordinary_band() {
 /// others allowed to call is that band.
 #[test]
 fn two_other_stations_are_a_contest() {
-    let (near, inside) = heard_with(3);
+    let (near, inside) = heard_with(&calling_through_500_hz(3));
     assert!((0.42..0.72).contains(&near), "occupied {near:.3}");
     assert!(inside > 0.35, "inside the passband {inside:.3}");
+}
+
+/// The same band through the default receiver, the peaked 300 Hz filter, is
+/// heard less, because the receiver hears less of it: a typical station has
+/// to be within about 150 Hz of the note to come through 10 dB over the
+/// noise, where the 500 Hz filter let one through from twice as far out. So
+/// with one other station allowed to call, someone is heard in 0.13 of the
+/// stretches rather than 0.34 — still at the bottom of what the recordings
+/// put inside a passband, 0.10 — and every step of the setting is audibly
+/// busier than the last, until with the most calling the band is heard at
+/// least as often as an ordinary evening is through the wide filter: 0.49
+/// measured, against the recordings' 0.3.
+#[test]
+fn through_the_default_receiver_every_step_is_busier() {
+    let heard: Vec<f64> = (2..=STATIONS_MAX)
+        .map(|stations| heard_with(&calling(stations)).0)
+        .collect();
+    assert!(
+        heard.windows(2).all(|w| w[1] > w[0] + 0.05),
+        "a step of the setting was not audibly busier: {heard:?}"
+    );
+    assert!((0.1..0.3).contains(&heard[0]), "ordinary band: {heard:?}");
+    assert!(heard[heard.len() - 1] >= 0.3, "busiest band: {heard:?}");
 }
 
 /// Opening the filter up lets more of the band in: through 2 kHz there are
@@ -449,7 +483,7 @@ fn two_other_stations_are_a_contest() {
 fn a_wider_filter_lets_more_stations_in() {
     let tones = |bandwidth: f64| {
         let mut settings = TrainingSettings::default();
-        settings.band.filter_bandwidth_hz = bandwidth;
+        settings.band.filter_width_hz = bandwidth;
         let settings = settings.clamp();
         let mut total = 0.0;
         for seed in [31, 32] {
@@ -459,7 +493,7 @@ fn a_wider_filter_lets_more_stations_in() {
         }
         total
     };
-    let (narrow, wide) = (tones(500.0), tones(FILTER_BANDWIDTH_MAX));
+    let (narrow, wide) = (tones(500.0), tones(FILTER_WIDTH_MAX));
     eprintln!("tones narrow {narrow:.3} wide {wide:.3}");
     assert!(narrow > 0.0);
     assert!(
@@ -498,36 +532,52 @@ fn one_station_calling_is_an_empty_band() {
 /// within earshot — and the more that may, the busier the band, until at two
 /// the one other station is often there and at the most the band is rarely
 /// empty for long.
+///
+/// The cap is a cap that is reached, not a number nobody hears: the whole
+/// count is keying at once a tenth of the time and more through the 500 Hz
+/// filter. Through the default 300 Hz one, earshot — wherever the receiver
+/// is no more than 45 dB down — is 494 Hz across against that filter's
+/// 880 Hz, so about half as many stations are in it at any moment, and all
+/// of the others being there at once is rarer still: measured, 0.30, 0.15,
+/// 0.048 and 0.028 of the time for two to five calling. There it has to be
+/// reached a fiftieth of the time, half a minute in every twenty-five.
 #[test]
 fn never_more_than_the_rest_of_the_count_key_at_once() {
-    let mut busy = Vec::new();
-    for stations in 2..=STATIONS_MAX {
-        let others = (stations - 1) as usize;
-        let (mut on, mut full) = (0.0, 0.0);
-        let mut most = 0;
-        for seed in [41, 42, 43] {
-            let mut band = BandActivity::from_settings(CENSUS_RATE, &calling(stations), seed);
-            let counts = keying_over(&mut band, 1_200.0);
-            most = most.max(counts.iter().copied().max().unwrap_or(0));
-            let n = counts.len() as f64 * 3.0;
-            on += counts.iter().filter(|c| **c > 0).count() as f64 / n;
-            full += counts.iter().filter(|c| **c >= others).count() as f64 / n;
+    for (receiver, reached) in [(0, 0.02), (1, 0.1)] {
+        let settings = |stations: u32| match receiver {
+            0 => calling(stations),
+            _ => calling_through_500_hz(stations),
+        };
+        let mut busy = Vec::new();
+        for stations in 2..=STATIONS_MAX {
+            let others = (stations - 1) as usize;
+            let (mut on, mut full) = (0.0, 0.0);
+            let mut most = 0;
+            for seed in [41, 42, 43] {
+                let mut band = BandActivity::from_settings(CENSUS_RATE, &settings(stations), seed);
+                let counts = keying_over(&mut band, 1_200.0);
+                most = most.max(counts.iter().copied().max().unwrap_or(0));
+                let n = counts.len() as f64 * 3.0;
+                on += counts.iter().filter(|c| **c > 0).count() as f64 / n;
+                full += counts.iter().filter(|c| **c >= others).count() as f64 / n;
+            }
+            let name = format!(
+                "{stations} calling, {:?}",
+                settings(stations).band.filter_shape
+            );
+            eprintln!("{name}: on {on:.3}, full {full:.3}");
+            assert!(
+                most <= others,
+                "{name}: {most} other stations keyed at once"
+            );
+            assert!(full > reached, "{name}: full only {full:.3} of the time");
+            busy.push(on);
         }
         assert!(
-            most <= others,
-            "{stations} calling: {most} other stations keyed at once"
+            busy.windows(2).all(|w| w[1] > w[0]),
+            "more calling did not make a busier band: {busy:?}"
         );
-        // The cap is a cap that is reached, not a number nobody hears.
-        assert!(
-            full > 0.1,
-            "{stations} calling: full only {full:.3} of the time"
-        );
-        busy.push(on);
     }
-    assert!(
-        busy.windows(2).all(|w| w[1] > w[0]),
-        "more calling did not make a busier band: {busy:?}"
-    );
 }
 
 /// While a pile-up calls, its callers use the band's count: once the overs

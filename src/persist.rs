@@ -598,7 +598,9 @@ mod tests {
     /// on/off choice. The old level and the resonator model's knobs drove a
     /// sound that no longer exists, so they are dropped rather than
     /// reinterpreted — and dropping them must not cost anything else in the
-    /// save.
+    /// save. So is the filter width of those days, `filterBandwidthHz`: a
+    /// width at 3 dB where the control now means 6 dB, it comes back as
+    /// today's default.
     #[test]
     fn saves_from_the_old_receiver_models_still_load() {
         let raw = r#"{"qrmEnabled":false,"qrmLevel":0.75,"qrmProfile":"ringing","charWpmMin":19}"#;
@@ -615,16 +617,21 @@ mod tests {
             "receiverBackgroundOffsetModDepthHz":45,"filterBandwidthHz":250,"qrnLevel":0.4}"#;
         let settings = recover_settings(raw);
         assert!(!settings.band.noise_enabled);
-        assert_eq!(settings.band.filter_bandwidth_hz, 250.0);
+        assert_eq!(
+            settings.band.filter_width_hz,
+            cw_core::DEFAULT_FILTER_WIDTH_HZ
+        );
         assert_eq!(settings.band.qrn_level, 0.4);
-        assert_eq!(settings.band.filter_shape, cw_core::FilterShape::Sharp);
+        assert_eq!(settings.band.filter_shape, cw_core::FilterShape::Peaked);
 
         // And the new ones round-trip.
         let mut fresh = TrainingSettings::default();
         fresh.band.filter_shape = cw_core::FilterShape::Soft;
+        fresh.band.filter_width_hz = 250.0;
         fresh.band.noise_level = 0.8;
         let back = recover_settings(&serde_json::to_string(&fresh).expect("serialize"));
         assert_eq!(back.band.filter_shape, cw_core::FilterShape::Soft);
+        assert_eq!(back.band.filter_width_hz, 250.0);
         assert_eq!(back.band.noise_level, 0.8);
     }
 

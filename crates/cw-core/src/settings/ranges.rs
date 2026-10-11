@@ -172,7 +172,7 @@ impl TrainingSettings {
             band.noise_level,
             band.stations_max,
             band.agc_enabled,
-            band.filter_bandwidth_hz,
+            band.filter_width_hz,
             band.filter_shape,
         )
     }

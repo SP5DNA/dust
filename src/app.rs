@@ -1169,7 +1169,7 @@ mod ui_tests {
             ui.advance(50).await;
             let stored = crate::persist::load_settings();
             assert_eq!((stored.band.stations_min, stored.band.stations_max), (1, 1));
-            assert_eq!(stored.band.filter_shape, cw_core::FilterShape::Sharp);
+            assert_eq!(stored.band.filter_shape, test_settings().band.filter_shape);
             assert!(!ui.has("Pile-up spread"));
         });
     }
