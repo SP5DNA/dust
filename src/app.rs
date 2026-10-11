@@ -69,27 +69,34 @@ impl Preview {
     }
 }
 
+// The web stylesheet, written into the page's `<head>` by `dx bundle`.
+//
+// `dx bundle` does not copy Dioxus.toml [web.resource] style files into the
+// site — Pages then 404s `assets/styles.css` and the UI renders raw — so the
+// sheet has to go through `asset!`. Left at that, though, the `<link>` only
+// went in when the app mounted: the app drew its first frame unstyled and then
+// snapped into place once the sheet arrived. A static-head asset is linked from
+// the head of `index.html` itself, which the browser loads before it paints
+// anything, so the boot screen holds until the app can appear already dressed.
+// Nothing has to insert it at run time.
+#[cfg(feature = "web")]
+const _: Asset = asset!(
+    "/assets/styles.css",
+    AssetOptions::css().with_static_head(true)
+);
+
 fn injected_stylesheet() -> Element {
-    // `dx bundle` does not copy Dioxus.toml [web.resource] style files into
-    // the site — Pages then 404s `assets/styles.css` and the UI renders raw.
-    // `asset!` is what actually puts the sheet next to the wasm.
-    #[cfg(feature = "web")]
+    // Desktop has the sheet inlined in its window head, and the web in the
+    // page head; only mobile needs it put in from here.
+    #[cfg(any(feature = "desktop", feature = "web"))]
     {
-        rsx! {
-            document::Stylesheet {
-                href: asset!("/assets/styles.css")
-            }
-        }
+        rsx! {}
     }
-    #[cfg(all(not(feature = "desktop"), not(feature = "web")))]
+    #[cfg(not(any(feature = "desktop", feature = "web")))]
     {
         rsx! {
             document::Style { { STYLESHEET } }
         }
-    }
-    #[cfg(feature = "desktop")]
-    {
-        rsx! {}
     }
 }
 
