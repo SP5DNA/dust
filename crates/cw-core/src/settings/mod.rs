@@ -35,17 +35,40 @@ impl MixedAutoLevelAxis {
 
 /// The shape of the receiver's CW filter, as a modern rig offers it.
 ///
-/// Both are eight poles and the same width between their 3 dB points; what
-/// differs is the shoulders. Sharp is flat across the top with steep skirts,
-/// and rings audibly on noise and on every element when it is narrow. Soft is
-/// rounded, lets more through either side, and barely rings at all. These are
-/// the SHARP and SOFT filter shapes of Icom's DSP receivers.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// All of them are the same width between their 6 dB points, which is how a
+/// rig's filter width is quoted; what differs is the shoulders. Sharp is flat
+/// across the top with steep skirts, and rings audibly on noise and on every
+/// element when it is narrow. Soft is rounded, lets more through either side,
+/// and barely rings at all. These are the SHARP and SOFT filter shapes of
+/// Icom's DSP receivers. Peaked is Sharp with the rig's audio peak filter
+/// switched in as well: a resonance at the pitch that makes the hiss sing at
+/// the note and leaves a station off the pitch a few decibels weaker.
+///
+/// Peaked is the default: chosen by ear, against the other two at the same
+/// width, as the one that sounds like a receiver rather than a noise
+/// generator.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FilterShape {
     Soft,
-    #[default]
     Sharp,
+    #[default]
+    Peaked,
+}
+
+impl<'de> Deserialize<'de> for FilterShape {
+    /// By name. Anything this version does not know — a shape a later version
+    /// added, or a save edited by hand — comes back as Sharp, the plain IF
+    /// filter every shape is built on, rather than costing the rest of the
+    /// save.
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let name = String::deserialize(deserializer)?;
+        Ok(match name.as_str() {
+            "soft" => Self::Soft,
+            "peaked" => Self::Peaked,
+            _ => Self::Sharp,
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -189,11 +212,16 @@ impl Default for PlaybackSettings {
     }
 }
 
-/// The narrowest and widest the receiver goes, in hertz. The bottom is the
-/// classic narrow CW position; the top is wide open, where the filter stops
-/// being the thing you notice.
-pub const FILTER_BANDWIDTH_MIN: f64 = 150.0;
-pub const FILTER_BANDWIDTH_MAX: f64 = 2_000.0;
+/// The narrowest and widest the receiver's width control goes, in hertz
+/// between the filter's 6 dB points. The bottom is the classic narrow CW
+/// position; the top is wide open, where the filter stops being the thing you
+/// notice.
+pub const FILTER_WIDTH_MIN: f64 = 150.0;
+pub const FILTER_WIDTH_MAX: f64 = 2_000.0;
+/// The receiver's width out of the box: 300 Hz at 6 dB, a rig's usual CW
+/// filter, narrow enough that the hiss rings at the note the way a real
+/// receiver's does.
+pub const DEFAULT_FILTER_WIDTH_HZ: f64 = 300.0;
 
 /// How many stations can be calling at once. One is just the station you want,
 /// on an otherwise empty band; above that the others are QRM. The count is
@@ -252,14 +280,23 @@ pub struct BandSettings {
     /// RF gain, the way contesters often do.
     #[serde(default = "defaults::enabled")]
     pub agc_enabled: bool,
-    /// The receiver's selectivity, in hertz. Everything you hear goes through
-    /// it — the Morse as much as the noise — so narrowing it does what
+    /// The receiver's selectivity: its width in hertz between its 6 dB
+    /// points, the way a rig quotes a CW filter. Everything you hear goes
+    /// through it — the Morse as much as the noise — so narrowing it does what
     /// narrowing a real filter does: less static gets through, the signal
     /// loses a little of its keying sidebands, and the filter rings longer.
-    #[serde(default = "defaults::filter_bandwidth_hz")]
-    pub filter_bandwidth_hz: f64,
+    /// The receiver is built at least wide enough to pass the whole side-tone
+    /// range, whatever is set here ([`crate::band::receiver_width_hz`]).
+    ///
+    /// Older saves held a width at 3 dB, as `filterBandwidthHz`. That key is
+    /// deliberately not read: almost every one of them is the old default
+    /// rather than a choice, and its number meant something else, so they
+    /// come back at the new default.
+    #[serde(default = "defaults::filter_width_hz")]
+    pub filter_width_hz: f64,
     /// Sharp or soft shoulders on that filter, which is what sets how much it
-    /// rings.
+    /// rings — or sharp with the audio peak filter behind it, ringing at the
+    /// note.
     #[serde(default)]
     pub filter_shape: FilterShape,
     /// The fewest stations that can call at once, counting the one you want.
@@ -298,8 +335,8 @@ impl Default for BandSettings {
             noise_enabled: true,
             noise_level: defaults::noise_level(),
             agc_enabled: true,
-            filter_bandwidth_hz: 500.0,
-            filter_shape: FilterShape::Sharp,
+            filter_width_hz: DEFAULT_FILTER_WIDTH_HZ,
+            filter_shape: FilterShape::default(),
             stations_min: STATIONS_MIN,
             stations_max: STATIONS_MIN,
             pileup_spread_hz: 350.0,
@@ -446,8 +483,8 @@ mod defaults {
     pub fn noise_level() -> f64 {
         0.5
     }
-    pub fn filter_bandwidth_hz() -> f64 {
-        500.0
+    pub fn filter_width_hz() -> f64 {
+        super::DEFAULT_FILTER_WIDTH_HZ
     }
     pub fn stations_max() -> u32 {
         super::STATIONS_MIN
@@ -753,7 +790,7 @@ mod invariant_tests {
         s.band.qsb_rate_hz = 9.0;
         s.band.qrn_level = 9.0;
         s.band.noise_level = 9.0;
-        s.band.filter_bandwidth_hz = 90_000.0;
+        s.band.filter_width_hz = 90_000.0;
         s.auto_level.auto_adjust_threshold = 900.0;
         s.auto_level.error_weight_strength = -1.0;
         s.auto_level.char_sampling_coverage_strength = -1.0;
@@ -815,7 +852,7 @@ mod invariant_tests {
             s.band.qsb_rate_hz = bad;
             s.band.qrn_level = bad;
             s.band.noise_level = bad;
-            s.band.filter_bandwidth_hz = bad;
+            s.band.filter_width_hz = bad;
             s.band.pileup_spread_hz = bad;
             s.band.pileup_level_db = bad;
             s.auto_level.auto_adjust_threshold = bad;
@@ -854,7 +891,7 @@ mod invariant_tests {
         assert_eq!(s.band.steepness, 50.0);
         assert_eq!(s.band.envelope_smoothing, 1.0);
         assert_eq!(s.band.noise_level, 1.0);
-        assert_eq!(s.band.filter_bandwidth_hz, FILTER_BANDWIDTH_MAX);
+        assert_eq!(s.band.filter_width_hz, FILTER_WIDTH_MAX);
         assert_eq!(s.playback.extra_word_space_multiplier, 0.1);
         assert_eq!(s.auto_level.auto_adjust_threshold, 100.0);
         assert_eq!(s.auto_level.error_weight_strength, 0.0);
@@ -895,7 +932,7 @@ mod invariant_tests {
             crate::keyer::KeyerMode::default(),
             crate::keyer::KeyerMode::IambicA
         );
-        assert_eq!(FilterShape::default(), FilterShape::Sharp);
+        assert_eq!(FilterShape::default(), FilterShape::Peaked);
         assert_eq!(MixedAutoLevelAxis::default(), MixedAutoLevelAxis::Letters);
         assert_eq!(
             MixedAutoLevelAxis::Letters.flip(),
@@ -963,7 +1000,7 @@ mod invariant_tests {
             |s| s.band.stations_max = 3,
             |s| s.band.volume_min = 0.3,
             |s| s.band.agc_enabled = false,
-            |s| s.band.filter_bandwidth_hz = 250.0,
+            |s| s.band.filter_width_hz = 250.0,
             |s| s.band.filter_shape = FilterShape::Soft,
         ];
         for edit in edits {
@@ -1088,6 +1125,43 @@ mod invariant_tests {
         assert_eq!(settings.band.stations_min, STATIONS_MIN);
         assert_eq!(settings.band.stations_max, 4);
         assert!(!settings.range(RangeSetting::Stations).linked);
+    }
+
+    /// The width used to be stored as `filterBandwidthHz`, a width at 3 dB,
+    /// and nearly every save holds the old 500 Hz default there rather than a
+    /// choice. It is not read: such a save comes back at today's default
+    /// width. The shape is read by name, the peaked one included, and a name
+    /// this build does not know comes back as the plain sharp filter rather
+    /// than costing the save.
+    #[test]
+    fn an_old_filter_width_is_not_carried_over() {
+        let older = serde_json::json!({ "filterBandwidthHz": 500.0, "filterShape": "sharp" });
+        let settings: TrainingSettings =
+            serde_json::from_value(older).expect("an older save should load");
+        assert_eq!(settings.band.filter_width_hz, DEFAULT_FILTER_WIDTH_HZ);
+        assert_eq!(settings.band.filter_shape, FilterShape::Sharp);
+
+        let mut peaked = TrainingSettings::default();
+        peaked.band.filter_shape = FilterShape::Peaked;
+        peaked.band.filter_width_hz = 450.0;
+        let json = serde_json::to_value(&peaked).expect("settings serialize");
+        assert_eq!(json["filterShape"], "peaked");
+        assert_eq!(json["filterWidthHz"], 450.0);
+        let back: TrainingSettings = serde_json::from_value(json).expect("and load back");
+        assert_eq!(back.band.filter_shape, FilterShape::Peaked);
+        assert_eq!(back.band.filter_width_hz, 450.0);
+
+        for unknown in ["notch", "", "SHARP"] {
+            let save = serde_json::json!({ "filterShape": unknown, "stationsMax": 3 });
+            let settings: TrainingSettings =
+                serde_json::from_value(save).expect("an unknown shape should not cost the save");
+            assert_eq!(
+                settings.band.filter_shape,
+                FilterShape::Sharp,
+                "{unknown:?}"
+            );
+            assert_eq!(settings.band.stations_max, 3);
+        }
     }
 
     /// Dragging either end past the other takes the other with it, so the
@@ -1251,7 +1325,7 @@ mod invariant_tests {
         s.band.noise_enabled = false;
         s.band.noise_level = 0.9;
         s.band.agc_enabled = false;
-        s.band.filter_bandwidth_hz = 250.0;
+        s.band.filter_width_hz = 250.0;
         s.band.filter_shape = FilterShape::Soft;
         s.band.stations_min = 2;
         s.band.stations_max = 4;

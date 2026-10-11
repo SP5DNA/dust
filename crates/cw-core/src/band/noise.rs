@@ -63,13 +63,19 @@ pub fn noise_floor_rms(level: f64) -> f64 {
     SIGNAL_RMS * 10f64.powf(-noise_floor_snr_db(level) / 20.0)
 }
 
-/// Signal-to-noise of the floor at `level` as heard through a filter
-/// `bandwidth_hz` wide: the reference figure, improved by however much less
-/// noise the narrower filter lets in. Halve the width, gain 3 dB — which is
-/// the reason to reach for the filter at all.
-pub fn heard_snr_db(level: f64, bandwidth_hz: f64) -> f64 {
-    let bandwidth = if bandwidth_hz.is_finite() && bandwidth_hz > 0.0 {
-        bandwidth_hz
+/// Signal-to-noise of the floor at `level` as heard through a receiver whose
+/// noise bandwidth is `noise_bandwidth_hz`
+/// ([`super::FilterDesign::noise_bandwidth_hz`]): the reference figure,
+/// improved by however much less noise the receiver lets in. Halve the
+/// width, gain 3 dB — which is the reason to reach for the filter at all.
+///
+/// The noise bandwidth rather than the width on the control, because that is
+/// what the hiss actually comes through: the floor is white, so it comes out
+/// of any filter with exactly that many hertz' worth of power, and a soft or
+/// peaked filter lets in less of it than a sharp one the same width.
+pub fn heard_snr_db(level: f64, noise_bandwidth_hz: f64) -> f64 {
+    let bandwidth = if noise_bandwidth_hz.is_finite() && noise_bandwidth_hz > 0.0 {
+        noise_bandwidth_hz
     } else {
         REFERENCE_BANDWIDTH_HZ
     };

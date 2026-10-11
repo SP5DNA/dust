@@ -1,8 +1,8 @@
-use cw_core::band::heard_snr_db;
+use cw_core::band::{FilterDesign, heard_snr_db};
 use cw_core::{
-    FILTER_BANDWIDTH_MAX, FILTER_BANDWIDTH_MIN, FilterShape, PILEUP_LEVEL_MAX_DB,
-    PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN, RangeSetting, STATIONS_MAX,
-    STATIONS_MIN, SettingsSection, TrainingSettings,
+    FILTER_WIDTH_MAX, FILTER_WIDTH_MIN, FilterShape, PILEUP_LEVEL_MAX_DB, PILEUP_LEVEL_MIN_DB,
+    PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN, RangeSetting, STATIONS_MAX, STATIONS_MIN,
+    SettingsSection, TrainingSettings,
 };
 use dioxus::prelude::*;
 
@@ -19,16 +19,26 @@ pub fn BandConditionsCard(
 ) -> Element {
     let s = settings();
     let mut show_help = use_signal(|| false);
+    // The receiver as it is really built: the side-tone range can widen it
+    // past the slider, and its shape decides how much noise it lets in.
+    let receiver = FilterDesign::from_settings(&s);
     // As heard through the filter you have set, so narrowing it visibly buys
     // signal-to-noise — which is the whole reason to reach for it.
     let noise_reading = if s.band.noise_level > 0.0 {
         format!(
             "S/N {:.0} dB",
-            heard_snr_db(s.band.noise_level, s.band.filter_bandwidth_hz)
+            heard_snr_db(s.band.noise_level, receiver.noise_bandwidth_hz())
         )
     } else {
         "Off".to_string()
     };
+    let widened = (receiver.width_hz() > s.band.filter_width_hz + 0.5).then(|| {
+        format!(
+            "{:.0} Hz — widened to {:.0} Hz to pass your pitch range",
+            s.band.filter_width_hz,
+            receiver.width_hz()
+        )
+    });
     rsx! {
         div { class: "card stack-sm",
             div { class: "card-head",
@@ -88,15 +98,19 @@ pub fn BandConditionsCard(
             }
             div { class: "field-grid",
                 SliderField {
-                    label: "Filter width".to_string(),
-                    value_label: format!("{:.0} Hz", s.band.filter_bandwidth_hz),
-                    value: s.band.filter_bandwidth_hz,
-                    min: FILTER_BANDWIDTH_MIN,
-                    max: FILTER_BANDWIDTH_MAX,
+                    label: "Filter width (-6 dB)".to_string(),
+                    id: "slider-filter-width".to_string(),
+                    value_label: format!("{:.0} Hz", s.band.filter_width_hz),
+                    value: s.band.filter_width_hz,
+                    min: FILTER_WIDTH_MIN,
+                    max: FILTER_WIDTH_MAX,
                     step: 10.0,
                     disabled: false,
-                    onchange: move |v| settings.write().band.filter_bandwidth_hz = v,
+                    onchange: move |v| settings.write().band.filter_width_hz = v,
                 }
+            }
+            if let Some(widened) = widened {
+                p { id: "filter-widened", class: "muted", style: "margin: 0;", "{widened}" }
             }
             div { class: "field",
                 span { class: "field-label", "Filter shape" }
@@ -113,10 +127,16 @@ pub fn BandConditionsCard(
                         active: s.band.filter_shape == FilterShape::Soft,
                         onclick: move |_| settings.write().band.filter_shape = FilterShape::Soft,
                     }
+                    Seg {
+                        label: "Peaked".to_string(),
+                        id: "seg-filter-peaked".to_string(),
+                        active: s.band.filter_shape == FilterShape::Peaked,
+                        onclick: move |_| settings.write().band.filter_shape = FilterShape::Peaked,
+                    }
                 }
             }
             p { class: "muted", style: "margin: 0;",
-                "Everything you hear comes through this. Narrow it and less noise gets in and the filter rings longer, but a station off your pitch fades with it. Sharp is a crystal filter's steep skirts and ringing; soft rounds them off and barely rings."
+                "Everything you hear comes through this. Narrow it and less noise gets in and the filter rings longer, but a station off your pitch fades with it. Sharp: a modern DSP filter, flat with steep sides. Soft: rounded like an older crystal filter. Peaked: Sharp plus the rig's audio peak filter — a resonance at your pitch; stations off your pitch come out a few dB weaker."
             }
             LinkedRange {
                 label: "Stations calling".to_string(),
@@ -134,7 +154,7 @@ pub fn BandConditionsCard(
             }
             if s.band.stations_max > STATIONS_MIN {
                 p { class: "muted", style: "margin: 0;",
-                    "The others sit either side of the one you want, further out and a good way under it, and only ever where your filter passes them — copy the strongest, and narrow the filter until the rest drop away. Between groups the band carries on: other stations working each other at their own pitches and speeds, coming and going."
+                    "The others sit either side of the one you want, further out and a good way under it, and only ever where your filter passes them, out onto its skirts — copy the strongest, and narrow the filter until the rest drop away. A narrow filter leaves them little room, so it thins the pile-up: not everyone who calls gets through. Between groups the band carries on: other stations working each other at their own pitches and speeds, coming and going."
                 }
                 div { class: "field-grid",
                     SliderField {

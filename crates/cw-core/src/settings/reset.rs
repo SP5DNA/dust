@@ -66,7 +66,7 @@ impl TrainingSettings {
                 self.band.noise_enabled = d.band.noise_enabled;
                 self.band.noise_level = d.band.noise_level;
                 self.band.agc_enabled = d.band.agc_enabled;
-                self.band.filter_bandwidth_hz = d.band.filter_bandwidth_hz;
+                self.band.filter_width_hz = d.band.filter_width_hz;
                 self.band.filter_shape = d.band.filter_shape;
                 self.band.stations_min = d.band.stations_min;
                 self.band.stations_max = d.band.stations_max;

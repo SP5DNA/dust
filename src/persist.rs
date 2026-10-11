@@ -42,11 +42,16 @@ fn recover_sessions(raw: &str) -> Option<Vec<SessionResult>> {
 /// factory settings back. So fall back to applying the stored keys one at a
 /// time and keeping the ones that still deserialize.
 fn recover_settings(raw: &str) -> TrainingSettings {
-    if let Ok(settings) = serde_json::from_str::<TrainingSettings>(raw) {
+    let Ok(serde_json::Value::Object(mut stored)) = serde_json::from_str::<serde_json::Value>(raw)
+    else {
+        return TrainingSettings::default();
+    };
+    upgrade_receiver(&mut stored);
+    let stored = serde_json::Value::Object(stored);
+    if let Ok(settings) = serde_json::from_value::<TrainingSettings>(stored.clone()) {
         return settings;
     }
-    let Ok(serde_json::Value::Object(stored)) = serde_json::from_str::<serde_json::Value>(raw)
-    else {
+    let serde_json::Value::Object(stored) = stored else {
         return TrainingSettings::default();
     };
     let mut kept = serde_json::Map::new();
@@ -60,6 +65,17 @@ fn recover_settings(raw: &str) -> TrainingSettings {
         }
     }
     serde_json::from_value(serde_json::Value::Object(kept)).unwrap_or_default()
+}
+
+/// A save from before the receiver was quoted by its 6 dB width has no
+/// `filterWidthHz`. Its filter shape named a different receiver — almost
+/// always the old sharp default, stored because every save stores it — so it
+/// is not carried over either: such a save comes back on today's receiver,
+/// shape and width both, rather than keeping one half of the old one.
+fn upgrade_receiver(stored: &mut serde_json::Map<String, serde_json::Value>) {
+    if !stored.contains_key("filterWidthHz") {
+        stored.remove("filterShape");
+    }
 }
 
 fn finalize_settings(mut settings: TrainingSettings) -> TrainingSettings {
@@ -575,6 +591,29 @@ mod tests {
         );
     }
 
+    /// Saves from before the receiver rework all name the old sharp filter,
+    /// because every save stores its shape: they come back on today's
+    /// receiver. A save made since, which chose sharp, keeps it.
+    #[test]
+    fn a_save_from_the_old_receiver_comes_back_on_the_new_one() {
+        let old = r#"{"filterBandwidthHz":500,"filterShape":"sharp","numGroups":7}"#;
+        let settings = recover_settings(old);
+        let fresh = TrainingSettings::default();
+        assert_eq!(settings.band.filter_shape, fresh.band.filter_shape);
+        assert_eq!(settings.band.filter_width_hz, fresh.band.filter_width_hz);
+        assert_eq!(
+            settings.curriculum.num_groups, 7,
+            "the rest of the save is kept"
+        );
+
+        let mut chosen = TrainingSettings::default();
+        chosen.band.filter_shape = cw_core::FilterShape::Sharp;
+        chosen.band.filter_width_hz = 400.0;
+        let back = recover_settings(&serde_json::to_string(&chosen).expect("serialize"));
+        assert_eq!(back.band.filter_shape, cw_core::FilterShape::Sharp);
+        assert_eq!(back.band.filter_width_hz, 400.0);
+    }
+
     #[test]
     fn settings_from_an_older_build_still_load() {
         // No repeat, envelope or theme fields existed then.
@@ -598,7 +637,9 @@ mod tests {
     /// on/off choice. The old level and the resonator model's knobs drove a
     /// sound that no longer exists, so they are dropped rather than
     /// reinterpreted — and dropping them must not cost anything else in the
-    /// save.
+    /// save. So is the filter width of those days, `filterBandwidthHz`: a
+    /// width at 3 dB where the control now means 6 dB, it comes back as
+    /// today's default.
     #[test]
     fn saves_from_the_old_receiver_models_still_load() {
         let raw = r#"{"qrmEnabled":false,"qrmLevel":0.75,"qrmProfile":"ringing","charWpmMin":19}"#;
@@ -615,16 +656,21 @@ mod tests {
             "receiverBackgroundOffsetModDepthHz":45,"filterBandwidthHz":250,"qrnLevel":0.4}"#;
         let settings = recover_settings(raw);
         assert!(!settings.band.noise_enabled);
-        assert_eq!(settings.band.filter_bandwidth_hz, 250.0);
+        assert_eq!(
+            settings.band.filter_width_hz,
+            cw_core::DEFAULT_FILTER_WIDTH_HZ
+        );
         assert_eq!(settings.band.qrn_level, 0.4);
-        assert_eq!(settings.band.filter_shape, cw_core::FilterShape::Sharp);
+        assert_eq!(settings.band.filter_shape, cw_core::FilterShape::Peaked);
 
         // And the new ones round-trip.
         let mut fresh = TrainingSettings::default();
         fresh.band.filter_shape = cw_core::FilterShape::Soft;
+        fresh.band.filter_width_hz = 250.0;
         fresh.band.noise_level = 0.8;
         let back = recover_settings(&serde_json::to_string(&fresh).expect("serialize"));
         assert_eq!(back.band.filter_shape, cw_core::FilterShape::Soft);
+        assert_eq!(back.band.filter_width_hz, 250.0);
         assert_eq!(back.band.noise_level, 0.8);
     }
 

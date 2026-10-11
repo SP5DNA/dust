@@ -1,7 +1,7 @@
 use super::{
-    FILTER_BANDWIDTH_MAX, FILTER_BANDWIDTH_MIN, GROUP_REPEAT_MAX, GROUP_REPEAT_MIN,
-    PILEUP_LEVEL_MAX_DB, PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN, STATIONS_MAX,
-    STATIONS_MIN, TrainingSettings,
+    FILTER_WIDTH_MAX, FILTER_WIDTH_MIN, GROUP_REPEAT_MAX, GROUP_REPEAT_MIN, PILEUP_LEVEL_MAX_DB,
+    PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN, STATIONS_MAX, STATIONS_MIN,
+    TrainingSettings,
 };
 use crate::level::{LEVEL_MIN, max_level_for_len};
 
@@ -54,10 +54,10 @@ impl TrainingSettings {
             self.playback.effective_wpm_max = self.playback.char_wpm_max;
         }
         self.playback.keyer_wpm = self.playback.keyer_wpm.clamp(5.0, 80.0);
-        self.band.filter_bandwidth_hz = self
+        self.band.filter_width_hz = self
             .band
-            .filter_bandwidth_hz
-            .clamp(FILTER_BANDWIDTH_MIN, FILTER_BANDWIDTH_MAX);
+            .filter_width_hz
+            .clamp(FILTER_WIDTH_MIN, FILTER_WIDTH_MAX);
         self.band.stations_min = self.band.stations_min.clamp(STATIONS_MIN, STATIONS_MAX);
         self.band.stations_max = self
             .band
@@ -148,7 +148,7 @@ impl TrainingSettings {
         fix(&mut b.qsb_rate_hz, db.qsb_rate_hz);
         fix(&mut b.qrn_level, db.qrn_level);
         fix(&mut b.noise_level, db.noise_level);
-        fix(&mut b.filter_bandwidth_hz, db.filter_bandwidth_hz);
+        fix(&mut b.filter_width_hz, db.filter_width_hz);
         fix(&mut b.pileup_spread_hz, db.pileup_spread_hz);
         fix(&mut b.pileup_level_db, db.pileup_level_db);
         let (a, da) = (&mut self.auto_level, &d.auto_level);

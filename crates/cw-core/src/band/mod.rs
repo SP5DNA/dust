@@ -42,7 +42,9 @@ pub use agc::{
     agc_compressor_threshold_db, agc_law_db, compressor_curve_db, compressor_makeup_db,
 };
 pub use filter::{
-    FilterDesign, RECEIVER_SECTIONS, ReceiverFilter, Section, mirror_hz, passband_edges,
+    APF_BOOST_DB, APF_WIDTH_HZ, COVERAGE_DB, FilterDesign, MAX_RECEIVER_SECTIONS,
+    MAX_RECEIVER_WIDTH_HZ, ReceiverFilter, Section, Sections, mirror_hz, passband_edges,
+    receiver_width_hz,
 };
 pub use noise::{
     Atmospherics, AudioFloor, BandSource, FLOOR_BELOW_DB, FLOOR_HIGH_PASS_HZ, FLOOR_LOW_PASS_HZ,
@@ -189,8 +191,10 @@ pub fn agc_knee(settings: &TrainingSettings) -> Option<f64> {
     Some(AGC_TRIGGER * floor)
 }
 
-/// [`band_standing_level`] of the default floor alone, through a filter
-/// [`REFERENCE_BANDWIDTH_HZ`] wide. Measured once.
+/// [`band_standing_level`] of the default floor alone, through the reference
+/// filter ([`filter::reference_width_hz`]): a sharp one [`REFERENCE_BANDWIDTH_HZ`]
+/// wide at 3 dB, which is where the knee has always been measured. Measured
+/// once.
 fn reference_floor_level() -> f64 {
     static LEVEL: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
     *LEVEL.get_or_init(|| {
@@ -200,7 +204,8 @@ fn reference_floor_level() -> f64 {
         settings.band.qrn_enabled = false;
         settings.band.stations_min = STATIONS_MIN;
         settings.band.stations_max = STATIONS_MIN;
-        settings.band.filter_bandwidth_hz = REFERENCE_BANDWIDTH_HZ;
+        settings.band.filter_width_hz = filter::reference_width_hz();
+        settings.band.filter_shape = crate::settings::FilterShape::Sharp;
         band_standing_level(FLOOR_MEASURE_RATE, &settings)
     })
 }

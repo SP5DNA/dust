@@ -463,7 +463,7 @@ impl Agc {
 mod tests {
     use super::*;
     use crate::band::{BandMixer, NoiseFloor, ReceiverFilter, agc_knee, noise_floor_rms};
-    use crate::settings::TrainingSettings;
+    use crate::settings::{FILTER_WIDTH_MAX, FilterShape, TrainingSettings};
     use crate::timing::{StationVoice, plan_morse_playback_for};
 
     const SR: u32 = 48_000;
@@ -483,6 +483,15 @@ mod tests {
         s.band.side_tone_max = 600.0;
         s.band.qrn_enabled = false;
         s.band.qsb_enabled = false;
+        s.clamp()
+    }
+
+    /// The same, through the receiver the static and the knee are calibrated
+    /// through: the old default, a sharp filter 500 Hz wide at 3 dB.
+    fn floor_through_500_hz() -> TrainingSettings {
+        let mut s = floor_only();
+        s.band.filter_width_hz = crate::band::filter::reference_width_hz();
+        s.band.filter_shape = FilterShape::Sharp;
         s.clamp()
     }
 
@@ -738,74 +747,112 @@ mod tests {
 
     /// (5): a click that never lasted long enough to be a signal is let go
     /// within a few tens of milliseconds, rather than holding the band down.
+    ///
+    /// The click is calibrated the way the static is, through the 500 Hz
+    /// receiver, and that is where it is caught. Through the default peaked
+    /// 300 Hz one the same cluster comes out 7.5 dB weaker — a narrow filter
+    /// is what takes the edge off a click — and barely reaches the knee; it
+    /// has to be let go there just as soon.
     #[test]
     fn a_short_impulse_does_not_hold_the_band_down() {
-        let settings = floor_only();
-        let knee = agc_knee(&settings).unwrap();
-        let mut agc = Agc::new(SR, knee);
-        let mut floor = NoiseFloor::new(SR, noise_floor_rms(0.5), 3);
-        let mut receiver = ReceiverFilter::from_settings(SR, &settings);
-        // An impulse whose peak through a 500 Hz filter is the default floor's
-        // RMS, the way the static is calibrated; this cluster is five of them
-        // twenty decibels louder, across five milliseconds. Spaced unevenly,
-        // as crackle is: five evenly a millisecond apart are a comb with a
-        // null at every multiple of 200 Hz, the 600 Hz pitch included, and
-        // the receiver would rightly hear next to nothing of them.
-        let unit = noise_floor_rms(0.5) * f64::from(SR) / 1_000.0;
-        let ms = |t: f64| seconds(t / 1_000.0);
-        let hits = [0.0, 0.8, 1.9, 3.1, 4.6].map(|t| ms(1_000.0 + t));
-        let mut gains = Vec::new();
-        for i in 0..ms(1_500.0) {
-            let kick = if hits.contains(&i) { 10.0 * unit } else { 0.0 };
-            let heard = receiver.process(floor.next_sample() + kick);
-            gains.push(agc.next_gain(heard, 0.0));
+        for (settings, caught) in [(floor_through_500_hz(), true), (floor_only(), false)] {
+            let name = format!(
+                "{:?} {:.0} Hz",
+                settings.band.filter_shape, settings.band.filter_width_hz
+            );
+            let knee = agc_knee(&settings).unwrap();
+            let mut agc = Agc::new(SR, knee);
+            let mut floor = NoiseFloor::new(SR, noise_floor_rms(0.5), 3);
+            let mut receiver = ReceiverFilter::from_settings(SR, &settings);
+            // An impulse whose peak through a 500 Hz filter is the default
+            // floor's RMS, the way the static is calibrated; this cluster is
+            // five of them twenty decibels louder, across five milliseconds.
+            // Spaced unevenly, as crackle is: five evenly a millisecond apart
+            // are a comb with a null at every multiple of 200 Hz, the 600 Hz
+            // pitch included, and the receiver would rightly hear next to
+            // nothing of them.
+            let unit = noise_floor_rms(0.5) * f64::from(SR) / 1_000.0;
+            let ms = |t: f64| seconds(t / 1_000.0);
+            let hits = [0.0, 0.8, 1.9, 3.1, 4.6].map(|t| ms(1_000.0 + t));
+            let mut gains = Vec::new();
+            for i in 0..ms(1_500.0) {
+                let kick = if hits.contains(&i) { 10.0 * unit } else { 0.0 };
+                let heard = receiver.process(floor.next_sample() + kick);
+                gains.push(agc.next_gain(heard, 0.0));
+            }
+            assert!(
+                gains[..ms(1_000.0)].iter().all(|g| *g == 1.0),
+                "{name}: the floor alone moved the gain"
+            );
+            let deepest = gains[ms(1_000.0)..].iter().copied().fold(1.0, f64::min);
+            assert!(
+                !caught || db(deepest) < -0.5,
+                "{name}: the cluster should have been caught, deepest {:.2} dB",
+                db(deepest)
+            );
+            let after = gains[ms(1_150.0)];
+            assert!(
+                db(after) >= -1.0,
+                "{name}: 150 ms on the band was still {:.2} dB down",
+                db(after)
+            );
         }
-        assert!(
-            gains[..ms(1_000.0)].iter().all(|g| *g == 1.0),
-            "the floor alone moved the gain"
-        );
-        let deepest = gains[ms(1_000.0)..].iter().copied().fold(1.0, f64::min);
-        assert!(
-            db(deepest) < -0.5,
-            "the cluster should have been caught, deepest {:.2} dB",
-            db(deepest)
-        );
-        let after = gains[ms(1_150.0)];
-        assert!(
-            db(after) >= -1.0,
-            "150 ms on the band was still {:.2} dB down",
-            db(after)
-        );
     }
 
     /// However loud a crash, nothing past the ceiling reaches the audio
     /// stage: the receiver hears it coming and has the gain down before its
     /// first crest is played. Otherwise the loudest strokes on a wide filter
     /// drive the soft limiter flat.
+    ///
+    /// Through the default receiver and through the widest filter of every
+    /// shape. The stroke is sixty decibels over the floor as the static is
+    /// calibrated, through a 500 Hz filter, where it came out fifteen times
+    /// the ceiling; through the default narrow one it comes out five times
+    /// it — a narrow filter takes the edge off a crash — and through the
+    /// widest up to fifty.
     #[test]
     fn the_loudest_crash_is_held_under_the_ceiling() {
-        let settings = floor_only();
-        let mut agc = Agc::new(SR, agc_knee(&settings).unwrap());
-        let mut receiver = ReceiverFilter::from_settings(SR, &settings);
-        // A return stroke sixty decibels over the default floor: ten
-        // impulses across three milliseconds.
-        let unit = noise_floor_rms(0.5) * f64::from(SR) / 1_000.0;
-        let (mut loudest_in, mut loudest_out) = (0.0f64, 0.0f64);
-        for i in 0..SR / 10 {
-            let kick = if (1_000..1_150).contains(&i) && i % 15 == 0 {
-                1_000.0 * unit
-            } else {
-                0.0
-            };
-            let heard = receiver.process(kick);
-            loudest_in = loudest_in.max(heard.abs());
-            loudest_out = loudest_out.max(agc.process(heard, 0.0).abs());
+        let widest = |shape: FilterShape| {
+            let mut s = floor_only();
+            s.band.filter_width_hz = FILTER_WIDTH_MAX;
+            s.band.filter_shape = shape;
+            s.clamp()
+        };
+        for settings in [
+            floor_only(),
+            widest(FilterShape::Sharp),
+            widest(FilterShape::Soft),
+            widest(FilterShape::Peaked),
+        ] {
+            let name = format!(
+                "{:?} {:.0} Hz",
+                settings.band.filter_shape, settings.band.filter_width_hz
+            );
+            let mut agc = Agc::new(SR, agc_knee(&settings).unwrap());
+            let mut receiver = ReceiverFilter::from_settings(SR, &settings);
+            // A return stroke sixty decibels over the default floor: ten
+            // impulses across three milliseconds.
+            let unit = noise_floor_rms(0.5) * f64::from(SR) / 1_000.0;
+            let (mut loudest_in, mut loudest_out) = (0.0f64, 0.0f64);
+            for i in 0..SR / 10 {
+                let kick = if (1_000..1_150).contains(&i) && i % 15 == 0 {
+                    1_000.0 * unit
+                } else {
+                    0.0
+                };
+                let heard = receiver.process(kick);
+                loudest_in = loudest_in.max(heard.abs());
+                loudest_out = loudest_out.max(agc.process(heard, 0.0).abs());
+            }
+            assert!(
+                loudest_in > 4.0 * AGC_CEILING,
+                "{name}: not a loud enough stroke, {loudest_in:.2}"
+            );
+            assert!(
+                loudest_out <= AGC_CEILING * 1.02,
+                "{name}: {loudest_out:.2} reached the audio stage"
+            );
         }
-        assert!(loudest_in > 10.0 * AGC_CEILING, "not a loud enough stroke");
-        assert!(
-            loudest_out <= AGC_CEILING * 1.02,
-            "{loudest_out:.2} reached the audio stage"
-        );
 
         // The band is played exactly the look-ahead late, and untouched when
         // nothing is happening.
@@ -828,6 +875,16 @@ mod tests {
     /// (4): ten minutes of the default band, crashes and all, and the floor
     /// never sags behind them. The old receiver left 5% of the band's quarter
     /// seconds more than 1.5 dB under its own median, 12% at QRN 0.5.
+    ///
+    /// Read off the gain the receiver rides at, the robust gain of each
+    /// quarter second — the median of its 5 ms frames, which a crash's own
+    /// duck cannot drag down but a sag behind it does. That used to be read
+    /// off the band's power instead, which through a 500 Hz filter is steady
+    /// enough to show a sag: the hiss through the default peaked 300 Hz
+    /// receiver, 163 Hz of noise bandwidth, is not. Its quarter seconds swing
+    /// on their own, and with the AGC switched off altogether 2.2% of them
+    /// read more than 1.5 dB under the median, so the power could no longer
+    /// tell a sag from the hiss.
     #[test]
     fn the_floor_does_not_sag_behind_the_static() {
         for (qrn, length, most) in [(0.25, 600, 0.01), (0.5, 300, 0.03)] {
@@ -838,30 +895,28 @@ mod tests {
             // minutes of it quick.
             let rate = crate::band::FLOOR_MEASURE_RATE;
             let mut mixer = BandMixer::new(rate, &settings, 0xC0FFEE);
-            let mut frame = vec![0.0f32; rate as usize / 200];
-            let powers: Vec<f64> = (0..length * 200)
+            let frame = rate as usize / 200;
+            let gains: Vec<f64> = (0..length * 200)
                 .map(|_| {
-                    mixer.fill_background(&mut frame);
-                    frame.iter().map(|s| f64::from(*s).powi(2)).sum()
+                    let mut sum = 0.0;
+                    for _ in 0..frame {
+                        mixer.next_background();
+                        sum += mixer.agc_gain();
+                    }
+                    sum / frame as f64
                 })
                 .collect();
             let median = |mut v: Vec<f64>| {
                 v.sort_by(f64::total_cmp);
                 v[v.len() / 2]
             };
-            // The robust floor of each quarter second: the median of its 5 ms
-            // frames, which a crash cannot drag up but a duck pulls down.
-            let windows: Vec<f64> = powers
+            let windows: Vec<f64> = gains
                 .as_chunks::<50>()
                 .0
                 .iter()
                 .map(|w| median(w.to_vec()))
                 .collect();
-            let middle = median(windows.clone());
-            let sagging = windows
-                .iter()
-                .filter(|w| 10.0 * (**w / middle).log10() < -1.5)
-                .count();
+            let sagging = windows.iter().filter(|w| db(**w) < -1.5).count();
             let share = sagging as f64 / windows.len() as f64;
             assert!(
                 share < most,
@@ -943,6 +998,17 @@ mod tests {
     /// gain, but not a quieter one down: closing the filter or quieting the
     /// band takes noise out from under the knee and leaves the station as
     /// loud as it was.
+    ///
+    /// The knee's floor is the reference floor's: the default noise level
+    /// through the 500 Hz filter. The default receiver, the peaked 300 Hz
+    /// one, lets in 163 Hz of noise bandwidth against its 503 — 4.9 dB less —
+    /// and the narrower hiss peaks a little less high on the follower too, so
+    /// the default band stands 5.8 dB under that floor and its knee is the
+    /// held one. A louder floor raises it by the 11.4 dB three tenths of the
+    /// control add, less the way it had to come up to reach the reference.
+    /// A wide filter lets more noise in and raises it — a sharp one 2 kHz wide
+    /// by 5 dB; the peak filter's resonance holds the noise bandwidth near the
+    /// reference's however wide the IF filter behind it goes.
     #[test]
     fn the_knee_rises_with_a_loud_floor_and_holds_for_a_quiet_one() {
         let knee = |edit: fn(&mut TrainingSettings)| {
@@ -950,33 +1016,44 @@ mod tests {
             edit(&mut s);
             agc_knee(&s.clamp()).unwrap()
         };
+        let held = AGC_TRIGGER * crate::band::reference_floor_level();
         let reference = knee(|_| {});
         let loud = knee(|s| s.band.noise_level = 0.8);
-        let wide = knee(|s| s.band.filter_bandwidth_hz = 2_000.0);
-        let narrow = knee(|s| s.band.filter_bandwidth_hz = 150.0);
+        let wide = knee(|s| s.band.filter_width_hz = FILTER_WIDTH_MAX);
+        let wide_sharp = knee(|s| {
+            s.band.filter_width_hz = FILTER_WIDTH_MAX;
+            s.band.filter_shape = FilterShape::Sharp;
+        });
+        let narrow = knee(|s| s.band.filter_width_hz = 150.0);
         let quiet = knee(|s| s.band.noise_level = 0.1);
         let silent = knee(|s| s.band.noise_enabled = false);
-        // Three tenths of the control is 11.4 dB more floor.
-        let rise = db(loud / reference);
+        // The default band is under the reference floor, by about what the
+        // noise bandwidths say.
+        let under = db(crate::band::reference_floor_level()
+            / crate::band::band_standing_level(crate::band::FLOOR_MEASURE_RATE, &floor_only()));
         assert!(
-            (10.0..13.0).contains(&rise),
-            "a louder floor raised the knee {rise:.1} dB"
-        );
-        assert!(
-            db(wide / reference) > 4.0,
-            "a wide filter left the knee put"
+            (4.5..7.0).contains(&under),
+            "the default floor is {under:.2} dB under"
         );
         // Below the reference floor the knee holds at the reference floor's.
-        // The default band is that floor, heard at another pitch, so it lands
-        // on it to within what three seconds of noise can measure.
-        let held = AGC_TRIGGER * crate::band::reference_floor_level();
-        for other in [narrow, quiet, silent] {
+        for other in [reference, narrow, quiet, silent] {
             assert_eq!(other, held);
         }
+        // Three tenths of the control is 11.4 dB more floor.
+        let rise = db(loud / held) + under;
         assert!(
-            db(reference / held).abs() < 0.5,
-            "the default floor's knee is {:.2} dB off the reference",
-            db(reference / held)
+            (10.0..13.0).contains(&rise),
+            "a louder floor raised the knee {:.1} dB, {rise:.1} dB from the default floor",
+            db(loud / held)
+        );
+        assert!(
+            db(wide_sharp / held) > 4.0,
+            "a wide sharp filter left the knee put"
+        );
+        assert!(
+            wide >= held && db(wide / held) < 2.0,
+            "wide and peaked: {:.2} dB",
+            db(wide / held)
         );
         // And that floor, through the AGC, is left alone.
         let mut s = floor_only();

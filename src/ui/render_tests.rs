@@ -787,8 +787,9 @@ mod interactions {
         ui.open_disclosures();
         assert!(ui.has("QSB slowly fades"), "the help should have opened");
 
-        // The filter shape is a real choice, and it shows which one is in.
-        assert!(ui.has("id=\"seg-filter-sharp\" class=\"seg active\""));
+        // The filter shape is a real choice, and it shows which one is in:
+        // the peaked one out of the box.
+        assert!(ui.has("id=\"seg-filter-peaked\" class=\"seg active\""));
         ui.click("seg-filter-soft");
         assert!(ui.has("id=\"seg-filter-soft\" class=\"seg active\""));
         ui.click("seg-filter-sharp");
@@ -800,13 +801,27 @@ mod interactions {
         ui.click("switch-band-noise");
         ui.type_into("slider-noise-level", "0.5");
         assert!(
-            ui.has("class=\"slider-value\">S/N 21 dB<"),
-            "500 Hz at half level"
+            ui.has("class=\"slider-value\">S/N 23 dB<"),
+            "sharp, 300 Hz, at half level"
         );
-        ui.type_into("slider-filter-width", "250");
+        ui.type_into("slider-filter-width", "600");
         assert!(
-            ui.has("class=\"slider-value\">S/N 24 dB<"),
-            "halving the filter should buy 3 dB"
+            ui.has("class=\"slider-value\">S/N 20 dB<"),
+            "doubling the filter should cost 3 dB"
+        );
+        ui.type_into("slider-filter-width", "300");
+        ui.click("seg-filter-peaked");
+        assert!(
+            ui.has("class=\"slider-value\">S/N 26 dB<"),
+            "the peak filter lets in less noise than its width says"
+        );
+        // Narrower than the side-tone range allows, it says what it is
+        // really built at.
+        assert!(!ui.has("filter-widened"));
+        ui.type_into("slider-filter-width", "150");
+        assert!(
+            ui.has("150 Hz — widened to 233 Hz to pass your pitch range"),
+            "the 400-600 Hz range takes 233 Hz"
         );
         ui.type_into("slider-noise-level", "0");
         assert!(ui.has("class=\"slider-value\">Off<"));
