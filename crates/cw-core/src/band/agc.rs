@@ -23,6 +23,8 @@
 //! leaves the floor sagging for most of a second after every crash. Real
 //! receivers do neither.
 
+use super::dsp::{db_to_gain, gain_to_db};
+
 /// How far above the floor's own peaks the knee sits: a level has to stand
 /// 2.2 times (about 7 dB) above the highest the hiss ordinarily reaches before
 /// the gain moves. The floor alone never gets there, so on an empty band the
@@ -157,10 +159,10 @@ struct CompressorCurve {
 
 impl CompressorCurve {
     fn new(threshold_db: f64, knee_db: f64, ratio: f64) -> Self {
-        let threshold = db_to_amplitude(threshold_db);
+        let threshold = db_to_gain(threshold_db);
         let slope = 1.0 / ratio.max(1.0);
         let knee_end_db = threshold_db + knee_db.max(0.0);
-        let knee_end = db_to_amplitude(knee_end_db);
+        let knee_end = db_to_gain(knee_end_db);
         // The knee's sharpness, found the way the reference implementation
         // finds it: fifteen geometric bisections for the k that makes the
         // knee's decibel slope at its far end equal the ratio's.
@@ -184,11 +186,7 @@ impl CompressorCurve {
 
     fn gain_db(&self, input_db: f64) -> f64 {
         let output_db = if input_db < self.knee_end_db {
-            amplitude_to_db(knee_curve(
-                self.threshold,
-                db_to_amplitude(input_db),
-                self.k,
-            ))
+            amplitude_to_db(knee_curve(self.threshold, db_to_gain(input_db), self.k))
         } else {
             self.knee_end_out_db + self.slope * (input_db - self.knee_end_db)
         };
@@ -214,12 +212,10 @@ fn knee_slope(threshold: f64, x: f64, k: f64) -> f64 {
     rise / (amplitude_to_db(x2) - amplitude_to_db(x))
 }
 
-fn db_to_amplitude(db: f64) -> f64 {
-    10f64.powf(db / 20.0)
-}
-
+/// Decibels from an amplitude, with silence held at −600 dB rather than
+/// minus infinity, so the knee's arithmetic stays finite.
 fn amplitude_to_db(amplitude: f64) -> f64 {
-    20.0 * amplitude.max(1e-30).log10()
+    gain_to_db(amplitude.max(1e-30))
 }
 
 /// The receiver's automatic gain control.
@@ -311,7 +307,7 @@ impl Agc {
             limited: 1.0,
             ceiling: 1.0,
             gain: 1.0,
-            deepest: db_to_amplitude(-AGC_MAX_DUCK_DB),
+            deepest: db_to_gain(-AGC_MAX_DUCK_DB),
             attack: coefficient(AGC_ATTACK_SEC),
             release: coefficient(AGC_RELEASE_SEC),
             limit_release: coefficient(AGC_LIMIT_RELEASE_SEC),

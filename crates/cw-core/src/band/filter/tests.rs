@@ -5,7 +5,7 @@
 use std::f64::consts::{SQRT_2, TAU};
 
 use super::*;
-use crate::band::noise::Gaussian;
+use crate::band::random::Gaussian;
 
 /// Every shape the control offers.
 const ALL_SHAPES: [FilterShape; 3] = [FilterShape::Sharp, FilterShape::Soft, FilterShape::Peaked];
@@ -542,7 +542,7 @@ fn a_filter_ringing_into_silence_comes_to_rest() {
                 filter.process(0.0);
                 let states = filter.resonators[..filter.len]
                     .iter()
-                    .flat_map(|r| [r.s1, r.s2]);
+                    .flat_map(|r| r.state());
                 for state in states {
                     assert!(
                         !state.is_subnormal(),

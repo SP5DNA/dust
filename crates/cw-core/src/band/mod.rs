@@ -31,9 +31,11 @@
 
 mod activity;
 mod agc;
+mod dsp;
 mod filter;
 mod noise;
 mod qsb;
+mod random;
 
 // What the players, the settings screen and the pile-up planner use. The rest
 // is the band's own business.
@@ -108,7 +110,7 @@ pub struct LimiterFeed {
 /// The [`LimiterFeed`] for the browser's compressor set as `setting`.
 pub fn limiter_feed(setting: &CompressorSetting) -> LimiterFeed {
     LimiterFeed {
-        receiver: 10f64.powf(-setting.makeup_db / 20.0) / SOFT_LIMIT_HEADROOM,
+        receiver: dsp::db_to_gain(-setting.makeup_db) / SOFT_LIMIT_HEADROOM,
         audio_floor: 1.0 / SOFT_LIMIT_HEADROOM,
     }
 }

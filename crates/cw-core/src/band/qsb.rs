@@ -14,19 +14,23 @@ pub const QSB_SPREAD: f64 = 1.85;
 /// How many propagation paths the fading is made of.
 pub const QSB_PATHS: usize = 4;
 
-/// Each path's rate, as a multiple of the rate setting, and how much of the
-/// fading it carries.
+/// The rates of the paths a fade is made of, as multiples of its own rate.
 ///
-/// The ratios are deliberately not simple fractions. Four sines at 1, 2 and 3
+/// The ratios are deliberately not simple fractions. Sines at 1, 2 and 3
 /// times a rate come back round together and you are back to a pattern; at
-/// these they do not, so the fading wanders and never repeats.
+/// these they do not, so the fading wanders and never repeats. The band's own
+/// stations fade on the first three.
+pub(super) const MULTIPATH_RATES: [f64; QSB_PATHS] = [1.000, 0.633, 1.471, 2.309];
+
+/// Each path's rate, as a multiple of the rate setting
+/// ([`MULTIPATH_RATES`]), and how much of the fading it carries.
 ///
 /// Weights sum to one, so the swing still spans -1..=1 at its widest and the
 /// depth setting keeps meaning what it meant.
 pub fn qsb_path(index: usize) -> (f64, f64) {
-    const PATHS: [(f64, f64); QSB_PATHS] =
-        [(1.000, 0.40), (0.633, 0.28), (1.471, 0.20), (2.309, 0.12)];
-    PATHS[index.min(QSB_PATHS - 1)]
+    const WEIGHTS: [f64; QSB_PATHS] = [0.40, 0.28, 0.20, 0.12];
+    let index = index.min(QSB_PATHS - 1);
+    (MULTIPATH_RATES[index], WEIGHTS[index])
 }
 
 /// The QSB envelope: how much of the signal is getting through at `t_sec`.

@@ -42,6 +42,7 @@
 
 use std::f64::consts::{PI, TAU};
 
+use super::dsp::{Biquad, db_to_gain, finite_or, gain_to_db};
 use super::noise::REFERENCE_BANDWIDTH_HZ;
 use crate::settings::{
     DEFAULT_FILTER_WIDTH_HZ, FILTER_WIDTH_MAX, FILTER_WIDTH_MIN, FilterShape, TrainingSettings,
@@ -186,7 +187,7 @@ fn half_voltage(shape: FilterShape) -> f64 {
 /// falls steadily from zero offset, so there is one crossing.
 fn prototype_point(shape: FilterShape, db: f64) -> f64 {
     let poles = prototype_poles(shape);
-    let level = 10f64.powf(db.min(0.0) / 20.0);
+    let level = db_to_gain(db.min(0.0));
     let gain = |w: f64| response_of(&poles, None, Complex::new(0.0, w)).abs();
     let (mut inside, mut outside) = (0.0, 1.0);
     while gain(outside) >= level && outside < 1e6 {
@@ -390,7 +391,7 @@ impl FilterDesign {
                 // own stage, the same resonance whatever filter is in front.
                 let a = PI * APF_WIDTH_HZ;
                 poles[IF_POLES] = Complex::new(-a, 0.0);
-                let z = Complex::new(-a * 10f64.powf(APF_BOOST_DB / 20.0), 0.0);
+                let z = Complex::new(-a * db_to_gain(APF_BOOST_DB), 0.0);
                 (IF_POLES + 1, Some(z))
             }
             FilterShape::Sharp | FilterShape::Soft => (IF_POLES, None),
@@ -543,7 +544,7 @@ impl FilterDesign {
     /// The lower one stops at [`LOWEST_EDGE_HZ`], like [`passband_edges`]:
     /// below that is the folded sideband, not more of the passband.
     pub fn edges_at(&self, db: f64) -> (f64, f64) {
-        let level = 10f64.powf(finite_or(db, 0.0).min(0.0) / 20.0);
+        let level = db_to_gain(finite_or(db, 0.0).min(0.0));
         let floor = LOWEST_EDGE_HZ.min(self.pitch_hz);
         let step = self.width_hz / EDGE_STEPS_PER_WIDTH;
         let ceiling = self.pitch_hz + EDGE_REACH_WIDTHS * self.width_hz;
@@ -651,8 +652,8 @@ impl FilterDesign {
                 .map(|(a, b)| turn.mul(*a).add(turn.conj().mul(*b)).abs())
                 .fold(0.0, f64::max);
             let score = PhaseScore::new(
-                20.0 * (loudest / at_pitch).log10(),
-                (20.0 * (at_pitch / power_sum).log10()).abs(),
+                gain_to_db(loudest / at_pitch),
+                gain_to_db(at_pitch / power_sum).abs(),
             );
             // Only a real improvement moves it, so ties keep the plainest
             // phase.
@@ -709,29 +710,30 @@ impl PhaseScore {
 /// sections run.
 #[derive(Clone, Debug)]
 pub struct ReceiverFilter {
-    resonators: [Resonator; MAX_RECEIVER_SECTIONS],
+    resonators: [Biquad; MAX_RECEIVER_SECTIONS],
     len: usize,
     /// Samples until the resonators are next brought to rest
-    /// ([`Resonator::settle`]).
+    /// ([`Biquad::settle`]).
     until_settle: u32,
 }
 
 /// How often, in samples, the resonators are checked for a state that has
 /// died away to nothing. Once a block rather than once a sample, so the
-/// running filter pays for it in one predictable branch.
-const SETTLE_EVERY: u32 = 32;
-/// Where a state counts as nothing: 600 dB under full scale. Even the fastest
+/// running filter pays for it in one predictable branch. Even the fastest
 /// pole of the widest filter at 8 kHz decays only some 400 dB in a block, so
-/// a state is set to zero long before it could reach the subnormal range,
-/// below 10⁻³⁰⁸.
-const SETTLED: f64 = 1e-30;
+/// a state is brought to rest long before it could reach the subnormal range.
+const SETTLE_EVERY: u32 = 32;
 
 impl ReceiverFilter {
     pub fn new(sample_rate: u32, design: &FilterDesign) -> Self {
         let sr = f64::from(sample_rate.max(1));
         let sections = design.sections(sr);
         Self {
-            resonators: sections.slots.map(Resonator::new),
+            resonators: sections.slots.map(|section| {
+                let [b0, b1] = section.feedforward;
+                let [_, a1, a2] = section.feedback;
+                Biquad::new([b0, b1, 0.0], [a1, a2])
+            }),
             len: sections.len,
             until_settle: SETTLE_EVERY,
         }
@@ -760,62 +762,6 @@ impl ReceiverFilter {
     pub fn apply(&mut self, samples: &mut [f32]) {
         for sample in samples {
             *sample = self.process(f64::from(*sample)) as f32;
-        }
-    }
-}
-
-/// One [`Section`], running: transposed direct form II.
-///
-/// The coefficients hold still for the life of the filter — a retune builds a
-/// new one — and in double precision a pole pair this close to the unit circle
-/// is no trouble for it, so the simplest structure the browser's node also
-/// runs is the right one here.
-#[derive(Clone, Copy, Debug)]
-struct Resonator {
-    b0: f64,
-    b1: f64,
-    a1: f64,
-    a2: f64,
-    s1: f64,
-    s2: f64,
-}
-
-impl Resonator {
-    fn new(section: Section) -> Self {
-        let [b0, b1] = section.feedforward;
-        let [_, a1, a2] = section.feedback;
-        Self {
-            b0,
-            b1,
-            a1,
-            a2,
-            s1: 0.0,
-            s2: 0.0,
-        }
-    }
-
-    fn process(&mut self, input: f64) -> f64 {
-        let out = self.b0 * input + self.s1;
-        self.s1 = self.b1 * input - self.a1 * out + self.s2;
-        self.s2 = -self.a2 * out;
-        out
-    }
-
-    /// Bring a resonator that has died away to nothing to rest at zero.
-    ///
-    /// In silence a resonator's state decays towards zero for ever without
-    /// reaching it: a second or two after the last sound it is in the
-    /// subnormal range, where every operation on it takes a microcode assist,
-    /// and rounding there keeps it ringing at the smallest numbers a double
-    /// holds indefinitely. Zero is where it was heading, and stays put.
-    ///
-    /// Both states at once or neither: they hold one ringing between them,
-    /// often as two nearly opposite numbers, and zeroing one alone would hand
-    /// the other a ring of its own — enough, repeated, to keep it going.
-    fn settle(&mut self) {
-        if self.s1.abs() < SETTLED && self.s2.abs() < SETTLED {
-            self.s1 = 0.0;
-            self.s2 = 0.0;
         }
     }
 }
@@ -911,7 +857,7 @@ pub fn receiver_width_hz(settings: &TrainingSettings) -> f64 {
     // a ten-millionth, because where the width just worked out puts the ends
     // exactly at the level, a sideband folding back 140 dB down is no reason
     // to widen it a step.
-    let level = 10f64.powf(COVERAGE_DB / 20.0) * (1.0 - 1e-7);
+    let level = db_to_gain(COVERAGE_DB) * (1.0 - 1e-7);
     let quietest = |width: f64| {
         let design = FilterDesign::new(center, width, shape);
         (0..COVERAGE_POINTS)
@@ -924,7 +870,7 @@ pub fn receiver_width_hz(settings: &TrainingSettings) -> f64 {
     // wider build is only worth the noise it lets in if it nearly does —
     // within half a decibel. Otherwise the width it started from stands.
     let start = width;
-    let nearly = level * 10f64.powf(-NEARLY_PASSES_DB / 20.0);
+    let nearly = level * db_to_gain(-NEARLY_PASSES_DB);
     let mut closest = (f64::NEG_INFINITY, width);
     for _ in 0..COVERAGE_STEPS {
         let level_here = quietest(width);
@@ -944,10 +890,6 @@ pub fn receiver_width_hz(settings: &TrainingSettings) -> f64 {
     } else {
         start
     }
-}
-
-fn finite_or(value: f64, fallback: f64) -> f64 {
-    if value.is_finite() { value } else { fallback }
 }
 
 /// Just enough complex arithmetic for the design.

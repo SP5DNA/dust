@@ -58,11 +58,14 @@
 
 use std::f64::consts::{PI, SQRT_2, TAU};
 
+use super::dsp::{db_to_gain, finite_or, gain_to_db};
 use super::filter::{FilterDesign, passband_edges};
 use super::noise::{REFERENCE_BANDWIDTH_HZ, SIGNAL_RMS, noise_floor_rms};
+use super::qsb::MULTIPATH_RATES;
+use super::random::Draw;
 use crate::callsign::generate_callsign;
 use crate::morse::morse_for;
-use crate::rng::{FastrandRng, Rng};
+use crate::rng::Rng;
 use crate::settings::{BandSettings, STATIONS_MAX, STATIONS_MIN, TrainingSettings};
 
 /// Transmitters that can be on the air at once, carriers included: enough
@@ -223,13 +226,13 @@ const CHIRP_SEC: (f64, f64) = (0.5, 1.0);
 const CHIRP_DB: (f64, f64) = (31.0, 41.0);
 const CHIRP_EDGE_SEC: f64 = 0.05;
 
-/// The fading paths: rates as multiples of a station's own, and weights that
-/// sum to one, so the swing spans -1..=1. Not simple ratios, so the fading
-/// never comes back round.
-const FADE_PATHS: [(f64, f64); 3] = [(1.0, 0.5), (0.633, 0.3), (1.471, 0.2)];
+/// How much of a station's fading each of its paths carries, on the first
+/// of the [`MULTIPATH_RATES`]: weights that sum to one, so the swing spans
+/// -1..=1.
+const FADE_WEIGHTS: [f64; 3] = [0.5, 0.3, 0.2];
 /// The RMS of that sum, for setting a fade by its standard deviation.
 fn fade_rms() -> f64 {
-    (FADE_PATHS.iter().map(|(_, w)| w * w).sum::<f64>() / 2.0).sqrt()
+    (FADE_WEIGHTS.iter().map(|w| w * w).sum::<f64>() / 2.0).sqrt()
 }
 
 /// Background stations, as excitation at audio frequency before the receiver
@@ -256,6 +259,10 @@ pub struct BandActivity {
     traffic: Traffic,
     emitters: [Emitter; MAX_EMITTERS],
 }
+
+/// What the stations turn the band's seed by, so that their draws are never
+/// the noise's over again.
+const STATIONS_SEED: u64 = 0xB4D5_AC71_7174_C0DE;
 
 /// How long a station waits for a clear moment before it gives up and goes
 /// elsewhere, in seconds.
@@ -318,11 +325,8 @@ impl Tuning {
     fn from_settings(settings: &TrainingSettings) -> Self {
         let band = &settings.band;
         let defaults = BandSettings::default();
-        let finite = |value: f64, fallback: f64| {
-            if value.is_finite() { value } else { fallback }
-        };
-        let tone_min = finite(band.side_tone_min, defaults.side_tone_min).max(100.0);
-        let tone_max = finite(band.side_tone_max, defaults.side_tone_max).max(tone_min);
+        let tone_min = finite_or(band.side_tone_min, defaults.side_tone_min).max(100.0);
+        let tone_max = finite_or(band.side_tone_max, defaults.side_tone_max).max(tone_min);
         let center = tone_min + (tone_max - tone_min) / 2.0;
         // The filter as it is really built: at least wide enough for the
         // side-tone range, and with the skirts its shape gives it.
@@ -337,7 +341,7 @@ impl Tuning {
         // receiver takes a few decibels off the ends of the side-tone range,
         // and the guard has to hold there too: the margin is as heard, not as
         // sent.
-        let volume = finite(band.volume_min, defaults.volume_min).clamp(0.1, 1.0);
+        let volume = finite_or(band.volume_min, defaults.volume_min).clamp(0.1, 1.0);
         let receiver = &design;
         let response_over = |low: f64, high: f64| {
             (0..=GUARD_POINTS).map(move |i| {
@@ -355,7 +359,7 @@ impl Tuning {
             guard_high_hz: tone_max + GUARD_MARGIN_HZ,
             heard_low_hz,
             heard_high_hz,
-            wanted_db: 20.0 * (wanted_rms / reference_rms()).log10() + bin_over_reference_db(),
+            wanted_db: gain_to_db(wanted_rms / reference_rms()) + bin_over_reference_db(),
         }
     }
 
@@ -389,6 +393,8 @@ fn reference_rms() -> f64 {
 impl BandActivity {
     /// The band these settings describe, as busy as the number of stations
     /// that may call at once allows; none at all when that is only yours.
+    /// `seed` is the band's own, which the stations turn into one of their
+    /// own.
     pub fn from_settings(sample_rate: u32, settings: &TrainingSettings, seed: u64) -> Option<Self> {
         let others = settings.band.stations_max.clamp(STATIONS_MIN, STATIONS_MAX) - STATIONS_MIN;
         let profile = TrafficProfile::for_others(others)?;
@@ -409,7 +415,7 @@ impl BandActivity {
         let mut band = Self {
             sample_rate: fs,
             tuning,
-            unit: SQRT_2 * reference_rms() * 10f64.powf(-bin_over_reference_db() / 20.0),
+            unit: SQRT_2 * reference_rms() * db_to_gain(-bin_over_reference_db()),
             level_median_db: LEVEL_MEDIAN_DB + CONTEST_LEVEL_RISE_DB * contest,
             wpm_median: WPM_MEDIAN + CONTEST_WPM_RISE * contest,
             station_rate: profile.arrivals_per_khz_minute.max(0.0) * tuning.width_khz() / 60.0,
@@ -421,7 +427,7 @@ impl BandActivity {
             reserved: 0,
             traffic: Traffic::default(),
             emitters: [Emitter::default(); MAX_EMITTERS],
-            random: Draw(seed ^ 0xB4D5_AC71_7174_C0DE),
+            random: Draw::new(seed ^ STATIONS_SEED),
         };
         let contest_share = CONTEST_SHARE.0 + (CONTEST_SHARE.1 - CONTEST_SHARE.0) * contest;
         band.traffic = Traffic::write(contest_share, &mut band.random);
@@ -559,7 +565,7 @@ impl BandActivity {
 
     /// Peak amplitude of a tone `db` per bin over the reference floor.
     fn amplitude(&self, db: f64) -> f64 {
-        self.unit * 10f64.powf(db / 20.0)
+        self.unit * db_to_gain(db)
     }
 
     /// A level from the measured spread, kept under `cap`. One drawn over it
@@ -620,7 +626,7 @@ impl BandActivity {
         let overs = self.random.index(OVERS.1 - OVERS.0 + 1) + OVERS.0;
         let mut station = Emitter {
             kind: Kind::Keyed,
-            draw: Draw(self.random.next_u64()),
+            draw: Draw::new(self.random.next_u64()),
             sample_rate: self.sample_rate,
             pitch_hz: pitch,
             peak: self.amplitude(level_db),
@@ -675,7 +681,7 @@ impl BandActivity {
     fn light_carriers(&mut self) {
         let count = self
             .random
-            .poisson(CARRIERS_PER_KHZ * self.tuning.width_khz());
+            .poisson(CARRIERS_PER_KHZ * self.tuning.width_khz(), 4 * MAX_EMITTERS);
         for _ in 0..count {
             let carrier = self.new_carrier();
             self.place(carrier);
@@ -744,7 +750,9 @@ impl BandActivity {
     /// A band switched on has been going for a while: stations already part
     /// way through their overs, others between them.
     fn populate(&mut self) {
-        let count = self.random.poisson(self.station_rate * MEAN_LIFE_SEC);
+        let count = self
+            .random
+            .poisson(self.station_rate * MEAN_LIFE_SEC, 4 * MAX_EMITTERS);
         for _ in 0..count {
             let mut station = self.new_station();
             let overs = usize::from(station.overs_left);
@@ -1107,8 +1115,9 @@ impl Fade {
     }
 
     fn db(&self, t: f64) -> f64 {
-        let swing: f64 = FADE_PATHS
+        let swing: f64 = MULTIPATH_RATES
             .iter()
+            .zip(FADE_WEIGHTS)
             .zip(&self.phases)
             .map(|((multiple, weight), phase)| {
                 weight * (TAU * self.rate_hz * multiple * t + phase).sin()
@@ -1118,7 +1127,7 @@ impl Fade {
     }
 
     fn gain(&self, t: f64) -> f64 {
-        10f64.powf(self.db(t) / 20.0)
+        db_to_gain(self.db(t))
     }
 }
 
@@ -1297,85 +1306,6 @@ fn contest_caller(own: &str, random: &mut Draw) -> Vec<String> {
         format!("TU 5NN {exchange}"),
         format!("R 5NN {exchange} TU"),
     ]
-}
-
-/// The random numbers: the crate's own generator, as a value small enough to
-/// copy into every transmitter, with the shapes the band needs drawn from it.
-#[derive(Clone, Copy, Debug, Default)]
-struct Draw(u64);
-
-impl Rng for Draw {
-    fn f64(&mut self) -> f64 {
-        let mut inner = FastrandRng(self.0);
-        let value = inner.f64();
-        self.0 = inner.0;
-        value
-    }
-}
-
-impl Draw {
-    fn next_u64(&mut self) -> u64 {
-        (self.f64() * (1u64 << 53) as f64) as u64 ^ self.0.rotate_left(17)
-    }
-
-    fn between(&mut self, low: f64, high: f64) -> f64 {
-        low + (high - low) * self.f64()
-    }
-
-    fn chance(&mut self, p: f64) -> bool {
-        self.f64() < p
-    }
-
-    fn index(&mut self, len: usize) -> usize {
-        if len == 0 {
-            0
-        } else {
-            self.usize_in(0, len - 1)
-        }
-    }
-
-    /// A standard normal deviate, by Box–Muller.
-    fn normal(&mut self) -> f64 {
-        let radius = (-2.0 * (1.0 - self.f64()).ln()).sqrt();
-        radius * (TAU * self.f64()).cos()
-    }
-
-    fn log_normal(&mut self, median: f64, sigma_ln: f64) -> f64 {
-        median * (sigma_ln * self.normal()).exp()
-    }
-
-    /// Log-normal with a different spread either side of the median, for a
-    /// distribution with a long tail on one side only.
-    fn split_log_normal(&mut self, median: f64, (below, above): (f64, f64)) -> f64 {
-        let z = self.normal();
-        median * (z * if z < 0.0 { below } else { above }).exp()
-    }
-
-    /// Exponential waiting time, in samples, to the next arrival of a Poisson
-    /// process at `rate` a second.
-    fn wait(&mut self, rate: f64, sample_rate: f64) -> u64 {
-        if rate.is_nan() || rate <= 0.0 {
-            return u64::MAX;
-        }
-        let wait = -(1.0 - self.f64()).ln() * sample_rate / rate;
-        wait.round().clamp(0.0, 1e15) as u64
-    }
-
-    /// A Poisson count with mean `mean`, by multiplying uniforms (Knuth).
-    /// Bounded, because the means here are a handful at most.
-    fn poisson(&mut self, mean: f64) -> usize {
-        if mean.is_nan() || mean <= 0.0 {
-            return 0;
-        }
-        let limit = (-mean).exp();
-        let mut product = self.f64();
-        let mut count = 0;
-        while product > limit && count < 4 * MAX_EMITTERS {
-            product *= self.f64();
-            count += 1;
-        }
-        count
-    }
 }
 
 #[cfg(test)]

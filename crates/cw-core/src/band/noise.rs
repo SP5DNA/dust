@@ -18,11 +18,13 @@
 //! [`AudioFloor`], the faint wide hiss of the receiver's own audio stage,
 //! which the filter never touches.
 
-use std::f64::consts::{PI, SQRT_2, TAU};
+use std::f64::consts::{PI, SQRT_2};
 
 use super::activity::BandActivity;
-use crate::rng::{FastrandRng, Rng};
-use crate::settings::TrainingSettings;
+use super::dsp::{Biquad, db_to_gain};
+use super::random::{Draw, Gaussian};
+use crate::rng::Rng;
+use crate::settings::{BandSettings, TrainingSettings};
 use crate::timing::DEFAULT_TARGET_GAIN;
 
 /// Key-down RMS of a station at full level: what every signal-to-noise figure
@@ -44,6 +46,25 @@ const NOISE_SNR_LOUD_DB: f64 = 2.0;
 /// switched on.
 pub(crate) const QRN_REFERENCE_NOISE_LEVEL: f64 = 0.5;
 
+/// How loud the band's noise floor is set, from 0 to 1: nothing when it is
+/// switched off, whatever its level says.
+pub fn noise_level(band: &BandSettings) -> f64 {
+    if band.noise_enabled {
+        band.noise_level
+    } else {
+        0.0
+    }
+}
+
+/// How bad the static is set, from 0 to 1: nothing when it is switched off.
+pub fn qrn_level(band: &BandSettings) -> f64 {
+    if band.qrn_enabled {
+        band.qrn_level
+    } else {
+        0.0
+    }
+}
+
 /// Signal-to-noise of the floor at `level`, in decibels in the reference
 /// bandwidth.
 ///
@@ -60,7 +81,7 @@ pub fn noise_floor_rms(level: f64) -> f64 {
     if level.is_nan() || level <= 0.0 {
         return 0.0;
     }
-    SIGNAL_RMS * 10f64.powf(-noise_floor_snr_db(level) / 20.0)
+    SIGNAL_RMS * db_to_gain(-noise_floor_snr_db(level))
 }
 
 /// Signal-to-noise of the floor at `level` as heard through a receiver whose
@@ -80,51 +101,6 @@ pub fn heard_snr_db(level: f64, noise_bandwidth_hz: f64) -> f64 {
         REFERENCE_BANDWIDTH_HZ
     };
     noise_floor_snr_db(level) + 10.0 * (REFERENCE_BANDWIDTH_HZ / bandwidth).log10()
-}
-
-/// Standard normal deviates, by Box–Muller.
-///
-/// The floor has to be Gaussian, not merely random: band noise is the sum of
-/// countless independent sources, and only a Gaussian through a narrow filter
-/// has the Rayleigh envelope — the restless, grainy "shhh" with a pitch —
-/// that a receiver's hiss has. Uniform noise through the same filter comes
-/// out close, but this is exact and costs nothing.
-#[derive(Clone, Debug)]
-pub struct Gaussian {
-    rng: FastrandRng,
-    spare: Option<f64>,
-}
-
-impl Gaussian {
-    pub fn new(seed: u64) -> Self {
-        Self {
-            rng: FastrandRng(seed),
-            spare: None,
-        }
-    }
-
-    pub fn sample(&mut self) -> f64 {
-        if let Some(value) = self.spare.take() {
-            return value;
-        }
-        // 1 − u keeps the logarithm's argument in (0, 1].
-        let radius = (-2.0 * (1.0 - self.rng.f64()).ln()).sqrt();
-        let angle = TAU * self.rng.f64();
-        self.spare = Some(radius * angle.sin());
-        radius * angle.cos()
-    }
-
-    /// A uniform draw from the same stream, for the decisions that are not
-    /// about level.
-    fn uniform(&mut self) -> f64 {
-        self.rng.f64()
-    }
-
-    /// Log-normal around a geometric mean: what the durations and spacings in
-    /// a lightning flash follow.
-    fn log_normal(&mut self, geometric_mean: f64, sigma_ln: f64) -> f64 {
-        geometric_mean * (sigma_ln * self.sample()).exp()
-    }
 }
 
 /// The receiver's noise floor: white Gaussian noise, at a level that comes
@@ -156,13 +132,11 @@ impl NoiseFloor {
         }
     }
 
+    /// The floor for these settings. `seed` is the band's own, which the
+    /// floor turns into one of its own.
     pub fn from_settings(sample_rate: u32, settings: &TrainingSettings, seed: u64) -> Self {
-        let level = if settings.band.noise_enabled {
-            settings.band.noise_level
-        } else {
-            0.0
-        };
-        Self::new(sample_rate, noise_floor_rms(level), seed)
+        let rms = noise_floor_rms(noise_level(&settings.band));
+        Self::new(sample_rate, rms, seed ^ NOISE_FLOOR_SEED)
     }
 
     fn is_silent(&self) -> bool {
@@ -192,9 +166,11 @@ pub const FLOOR_HIGH_PASS_HZ: f64 = 200.0;
 /// receiver's audio stops, so the floor is a hiss rather than a fizz.
 pub const FLOOR_LOW_PASS_HZ: f64 = 2_700.0;
 
-/// What the audio floor's seed is turned by, so that its noise is never the
-/// band's noise over again however the band's seed is chosen.
+/// What each layer turns the band's seed by, so that no two of them ever
+/// play the same noise however the band's seed is chosen.
+const NOISE_FLOOR_SEED: u64 = 0x9E37_79B9_7F4A_7C15;
 const AUDIO_FLOOR_SEED: u64 = 0xF100_D5EE;
+const STATIC_SEED: u64 = 0x51ED_2701;
 
 /// The receiver's own audio stage: a faint, wide hiss that the CW filter
 /// never touches.
@@ -239,7 +215,7 @@ impl AudioFloor {
             // it at unity at the pitch, so a floor this much quieter per
             // sample, through filters of unity passband, has this much less
             // density than the hiss at the note.
-            sigma: white_sigma(sample_rate, rms_in_reference) * 10f64.powf(-FLOOR_BELOW_DB / 20.0),
+            sigma: white_sigma(sample_rate, rms_in_reference) * db_to_gain(-FLOOR_BELOW_DB),
             sections: [
                 Biquad::high_pass(fs, FLOOR_HIGH_PASS_HZ, SQRT_2.recip()),
                 Biquad::low_pass(fs, FLOOR_LOW_PASS_HZ, low_q(1.0)),
@@ -248,15 +224,11 @@ impl AudioFloor {
         }
     }
 
-    /// The floor for these settings. `seed` is the band's own: the floor
-    /// turns it into one of its own, so the two noises are independent.
+    /// The floor for these settings. `seed` is the band's own, which the
+    /// floor turns into one of its own.
     pub fn from_settings(sample_rate: u32, settings: &TrainingSettings, seed: u64) -> Self {
-        let level = if settings.band.noise_enabled {
-            settings.band.noise_level
-        } else {
-            0.0
-        };
-        Self::new(sample_rate, noise_floor_rms(level), seed ^ AUDIO_FLOOR_SEED)
+        let rms = noise_floor_rms(noise_level(&settings.band));
+        Self::new(sample_rate, rms, seed ^ AUDIO_FLOOR_SEED)
     }
 
     fn is_silent(&self) -> bool {
@@ -280,58 +252,6 @@ impl AudioFloor {
         for slot in out {
             *slot = self.next_sample() as f32;
         }
-    }
-}
-
-/// A second-order section, designed in the analogue domain and brought over
-/// by the bilinear transform, prewarped so its corner lands where it was
-/// asked for at any sample rate. Run in transposed direct form II.
-#[derive(Clone, Copy, Debug)]
-struct Biquad {
-    b: [f64; 3],
-    a: [f64; 2],
-    state: [f64; 2],
-}
-
-impl Biquad {
-    /// Unity at DC, falling off above `corner_hz`.
-    fn low_pass(sample_rate: f64, corner_hz: f64, q: f64) -> Self {
-        let k = Self::prewarp(sample_rate, corner_hz);
-        let norm = 1.0 / (1.0 + k / q + k * k);
-        let b0 = k * k * norm;
-        Self::new([b0, 2.0 * b0, b0], k, q, norm)
-    }
-
-    /// Unity at Nyquist, falling off below `corner_hz`.
-    fn high_pass(sample_rate: f64, corner_hz: f64, q: f64) -> Self {
-        let k = Self::prewarp(sample_rate, corner_hz);
-        let norm = 1.0 / (1.0 + k / q + k * k);
-        Self::new([norm, -2.0 * norm, norm], k, q, norm)
-    }
-
-    /// The prewarped corner, K = tan(π·f/fs). A corner at or past Nyquist
-    /// has no digital equivalent, so it is held below it; only a degenerate
-    /// sample rate ever gets there.
-    fn prewarp(sample_rate: f64, corner_hz: f64) -> f64 {
-        let corner = corner_hz.min(0.45 * sample_rate);
-        (PI * corner / sample_rate).tan()
-    }
-
-    /// Both prototypes share the denominator s² + s/Q + 1, which the
-    /// transform turns into this; `norm` makes its leading coefficient one.
-    fn new(b: [f64; 3], k: f64, q: f64, norm: f64) -> Self {
-        Self {
-            b,
-            a: [2.0 * (k * k - 1.0) * norm, (1.0 - k / q + k * k) * norm],
-            state: [0.0; 2],
-        }
-    }
-
-    fn process(&mut self, x: f64) -> f64 {
-        let y = self.b[0] * x + self.state[0];
-        self.state[0] = self.b[1] * x - self.a[0] * y + self.state[1];
-        self.state[1] = self.b[2] * x - self.a[1] * y;
-        y
     }
 }
 
@@ -366,7 +286,7 @@ impl Biquad {
 /// audio callback.
 #[derive(Clone, Debug)]
 pub struct Atmospherics {
-    random: Gaussian,
+    random: Draw,
     sample_rate: f64,
     /// Sample amplitude of an impulse whose peak through the reference filter
     /// equals the reference floor's RMS.
@@ -453,7 +373,7 @@ impl Atmospherics {
         // Rates are spread on a log scale, like the noise control: every step
         // of the slider multiplies the activity rather than adding to it.
         let log_between = |low: f64, high: f64| low * (high / low).powf(level);
-        let mut random = Gaussian::new(seed | 1);
+        let mut random = Draw::new(seed);
         let crackle_rate = if level > 0.0 {
             log_between(CRACKLE_RATE_MIN, CRACKLE_RATE_MAX)
         } else {
@@ -483,13 +403,10 @@ impl Atmospherics {
         }
     }
 
+    /// The static for these settings. `seed` is the band's own, which the
+    /// static turns into one of its own.
     pub fn from_settings(sample_rate: u32, settings: &TrainingSettings, seed: u64) -> Self {
-        let level = if settings.band.qrn_enabled {
-            settings.band.qrn_level
-        } else {
-            0.0
-        };
-        Self::new(sample_rate, level, seed)
+        Self::new(sample_rate, qrn_level(&settings.band), seed ^ STATIC_SEED)
     }
 
     fn is_silent(&self) -> bool {
@@ -520,7 +437,7 @@ impl Atmospherics {
     }
 
     fn amplitude(&self, db: f64) -> f64 {
-        self.unit * 10f64.powf(db / 20.0)
+        self.unit * db_to_gain(db)
     }
 
     fn seconds(&self, sec: f64) -> u32 {
@@ -535,8 +452,8 @@ impl Atmospherics {
 
     fn start_crackle(&mut self) {
         let db =
-            (self.crackle_median_db + CRACKLE_SIGMA_DB * self.random.sample()).min(CRACKLE_CAP_DB);
-        let impulses = 1 + (self.random.uniform() * 4.0) as usize;
+            (self.crackle_median_db + CRACKLE_SIGMA_DB * self.random.normal()).min(CRACKLE_CAP_DB);
+        let impulses = 1 + (self.random.f64() * 4.0) as usize;
         let span = self.seconds(CRACKLE_SPAN_SEC);
         self.start_burst(self.amplitude(db), impulses, span, 1.0);
     }
@@ -546,24 +463,25 @@ impl Atmospherics {
             return;
         };
         let first_db =
-            (self.stroke_median_db + STROKE_SIGMA_DB * self.random.sample()).min(STROKE_CAP_DB);
-        let strokes = if self.random.uniform() < INTRA_CLOUD_SHARE {
+            (self.stroke_median_db + STROKE_SIGMA_DB * self.random.normal()).min(STROKE_CAP_DB);
+        let strokes = if self.random.chance(INTRA_CLOUD_SHARE) {
             0
-        } else if self.random.uniform() < SINGLE_STROKE_SHARE {
+        } else if self.random.chance(SINGLE_STROKE_SHARE) {
             1
         } else {
             let mut count = 2;
-            while count < MAX_STROKES && self.random.uniform() < EXTRA_STROKE_CONTINUE {
+            while count < MAX_STROKES && self.random.chance(EXTRA_STROKE_CONTINUE) {
                 count += 1;
             }
             count
         };
-        let below = K_CHANGE_BELOW_DB.0
-            + (K_CHANGE_BELOW_DB.1 - K_CHANGE_BELOW_DB.0) * self.random.uniform();
+        let below = self
+            .random
+            .between(K_CHANGE_BELOW_DB.0, K_CHANGE_BELOW_DB.1);
         let duration = self.log_normal_clamped(FLASH_SEC, FLASH_LIMITS_SEC);
         // The leader comes first: the first return stroke follows the start of
         // the discharge by a few tens of milliseconds.
-        let first_stroke = 0.005 + 0.025 * self.random.uniform();
+        let first_stroke = self.random.between(0.005, 0.030);
         self.flash_slots[index] = Flash {
             k_left: self.seconds(duration),
             k_wait: 0,
@@ -579,8 +497,8 @@ impl Atmospherics {
         if flash.k_left > 0 {
             flash.k_left -= 1;
             if flash.k_wait == 0 {
-                let jitter = 10f64.powf(K_CHANGE_SIGMA_DB * self.random.sample() / 20.0);
-                let impulses = 1 + (self.random.uniform() * 3.0) as usize;
+                let jitter = db_to_gain(K_CHANGE_SIGMA_DB * self.random.normal());
+                let impulses = 1 + (self.random.f64() * 3.0) as usize;
                 let span = self.seconds(0.001);
                 self.start_burst(flash.k_amp * jitter, impulses, span, 1.0);
                 let gap = self.log_normal_clamped(K_CHANGE_SEC, K_CHANGE_LIMITS_SEC);
@@ -592,18 +510,16 @@ impl Atmospherics {
         if flash.strokes_left > 0 {
             if flash.stroke_wait == 0 {
                 let (fewest, most) = STROKE_IMPULSES;
-                let impulses = self.random.rng.usize_in(fewest, most);
-                let span_sec = STROKE_SPAN_SEC.0
-                    + (STROKE_SPAN_SEC.1 - STROKE_SPAN_SEC.0) * self.random.uniform();
+                let impulses = self.random.usize_in(fewest, most);
+                let span_sec = self.random.between(STROKE_SPAN_SEC.0, STROKE_SPAN_SEC.1);
                 let span = self.seconds(span_sec);
                 // The current in a stroke falls away over its own few
                 // milliseconds: the cluster starts loud and ends some 20 dB
                 // down.
-                let decay = 10f64.powf(-1.0 / (impulses.max(2) - 1) as f64);
+                let decay = db_to_gain(-20.0 / (impulses.max(2) - 1) as f64);
                 self.start_burst(flash.stroke_amp, impulses, span, decay);
-                let fall = STROKE_FALL_DB.0
-                    + (STROKE_FALL_DB.1 - STROKE_FALL_DB.0) * self.random.uniform();
-                flash.stroke_amp *= 10f64.powf(-fall / 20.0);
+                let fall = self.random.between(STROKE_FALL_DB.0, STROKE_FALL_DB.1);
+                flash.stroke_amp *= db_to_gain(-fall);
                 flash.strokes_left -= 1;
                 let gap = self.log_normal_clamped(INTERSTROKE_SEC, INTERSTROKE_LIMITS_SEC);
                 flash.stroke_wait = self.seconds(gap);
@@ -637,31 +553,23 @@ struct Arrivals {
 }
 
 impl Arrivals {
-    fn new(rate: f64, sample_rate: f64, random: &mut Gaussian) -> Self {
-        let mut arrivals = Self { rate, wait: 0 };
-        arrivals.wait = arrivals.draw(sample_rate, random);
-        arrivals
+    fn new(rate: f64, sample_rate: f64, random: &mut Draw) -> Self {
+        Self {
+            rate,
+            wait: random.wait(rate, sample_rate),
+        }
     }
 
     fn is_off(&self) -> bool {
         self.rate <= 0.0
     }
 
-    /// Exponential waiting time to the next arrival, in samples.
-    fn draw(&self, sample_rate: f64, random: &mut Gaussian) -> u64 {
-        if self.is_off() {
-            return u64::MAX;
-        }
-        let wait = -(1.0 - random.uniform()).ln() * sample_rate / self.rate;
-        wait.round().clamp(0.0, 1e15) as u64
-    }
-
-    fn arrived(&mut self, sample_rate: f64, random: &mut Gaussian) -> bool {
+    fn arrived(&mut self, sample_rate: f64, random: &mut Draw) -> bool {
         if self.is_off() {
             return false;
         }
         if self.wait == 0 {
-            self.wait = self.draw(sample_rate, random);
+            self.wait = random.wait(self.rate, sample_rate);
             true
         } else {
             self.wait -= 1;
@@ -682,7 +590,7 @@ struct Burst {
 }
 
 impl Burst {
-    fn step(&mut self, random: &mut Gaussian) -> f64 {
+    fn step(&mut self, random: &mut Draw) -> f64 {
         if self.left == 0 {
             return 0.0;
         }
@@ -690,11 +598,11 @@ impl Burst {
             self.wait -= 1;
             return 0.0;
         }
-        let sign = if random.uniform() < 0.5 { -1.0 } else { 1.0 };
-        let value = sign * self.amplitude * (0.6 + 0.4 * random.uniform());
+        let sign = if random.chance(0.5) { -1.0 } else { 1.0 };
+        let value = sign * self.amplitude * random.between(0.6, 1.0);
         self.amplitude *= self.decay;
         self.left -= 1;
-        self.wait = (random.uniform() * 2.0 * f64::from(self.spacing)) as u32;
+        self.wait = (random.f64() * 2.0 * f64::from(self.spacing)) as u32;
         value
     }
 }
@@ -730,11 +638,14 @@ pub struct BandSource {
 }
 
 impl BandSource {
+    /// The band these settings describe. Each layer turns `seed` into one of
+    /// its own, so the same seed is the same band, and no two layers share
+    /// their noise.
     pub fn new(sample_rate: u32, settings: &TrainingSettings, seed: u64) -> Self {
         Self {
-            floor: NoiseFloor::from_settings(sample_rate, settings, seed ^ 0x9E37_79B9_7F4A_7C15),
-            atmospherics: Atmospherics::from_settings(sample_rate, settings, seed ^ 0x51ED_2701),
-            activity: BandActivity::from_settings(sample_rate, settings, seed ^ 0xAC71_7174),
+            floor: NoiseFloor::from_settings(sample_rate, settings, seed),
+            atmospherics: Atmospherics::from_settings(sample_rate, settings, seed),
+            activity: BandActivity::from_settings(sample_rate, settings, seed),
         }
     }
 
@@ -779,23 +690,6 @@ mod tests {
         assert!(heard_snr_db(0.5, 2_000.0) < reference);
         assert!((heard_snr_db(0.5, f64::NAN) - reference).abs() < 1e-12);
         assert!(heard_snr_db(1.0, 500.0) < heard_snr_db(0.0, 500.0));
-    }
-
-    #[test]
-    fn the_gaussian_is_a_standard_normal() {
-        let mut g = Gaussian::new(3);
-        let n = 200_000;
-        let draws: Vec<f64> = (0..n).map(|_| g.sample()).collect();
-        let mean = draws.iter().sum::<f64>() / f64::from(n);
-        let var = draws.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / f64::from(n);
-        let within_one = draws.iter().filter(|x| x.abs() < 1.0).count() as f64 / f64::from(n);
-        assert!(mean.abs() < 0.01, "mean {mean}");
-        assert!((var - 1.0).abs() < 0.015, "variance {var}");
-        assert!(
-            (within_one - 0.6827).abs() < 0.005,
-            "{within_one} within one sigma"
-        );
-        assert!(draws.iter().all(|x| x.is_finite()));
     }
 
     /// Lightning, as counted by the people who count it: a cloud-to-ground
@@ -990,7 +884,7 @@ mod tests {
     /// A Poisson process arrives at its rate, and an off one never arrives.
     #[test]
     fn arrivals_come_at_their_rate() {
-        let mut random = Gaussian::new(9);
+        let mut random = Draw::new(9);
         let fs = f64::from(SR);
         let mut arrivals = Arrivals::new(50.0, fs, &mut random);
         let seconds = 60;
@@ -1010,17 +904,10 @@ mod tests {
 
     /// The audio floor's gain at `hz`, from its sections' coefficients.
     fn audio_floor_response(floor: &AudioFloor, sample_rate: u32, hz: f64) -> f64 {
-        let w = TAU * hz / f64::from(sample_rate);
-        // |c0 + c1·e^{-jw} + c2·e^{-2jw}|
-        let magnitude = |[c0, c1, c2]: [f64; 3]| {
-            let re = c0 + c1 * w.cos() + c2 * (2.0 * w).cos();
-            let im = -c1 * w.sin() - c2 * (2.0 * w).sin();
-            re.hypot(im)
-        };
         floor
             .sections
             .iter()
-            .map(|s| magnitude(s.b) / magnitude([1.0, s.a[0], s.a[1]]))
+            .map(|s| s.gain_at(f64::from(sample_rate), hz))
             .product()
     }
 

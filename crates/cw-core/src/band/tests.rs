@@ -794,23 +794,38 @@ fn the_filter_decides_how_long_a_crash_rings() {
 
 /// The static is calibrated in absolute terms, so it is the same storm at any
 /// sample rate.
+///
+/// Judged on the crackle: how loud the busiest tenth of 10 ms stretches peaks,
+/// and the median one. A minute's RMS would be the few loudest strokes that
+/// happened to land in it, and swings by ±5 dB from one storm to the next at
+/// the same rate; the crackle is a hundred events a second, and holds to a
+/// decibel. A calibration that missed the sample rate would be 6.8 dB out
+/// between these two.
 #[test]
 fn static_is_as_loud_at_any_sample_rate() {
-    let level = |sample_rate: u32| {
+    let levels = |sample_rate: u32| {
         let settings = at(only_qrn(0.8), 600.0, 500.0, FilterShape::Sharp);
         let mut source = Atmospherics::from_settings(sample_rate, &settings, 31);
         let mut filter = ReceiverFilter::from_settings(sample_rate, &settings);
-        let x: Vec<f32> = (0..sample_rate as usize * 60)
-            .map(|_| filter.process(source.next_sample()) as f32)
+        let block = sample_rate as usize / 100;
+        let mut peaks: Vec<f64> = (0..6_000)
+            .map(|_| {
+                (0..block)
+                    .map(|_| filter.process(source.next_sample()).abs())
+                    .fold(0.0, f64::max)
+            })
             .collect();
-        f64::from(rms(&x))
+        peaks.sort_by(f64::total_cmp);
+        let db = |share: f64| 20.0 * peaks[((peaks.len() - 1) as f64 * share) as usize].log10();
+        [db(0.5), db(0.9)]
     };
-    let (low, high) = (level(44_100), level(96_000));
-    let spread = 20.0 * (low / high).log10();
-    assert!(
-        spread.abs() < 2.0,
-        "44.1 kHz and 96 kHz differ by {spread:.1} dB"
-    );
+    let (low, high) = (levels(44_100), levels(96_000));
+    for (low, high) in low.into_iter().zip(high) {
+        assert!(
+            (low - high).abs() < 2.0,
+            "44.1 kHz at {low:.1} dB and 96 kHz at {high:.1} dB"
+        );
+    }
 }
 
 // ----------------------------------------------------------------- the mixer
