@@ -525,6 +525,12 @@ fn a_narrower_receiver_is_quieter_and_the_agc_does_not_undo_it() {
     assert!(quieter > 6.0, "narrowing only bought {quieter:.1} dB");
 }
 
+/// A steady tone of `amplitude` at 600 Hz, `i` samples in: a station keyed
+/// down, as the AGC hears it.
+fn tone(amplitude: f64, i: usize) -> f64 {
+    amplitude * (TAU * 600.0 * i as f64 / f64::from(SR)).sin()
+}
+
 /// A receiver's gain answers to everything reaching it, the signal included,
 /// and it holds for as long as the signal does: the band sits the same
 /// distance down from the start of a send to its end, then comes back.
@@ -532,17 +538,16 @@ fn a_narrower_receiver_is_quieter_and_the_agc_does_not_undo_it() {
 fn a_loud_send_rides_the_gain_down_too() {
     let settings = only_noise(0.3);
     let mut mixer = BandMixer::new(SR, &settings, 7);
-    let mut buf = vec![0.0f32; SR as usize / 4];
-    mixer.note_send_level(0.0);
-    mixer.fill_background(&mut buf);
-    assert_eq!(mixer.agc_gain(), 1.0, "a quiet band should be left alone");
-    mixer.note_send_level(1.0);
-    let held: Vec<f64> = (0..16)
-        .map(|_| {
-            mixer.fill_background(&mut buf);
-            mixer.agc_gain()
-        })
-        .collect();
+    // A quarter second under a send of `amplitude`; the gain it ends on.
+    let quarter = |mixer: &mut BandMixer, amplitude: f64| {
+        (0..SR as usize / 4).fold(1.0, |_, i| mixer.next(tone(amplitude, i)).gain)
+    };
+    assert_eq!(
+        quarter(&mut mixer, 0.0),
+        1.0,
+        "a quiet band should be left alone"
+    );
+    let held: Vec<f64> = (0..16).map(|_| quarter(&mut mixer, 1.0)).collect();
     assert!(
         held.iter().all(|g| *g < 0.8),
         "a send at full scale should pull the gain down: {held:?}"
@@ -554,21 +559,82 @@ fn a_loud_send_rides_the_gain_down_too() {
         20.0 * (high / low).log10() < 0.2,
         "the duck should hold steady under the send: {held:?}"
     );
-    mixer.note_send_level(0.0);
+    let mut back = 0.0;
     for _ in 0..6 {
-        mixer.fill_background(&mut buf);
+        back = quarter(&mut mixer, 0.0);
     }
     assert!(
-        mixer.agc_gain() > 0.95,
-        "the band should be back after the send, at {:.2}",
-        mixer.agc_gain()
+        back > 0.95,
+        "the band should be back after the send, at {back:.2}"
     );
-    // A nonsense level is ignored rather than wedging the AGC.
+    // A nonsense sample is ignored rather than wedging the AGC.
     let mut mixer = BandMixer::new(SR, &settings, 7);
-    mixer.note_send_level(f64::NAN);
-    let mut buf = vec![0.0f32; 4_800];
-    mixer.fill_background(&mut buf);
-    assert!(buf.iter().all(|s| s.is_finite()) && mixer.agc_gain().is_finite());
+    for _ in 0..4_800 {
+        let received = mixer.next(f64::NAN);
+        assert!(received.band.is_finite() && received.gain.is_finite());
+    }
+}
+
+/// The send is ducked with the band sample by sample, from its first
+/// element: the gain it rides never jumps.
+///
+/// The native player used to hand the gain from the band to the send once a
+/// callback, and the send's level back a callback late: every send began a
+/// buffer unducked and then stepped down by the whole duck in one sample,
+/// in the middle of its first element.
+#[test]
+fn the_send_rides_the_gain_without_a_step() {
+    let settings = only_noise(0.3);
+    let mut mixer = BandMixer::new(SR, &settings, 7);
+    for _ in 0..SR / 2 {
+        mixer.next(0.0);
+    }
+    let start = SR as usize / 2;
+    let gains: Vec<f64> = (0..SR as usize)
+        .map(|i| mixer.next(if i < start { 0.0 } else { tone(1.0, i) }).gain)
+        .collect();
+    let ducked = 20.0 * gains[gains.len() - 1].log10();
+    assert!(
+        ducked < -3.0,
+        "the send never ducked the band: {ducked:.2} dB"
+    );
+    // Within a few milliseconds of the first element it is down to the duck.
+    let settled = 20.0 * gains[start + SR as usize / 100].log10();
+    assert!(
+        (settled - ducked).abs() < 1.0,
+        "10 ms into the send the gain was {settled:.2} dB, then {ducked:.2} dB"
+    );
+    let biggest = gains
+        .windows(2)
+        .map(|w| (20.0 * (w[1] / w[0]).log10()).abs())
+        .fold(0.0_f64, f64::max);
+    assert!(
+        biggest < 0.1,
+        "the gain stepped {biggest:.2} dB between two samples"
+    );
+}
+
+/// A band rebuilt under a send carries the receiver's gain on rather than
+/// opening it wide and ducking the station afresh.
+#[test]
+fn a_rebuilt_band_carries_the_gain_on() {
+    let settings = only_noise(0.3);
+    let mut old = BandMixer::new(SR, &settings, 7);
+    let mut gain = 1.0;
+    for i in 0..SR as usize / 2 {
+        gain = old.next(tone(1.0, i)).gain;
+    }
+    assert!(
+        gain < 0.8,
+        "the send should have ducked the band: {gain:.2}"
+    );
+    let mut new = BandMixer::new(SR, &settings, 8);
+    new.carry_gain_from(&old);
+    let next = new.next(tone(1.0, SR as usize / 2)).gain;
+    assert!(
+        (20.0 * (next / gain).log10()).abs() < 0.1,
+        "the new band opened the gain from {gain:.3} to {next:.3}"
+    );
 }
 
 #[test]
@@ -695,16 +761,16 @@ fn hiss_only(bandwidth_hz: Option<f64>) -> TrainingSettings {
     s.clamp()
 }
 
-/// `seconds` of the background through `mixer`, from a send level of
-/// `send` on, with the first half second — the filter filling and the AGC
-/// settling on the send — left out.
+/// `seconds` of the background through `mixer`, under a send keyed down at
+/// `send`, with the first half second — the filter filling and the AGC
+/// settling on the send — left out. The send rides the gain but is not part
+/// of the background, so it is not in what comes back.
 fn render(mixer: &mut BandMixer, send: f64, seconds: usize) -> Vec<f32> {
-    mixer.note_send_level(send);
-    let mut settle = vec![0.0f32; SR as usize / 2];
-    mixer.fill_background(&mut settle);
-    let mut out = vec![0.0f32; SR as usize * seconds];
-    mixer.fill_background(&mut out);
-    out
+    let settle = SR as usize / 2;
+    (0..settle + SR as usize * seconds)
+        .map(|i| soft_limit(mixer.next(tone(send, i)).band) as f32)
+        .skip(settle)
+        .collect()
 }
 
 /// The background as heard, and what the audio floor added to it: the same
@@ -851,7 +917,14 @@ fn the_agc_ducks_the_hiss_but_not_the_audio_floor() {
     let quiet = render(&mut BandMixer::new(SR, &settings, STAGE_SEED), 0.0, 10);
     let mut mixer = BandMixer::new(SR, &settings, STAGE_SEED);
     let under = render(&mut mixer, 10.0 * knee, 10);
-    let duck = 20.0 * mixer.agc_gain().log10();
+    // The gain over the next 10 ms, through which a tone's own ripple in the
+    // detector averages out.
+    let samples = SR as usize / 100;
+    let mean = (0..samples)
+        .map(|i| mixer.next(tone(10.0 * knee, i)).gain)
+        .sum::<f64>()
+        / samples as f64;
+    let duck = 20.0 * mean.log10();
     // Ten times the knee is 20 dB over it, which the 2:1 law takes 10 dB off.
     assert!((duck - agc_law_db(20.0)).abs() < 0.2, "ducked {duck:.2} dB");
     let (quiet, under) = (welch(&quiet, STAGE_SEGMENT), welch(&under, STAGE_SEGMENT));

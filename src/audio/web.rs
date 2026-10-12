@@ -16,6 +16,7 @@ use web_sys::{
     GainNode, OscillatorType,
 };
 
+use super::shape::{BAND_FADE_SEC, SEND_RELEASE_SEC, ToneRequest, fade_curve};
 use super::{MorseBackend, PlaybackSignal, WaitFlags};
 
 /// How much of the band each streamed buffer holds.
@@ -31,13 +32,9 @@ const STREAM_LEAD_HIDDEN_SEC: f64 = 2.5;
 const STREAM_TICK_MS: u32 = 100;
 /// Points in the soft limiter's lookup table.
 const LIMITER_POINTS: usize = 4_097;
-/// Fade between one band and the next when the settings change. Long enough
-/// to hide the seam, short enough that the change is immediate.
-const STREAM_FADE_SEC: f64 = 0.02;
-
-/// How long a stopped send takes to reach silence. The native player's
-/// [`crate::audio::render::RELEASE_MS`] in seconds — the same ramp either side.
-const RELEASE_SEC: f64 = 0.008;
+/// Points in a band's fade curve: plenty for a quarter sine over a few tens
+/// of milliseconds.
+const FADE_POINTS: usize = 32;
 
 /// What a scheduled send looks like to a waiter.
 ///
@@ -280,10 +277,15 @@ impl BandStream {
         let fading_in = |into: &GainNode| -> Result<GainNode, String> {
             let output = ctx.create_gain().map_err(|e| format!("band gain: {e:?}"))?;
             let gain = output.gain();
-            gain.set_value_at_time(0.0, now)
-                .map_err(|e| format!("band fade: {e:?}"))?;
-            gain.linear_ramp_to_value_at_time(1.0, now + STREAM_FADE_SEC)
-                .map_err(|e| format!("band fade: {e:?}"))?;
+            // The rising half of an equal-power crossfade: the outgoing band
+            // falls along the other, and the hiss holds its level through
+            // the change where straight lines would sag 3 dB.
+            gain.set_value_curve_at_time(
+                &mut fade_curve(FADE_POINTS, true, 1.0),
+                now,
+                BAND_FADE_SEC,
+            )
+            .map_err(|e| format!("band fade: {e:?}"))?;
             output
                 .connect_with_audio_node(into)
                 .map_err(|e| format!("band connect: {e:?}"))?;
@@ -361,12 +363,16 @@ impl BandStream {
     fn fade_out(self) -> ([GainNode; 2], f64) {
         let stream = self.state.borrow();
         let now = stream.ctx.current_time();
-        let done = now + STREAM_FADE_SEC;
+        let done = now + BAND_FADE_SEC;
         for output in [&stream.output, &stream.floor_output] {
             let gain = output.gain();
+            let from = f64::from(gain.value());
             let _ = gain.cancel_scheduled_values(now);
-            let _ = gain.set_value_at_time(gain.value(), now);
-            let _ = gain.linear_ramp_to_value_at_time(0.0, done);
+            let _ = gain.set_value_curve_at_time(
+                &mut fade_curve(FADE_POINTS, false, from),
+                now,
+                BAND_FADE_SEC,
+            );
         }
         for (node, _) in &stream.queued {
             let _ = node
@@ -462,10 +468,10 @@ impl MorsePlayer {
         let tail: AudioNode = receiver_gain.clone().unchecked_into();
         // The receiver's AGC, in the one place the browser can put it: after
         // the filter, with the send and the background already together. The
-        // native player works the same gain out in Rust and hands it to both
-        // streams; here a compressor does it, because the two halves only meet
-        // as sound. Its threshold and ratio are set per band from the native
-        // AGC's knee; until then it is parked where it does nothing.
+        // native player works the same gain out in Rust, sample by sample,
+        // from the two together; here a compressor does it. Its threshold and
+        // ratio are set per band from the native AGC's knee; until then it is
+        // parked where it does nothing.
         let agc = ctx
             .create_dynamics_compressor()
             .map_err(|e| format!("agc: {e:?}"))?;
@@ -580,8 +586,10 @@ impl MorsePlayer {
     ///
     /// Runs on every send, and costs a comparison when nothing has moved.
     /// When something has, a new bank is built — an `IIRFilterNode` cannot be
-    /// retuned — and the old one fades out over [`STREAM_FADE_SEC`] while the
-    /// new one fades in, then is taken out of the graph.
+    /// retuned — and the old one fades out over [`BAND_FADE_SEC`] while the
+    /// new one fades in, then is taken out of the graph. In straight lines:
+    /// both banks are filtering the same sound, so their outputs add as
+    /// amplitudes, not powers.
     fn tune_receiver(&mut self, settings: &TrainingSettings) -> Result<(), String> {
         self.drop_retired_receivers();
         let design = FilterDesign::from_settings(settings);
@@ -597,7 +605,7 @@ impl MorsePlayer {
         let gain = bank.output.gain();
         match self.receiver.replace(bank) {
             Some(old) => {
-                let done = now + STREAM_FADE_SEC;
+                let done = now + BAND_FADE_SEC;
                 let _ = gain.set_value_at_time(0.0, now);
                 let _ = gain.linear_ramp_to_value_at_time(1.0, done);
                 let fading = old.output.gain();
@@ -721,7 +729,7 @@ impl MorsePlayer {
         self.drop_released();
         if let Some(gain) = self.group_gain.take() {
             let now = self.ctx.current_time();
-            let done = now + RELEASE_SEC;
+            let done = now + SEND_RELEASE_SEC;
             let _ = gain.gain().cancel_scheduled_values(now);
             let _ = gain.gain().set_value_at_time(gain.gain().value(), now);
             let _ = gain.gain().linear_ramp_to_value_at_time(0.0, done);
@@ -898,9 +906,9 @@ impl MorseBackend for MorsePlayer {
             return;
         };
         let now = self.ctx.current_time();
-        let hz = frequency_hz.clamp(100.0, 2_000.0) as f32;
-        let level = if on { gain.clamp(0.0, 1.0) as f32 } else { 0.0 };
-        let _ = osc.frequency().set_value_at_time(hz, now);
+        let tone = ToneRequest::new(on, frequency_hz, gain);
+        let level = if tone.on { tone.gain } else { 0.0 };
+        let _ = osc.frequency().set_value_at_time(tone.hz, now);
         let _ = live_gain.gain().cancel_scheduled_values(now);
         let current = live_gain.gain().value();
         let _ = live_gain.gain().set_value_at_time(current, now);

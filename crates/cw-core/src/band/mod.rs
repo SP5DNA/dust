@@ -22,8 +22,9 @@
 //!    Its knee is set from the band's own floor ([`agc_knee`]).
 //! 4. The receiver's audio stage adds a faint, wide hiss of its own
 //!    ([`AudioFloor`]), after the filter and the AGC, so the band is never
-//!    quite silent outside the passband — as no real receiver is. A soft
-//!    limiter catches whatever is still too loud.
+//!    quite silent outside the passband — as no real receiver is.
+//! 5. A soft limiter ([`soft_limit`]) catches whatever is still too loud,
+//!    once, on everything the player is about to play.
 //!
 //! QSB is applied to the Morse alone ([`Qsb`]): fading is a property of the
 //! path a station arrives on, not of the noise around it.
@@ -61,26 +62,36 @@ pub use filter::{
 pub use key::BandKey;
 pub use knee::agc_knee;
 pub use noise::AudioFloor;
-pub use output::{LimiterFeed, limiter_feed, soft_limit_curve};
+pub use output::{LimiterFeed, limiter_feed, soft_limit, soft_limit_curve};
 pub use qsb::Qsb;
 pub use source::BandSource;
 
 use crate::settings::{STATIONS_MIN, TrainingSettings};
 use agc::Agc;
 use calibration::{noise_level, qrn_level};
-use output::soft_limit;
 
 /// The native receiver: the band, through the filter, under the AGC, one
-/// sample at a time. QSB is applied separately, to the Morse samples
-/// themselves — fading is a property of the path a station arrives on, not of
-/// the noise around it.
+/// sample at a time, with the send it is riding over. QSB is applied to the
+/// Morse before it gets here — fading is a property of the path a station
+/// arrives on, not of the noise around it.
 pub struct BandMixer {
     source: BandSource,
     receiver: ReceiverFilter,
     agc: Agc,
     /// The receiver's audio stage, joining after the AGC.
     audio_floor: AudioFloor,
-    send_level: f64,
+}
+
+/// One sample of what the receiver plays, before the output stage's limiter.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Received {
+    /// The band: its noise, static and stations through the filter and the
+    /// AGC, and the audio stage's own floor.
+    pub band: f64,
+    /// The gain the AGC is riding at. The send is played at it: one receiver,
+    /// one gain for everything it hears, so a crash ducks the station you are
+    /// copying with the noise.
+    pub gain: f64,
 }
 
 impl BandMixer {
@@ -99,7 +110,6 @@ impl BandMixer {
                 None => Agc::off(),
             },
             audio_floor: AudioFloor::for_band(sample_rate, band, seed),
-            send_level: 0.0,
         }
     }
 
@@ -110,18 +120,26 @@ impl BandMixer {
         qrn_level(band) > 0.0 || noise_level(band) > 0.0 || band.stations_max > STATIONS_MIN
     }
 
-    pub fn next_background(&mut self) -> f32 {
+    /// One sample of the band, with `send` — the Morse at this instant,
+    /// through the receiver's filter already — playing over it.
+    ///
+    /// The AGC hears the two together, sample by sample, as a real one does
+    /// and as the browser's compressor does by sitting where they have
+    /// already met, so the station ducks the band from its first element and
+    /// a crash ducks the station with it.
+    pub fn next(&mut self, send: f64) -> Received {
+        let send = if send.is_finite() { send } else { 0.0 };
         // Everything meets at the receiver's filter, which is why narrowing
         // it quiets the whole band at once rather than one layer of it.
         let heard = self.receiver.process(self.source.next_sample());
-        // At the gain the receiver is riding at, which a crash has just
-        // pulled down and which everything else has to come down with —
-        // including the send, which reads this through `agc_gain`.
-        let ridden = self.agc.process(heard, self.send_level);
+        let ridden = self.agc.process(heard, send);
         // The audio stage's own hiss comes in after all of that: the filter
         // never had it, so it runs on outside the passband, and the AGC never
         // saw it, so it neither moves the gain nor ducks under a station.
-        soft_limit(ridden + self.audio_floor.next_sample()) as f32
+        Received {
+            band: ridden + self.audio_floor.next_sample(),
+            gain: self.agc.gain(),
+        }
     }
 
     /// A pile-up is calling with this many stations besides yours: they come
@@ -131,32 +149,18 @@ impl BandMixer {
         self.source.reserve_stations(callers);
     }
 
-    /// How loud the send is — its peak, as the native player hands it over a
-    /// buffer at a time — so the receiver's gain answers to everything
-    /// reaching it rather than to the noise alone. That is what a real one
-    /// does, and what the browser's compressor does for free by sitting where
-    /// the two have already met.
-    pub fn note_send_level(&mut self, level: f64) {
-        self.send_level = if level.is_finite() {
-            level.max(0.0)
-        } else {
-            0.0
-        };
+    /// Take the receiver's gain over from the band this one replaces, so a
+    /// station being copied across the change is not ducked afresh.
+    pub fn carry_gain_from(&mut self, previous: &BandMixer) {
+        self.agc.carry_on_from(&previous.agc);
     }
 
-    /// What the AGC is holding the band down to right now.
-    ///
-    /// The send rides this too. The two are separate playback objects by the
-    /// time they reach the sound card, so the only honest way for a crash to
-    /// duck the Morse as well is for the send to read the gain the receiver
-    /// arrived at.
-    pub fn agc_gain(&self) -> f64 {
-        self.agc.gain()
-    }
-
-    pub fn fill_background(&mut self, out: &mut [f32]) {
+    /// The band alone, as the player would play it with nothing sent over
+    /// it: through the output stage's limiter.
+    #[cfg(test)]
+    pub(crate) fn fill_background(&mut self, out: &mut [f32]) {
         for slot in out {
-            *slot = self.next_background();
+            *slot = soft_limit(self.next(0.0).band) as f32;
         }
     }
 }

@@ -4,10 +4,12 @@
 //! and reports the same [`WaitFlags`], so the session runtime never has to know
 //! which one it is talking to.
 
+#[cfg(any(feature = "native-audio", test))]
+mod mixer;
 #[cfg(feature = "native-audio")]
 mod native;
-#[cfg(any(feature = "native-audio", test))]
-pub mod render;
+#[cfg(any(feature = "native-audio", feature = "web", test))]
+mod shape;
 #[cfg(feature = "silent-audio")]
 mod silent;
 mod wait;

@@ -760,8 +760,10 @@ impl ReceiverFilter {
         out
     }
 
-    /// Run a rendered send through the receiver, in place.
-    pub fn apply(&mut self, samples: &mut [f32]) {
+    /// Run a rendered buffer through the receiver, in place. The players
+    /// filter as they play; this is for measuring a filter whole.
+    #[cfg(test)]
+    pub(crate) fn apply(&mut self, samples: &mut [f32]) {
         for sample in samples {
             *sample = self.process(f64::from(*sample)) as f32;
         }
