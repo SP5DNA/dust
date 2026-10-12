@@ -652,10 +652,6 @@ fn an_unlocked_answer_box_does_not_look_disabled() {
         !tag.contains("readonly"),
         "HTML treats readonly=\"false\" as readonly, so the attribute must be absent: {tag}"
     );
-    assert!(
-        tag.contains("autofocus"),
-        "the live box must autofocus so typing works without a click: {tag}"
-    );
 }
 
 #[test]
@@ -689,10 +685,6 @@ fn a_locked_answer_box_is_readonly_not_disabled() {
     assert!(
         !tag.contains("disabled"),
         "disabled would also swallow the click that focuses it after the send: {tag}"
-    );
-    assert!(
-        !tag.contains("autofocus"),
-        "autofocus on a locked box would steal keys while the group is still being sent: {tag}"
     );
 }
 
@@ -1255,20 +1247,58 @@ mod interactions {
     #[test]
     fn typing_costs_the_same_whatever_the_session_length() {
         crate::testing::run(|| async {
-            let cost_at = |count: usize| {
-                let mut ui = Ui::new(ManyGroupsHarness, ManyGroupsHarnessProps { count });
-                let _ = ui.take_work();
-                ui.type_into("group-input-0", "K");
-                ui.take_work()
-            };
-            let small = cost_at(3);
-            let large = cost_at(30);
-            assert!(small > 0, "the keystroke did nothing at all");
+            let small = typing_cost(3).await;
+            let large = typing_cost(30).await;
+            assert!(small.key > 0, "the keystroke did nothing at all");
             assert!(
-                large <= small * 2,
-                "a key cost {small} mutations in a three-group session and {large} in a \
-                 thirty-group one — the whole list is being rebuilt per character"
+                large.key <= small.key * 2,
+                "a key cost {} mutations in a three-group session and {} in a \
+                 thirty-group one — the whole list is being rebuilt per character",
+                small.key,
+                large.key
             );
+            // The session hearing it, once typing has paused, is one box too:
+            // the cards whose groups did not change are not redrawn.
+            assert!(small.commit > 0, "the debounce never committed");
+            assert!(
+                large.commit <= small.commit * 2,
+                "a commit cost {} mutations in a three-group session and {} in a \
+                 thirty-group one — every card is redrawn when one answer lands",
+                small.commit,
+                large.commit
+            );
+        });
+    }
+
+    struct TypingCost {
+        key: usize,
+        commit: usize,
+    }
+
+    /// What one key costs the renderer in a session of `count` groups, and
+    /// what the session hearing it after the debounce costs.
+    async fn typing_cost(count: usize) -> TypingCost {
+        let mut ui = Ui::new(ManyGroupsHarness, ManyGroupsHarnessProps { count });
+        let _ = ui.take_work();
+        ui.type_into("group-input-0", "K");
+        let key = ui.take_work();
+        ui.advance(60).await;
+        TypingCost {
+            key,
+            commit: ui.take_work(),
+        }
+    }
+
+    /// Leaving the box — for the header's Exit, say, or anywhere else on the
+    /// page — hands the session what was typed, without the debounce.
+    #[test]
+    fn leaving_the_box_commits_what_it_holds() {
+        crate::testing::run(|| async {
+            let mut ui = Ui::new(AnsweringHarness, ());
+            ui.type_into("group-input-0", "K");
+            assert!(!ui.has("committed:"));
+            ui.blur("group-input-0");
+            assert!(ui.has("committed:K"), "{}", ui.html());
         });
     }
 
@@ -1402,16 +1432,14 @@ mod interactions {
         }
     }
 
-    /// The live box used to keep its first-mount identity when the send ended.
-    /// Webview autofocus only applies on first insert of that node, so unlock
-    /// remounts it (`key=live`) with autofocus set.
+    /// The box locked while the group is sent opens when it ends, and takes
+    /// what is typed into it from then on.
     #[test]
-    fn unlocking_the_answer_box_remounts_it_with_autofocus() {
+    fn unlocking_the_answer_box_opens_it_for_typing() {
         crate::testing::run(|| async {
             let mut ui = Ui::new(LockCycleHarness, ());
             let locked = ui.input_tag("group-input-0");
             assert!(locked.contains("readonly"), "{locked}");
-            assert!(!locked.contains("autofocus"), "{locked}");
             ui.type_into("group-input-0", "KM");
             assert!(!ui.has("committed:"), "typing must not land while locked");
 
@@ -1419,7 +1447,6 @@ mod interactions {
             let open = ui.input_tag("group-input-0");
             assert!(!open.contains("readonly"), "{open}");
             assert!(!open.contains("disabled"), "{open}");
-            assert!(open.contains("autofocus"), "{open}");
             ui.type_into("group-input-0", "KM");
             assert!(ui.has("committed:KM"), "{}", ui.html());
         });

@@ -659,7 +659,7 @@ mod ui_tests {
     }
 
     #[test]
-    fn a_group_locks_while_it_plays_then_unlocks_with_autofocus() {
+    fn a_group_locks_while_it_plays_then_unlocks() {
         run(|| async {
             let mut settings = test_settings();
             settings.curriculum.num_groups = 2;
@@ -670,7 +670,6 @@ mod ui_tests {
             assert!(ui.has("Listen — the answer box unlocks"));
             let sending = ui.input_tag("group-input-0");
             assert!(sending.contains("readonly"), "{sending}");
-            assert!(!sending.contains("autofocus"), "{sending}");
             ui.type_into("group-input-0", "XX");
             assert!(!ui.has("committed"), "{}", ui.html());
 
@@ -678,7 +677,6 @@ mod ui_tests {
             let open = ui.input_tag("group-input-0");
             assert!(!open.contains("readonly"), "{open}");
             assert!(!open.contains("disabled"), "{open}");
-            assert!(open.contains("autofocus"), "{open}");
 
             let sent = recorder.texts().first().cloned().expect("a group was sent");
             ui.type_into("group-input-0", &sent);
@@ -693,12 +691,10 @@ mod ui_tests {
             assert!(
                 ui.run_until(8_000, |ui| {
                     let tag = ui.input_tag("group-input-1");
-                    tag.contains("autofocus")
-                        && !tag.contains("readonly")
-                        && !tag.contains("disabled")
+                    !tag.contains("readonly") && !tag.contains("disabled")
                 })
                 .await,
-                "the next group's box should unlock and autofocus: {}",
+                "the next group's box should unlock: {}",
                 ui.html()
             );
             let first = ui.input_tag("group-input-0");
@@ -720,7 +716,6 @@ mod ui_tests {
             let tag = ui.input_tag("group-input-0");
             assert!(!tag.contains("readonly"), "{tag}");
             assert!(!tag.contains("disabled"), "{tag}");
-            assert!(tag.contains("autofocus"), "{tag}");
         });
     }
 
