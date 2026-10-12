@@ -27,10 +27,7 @@ pub mod stats;
 pub mod streak;
 pub mod timing;
 
-pub use alignment::{
-    AlignmentPair, LetterAccuracy, align_group, calculate_group_letter_accuracy,
-    calculate_overall_character_accuracy,
-};
+pub use alignment::{AlignmentPair, CopyTally, LetterAccuracy, align_group};
 pub use auto_level::{
     AutoAdjustMode, AutoLevelCounters, AutoLevelProgress, AutoLevelResult, apply_auto_level,
     auto_level_progress, evaluate_auto_level,

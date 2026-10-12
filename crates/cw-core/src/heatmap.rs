@@ -173,7 +173,6 @@ mod tests {
     use super::*;
     use crate::session::{GroupResult, SessionResult, SessionTiming};
     use crate::settings::CharSetMode;
-    use std::collections::BTreeMap;
 
     fn session(date: &str, chars: u32, accuracy: f64) -> SessionResult {
         SessionResult {
@@ -192,7 +191,7 @@ mod tests {
                 char_wpm: None,
             }],
             accuracy,
-            letter_accuracy: BTreeMap::new(),
+            tally: Default::default(),
             alphabet_size: 1,
             avg_response_ms: 0.0,
             total_chars: chars,

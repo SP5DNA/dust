@@ -1,12 +1,8 @@
 //! Group-training session runtime and result construction.
 
-use std::collections::BTreeMap;
-
 use serde::{Deserialize, Serialize};
 
-use crate::alignment::{
-    LetterAccuracy, calculate_group_letter_accuracy, calculate_overall_character_accuracy,
-};
+use crate::alignment::CopyTally;
 use crate::score::{
     ScoreConstants, calculate_alphabet_size, calculate_effective_alphabet_size,
     calculate_total_chars, compute_average_response_ms, compute_session_score,
@@ -437,7 +433,9 @@ pub struct SessionResult {
     pub groups: Vec<GroupResult>,
     pub group_timings: Vec<SessionTiming>,
     pub accuracy: f64,
-    pub letter_accuracy: BTreeMap<char, LetterAccuracy>,
+    /// What was copied, character by character.
+    #[serde(flatten)]
+    pub tally: CopyTally,
     pub alphabet_size: u32,
     pub avg_response_ms: f64,
     pub total_chars: u32,
@@ -500,8 +498,11 @@ pub fn build_session_result(
         })
         .collect();
 
-    let letter_accuracy = calculate_group_letter_accuracy(&pairs);
-    let accuracy = calculate_overall_character_accuracy(&pairs);
+    let mut tally = CopyTally::default();
+    for (sent, received) in &pairs {
+        tally.add(sent, received);
+    }
+    let accuracy = tally.accuracy();
     let sent_only: Vec<&str> = pairs.iter().map(|(s, _)| s.as_str()).collect();
     let alphabet_size = calculate_alphabet_size(&sent_only);
     let effective_alphabet_size = calculate_effective_alphabet_size(&sent_only);
@@ -555,7 +556,7 @@ pub fn build_session_result(
         groups,
         group_timings: timings,
         accuracy,
-        letter_accuracy,
+        tally,
         alphabet_size,
         avg_response_ms,
         total_chars,
@@ -612,6 +613,28 @@ mod tests {
         assert!((result.accuracy - 1.0).abs() < 1e-9);
         assert!(result.groups.iter().all(|g| g.correct));
         assert!((result.char_wpm - 18.0).abs() < 1e-9);
+    }
+
+    /// Characters typed that were never sent cost accuracy. Without that a
+    /// padded answer, or a doubled key, scored as a perfect copy — and the
+    /// score and the level both follow this accuracy.
+    #[test]
+    fn padding_an_answer_is_not_a_perfect_copy() {
+        let mut session = GroupSession::new(1, 0, 2, TrainingSettings::default());
+        session.set_group(0, "KMURE".into());
+        session.set_group(1, "KM".into());
+        session.begin_group(0, 0);
+        session.confirm(0, "KMUURE".into(), 1000);
+        session.begin_group(1, 1000);
+        session.confirm(1, "KMN".into(), 2000);
+        let settings = TrainingSettings::default();
+        let result = build_session_result(&session, &settings, 3000, "2026-09-01".into());
+        assert!(
+            (result.accuracy - 7.0 / 9.0).abs() < 1e-9,
+            "{}",
+            result.accuracy
+        );
+        assert_eq!(result.tally.inserted.values().sum::<u32>(), 2);
     }
 
     #[test]
@@ -848,6 +871,32 @@ mod tests {
         assert!((timings[0].time_to_complete_ms - 400.0).abs() < 1e-9);
     }
 
+    /// The tally is saved as the flat keys a session always had, plus the
+    /// characters typed but never sent when there were any.
+    #[test]
+    fn a_session_tally_round_trips_through_its_saved_keys() {
+        let mut session = GroupSession::new(1, 0, 1, TrainingSettings::default());
+        session.set_group(0, "KM".into());
+        session.confirm(0, "KMN".into(), 1000);
+        let result = build_session_result(
+            &session,
+            &TrainingSettings::default(),
+            2000,
+            "2026-01-01".into(),
+        );
+        let json = serde_json::to_value(&result).unwrap();
+        assert_eq!(json["letterAccuracy"]["K"]["correct"], 1);
+        assert_eq!(json["inserted"]["N"], 1);
+        assert!(json.get("tally").is_none());
+        let back: SessionResult = serde_json::from_value(json).unwrap();
+        assert_eq!(back, result);
+
+        let mut clean = result;
+        clean.tally.inserted.clear();
+        let json = serde_json::to_value(&clean).unwrap();
+        assert!(json.get("inserted").is_none());
+    }
+
     #[test]
     fn legacy_session_json_fills_new_fields() {
         let timing: SessionTiming =
@@ -855,11 +904,20 @@ mod tests {
         assert_eq!(timing.char_wpm, None);
         let raw = r#"{
             "date":"2026-01-01","timestamp":1,"startedAt":0,"finishedAt":1,
-            "groups":[],"groupTimings":[],"accuracy":1,"letterAccuracy":{},
+            "groups":[],"groupTimings":[],"accuracy":1,
+            "letterAccuracy":{"K":{"correct":1,"total":2}},
             "alphabetSize":0,"avgResponseMs":0,"totalChars":0,
             "effectiveAlphabetSize":0,"score":0,"level":1
         }"#;
         let result: SessionResult = serde_json::from_str(raw).unwrap();
+        assert_eq!(
+            result.tally.sent.get(&'K'),
+            Some(&crate::alignment::LetterAccuracy {
+                correct: 1,
+                total: 2
+            })
+        );
+        assert!(result.tally.inserted.is_empty());
         assert_eq!(result.digits_level, 1);
         assert_eq!(result.char_set_mode, CharSetMode::Koch);
         assert_eq!(result.char_wpm, 18.0);

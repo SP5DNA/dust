@@ -98,7 +98,7 @@ pub fn boot_machine_session(
     let history_refs: Vec<_> = history
         .iter()
         .filter(|session| session.usable_for_sampling(&settings))
-        .map(|s| &s.letter_accuracy)
+        .map(|s| &s.tally.sent)
         .collect();
     *app.sampling.borrow_mut() = cw_core::create_initial_sampling_state(&history_refs);
 

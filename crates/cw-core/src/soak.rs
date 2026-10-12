@@ -9,13 +9,13 @@
 
 use crate::machine::{SessionEffect, SessionEvent, SessionMachine, SessionPhase};
 use crate::{
-    AutoLevelCounters, CALLSIGN_TIER_MAX, CALLSIGN_TIER_MIN, CharSetMode, FILTER_WIDTH_MAX,
-    FILTER_WIDTH_MIN, FastrandRng, LEVEL_MIN, PILEUP_LEVEL_MAX_DB, PILEUP_LEVEL_MIN_DB,
-    PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN, Rng, STATIONS_MAX, STATIONS_MIN, SessionId,
-    TrainingSettings, Transmission, align_group, apply_auto_level, build_session_result,
-    calculate_group_letter_accuracy, calculate_overall_character_accuracy, compute_char_pool,
-    create_initial_sampling_state, evaluate_auto_level, generate_training_group, parse_callsign,
-    plan_morse_playback, plan_transmission, resolve_group_repeats, resolve_pileup, resolve_station,
+    AutoLevelCounters, CALLSIGN_TIER_MAX, CALLSIGN_TIER_MIN, CharSetMode, CopyTally,
+    FILTER_WIDTH_MAX, FILTER_WIDTH_MIN, FastrandRng, LEVEL_MIN, PILEUP_LEVEL_MAX_DB,
+    PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN, Rng, STATIONS_MAX, STATIONS_MIN,
+    SessionId, TrainingSettings, Transmission, align_group, apply_auto_level, build_session_result,
+    compute_char_pool, create_initial_sampling_state, evaluate_auto_level, generate_training_group,
+    parse_callsign, plan_morse_playback, plan_transmission, resolve_group_repeats, resolve_pileup,
+    resolve_station,
 };
 
 /// Enough seeds to be worth running on every commit, and cheap enough to.
@@ -465,13 +465,13 @@ fn scoring_holds_for_anything_a_listener_can_type() {
             "seed {seed}: a pair counted as a match without matching"
         );
 
-        let groups = [(sent.clone(), received.clone())];
-        let overall = calculate_overall_character_accuracy(&groups);
+        let tally = CopyTally::of(&sent, &received);
+        let overall = tally.accuracy();
         assert!(
             (0.0..=1.0).contains(&overall),
             "seed {seed}: {overall} is not a fraction for {sent:?}/{received:?}"
         );
-        for (ch, acc) in calculate_group_letter_accuracy(&groups) {
+        for (ch, acc) in &tally.sent {
             assert!(
                 acc.correct <= acc.total && acc.total > 0,
                 "seed {seed}: {ch:?} scored {}/{}",
@@ -481,7 +481,7 @@ fn scoring_holds_for_anything_a_listener_can_type() {
         }
         // Hearing exactly what was sent is always full marks — unless there
         // was nothing to hear, which scores nothing rather than everything.
-        let perfect = calculate_overall_character_accuracy(&[(sent.clone(), sent.clone())]);
+        let perfect = CopyTally::of(&sent, &sent).accuracy();
         assert_eq!(
             perfect,
             if sent.is_empty() { 0.0 } else { 1.0 },

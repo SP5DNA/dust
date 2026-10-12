@@ -1,5 +1,9 @@
 //! Group alignment via edit distance for letter-level scoring.
 
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AlignmentPair {
     pub sent_char: Option<char>,
@@ -7,101 +11,52 @@ pub struct AlignmentPair {
     pub matched: bool,
 }
 
-/// Edit distance, filled row by row, then walked back to pair the characters
-/// up. Every cell reads the row above it and the cell to its left, so the
-/// indices are the point rather than something an iterator would tidy away.
-#[allow(clippy::needless_range_loop)]
+/// Edit distance, filled row by row in one flat table, then walked back to
+/// pair the characters up. Every cell reads the row above it and the cell to
+/// its left, so the indices are the point rather than something an iterator
+/// would tidy away.
 pub fn align_group(sent: &str, received: &str) -> Vec<AlignmentPair> {
-    let s: Vec<char> = sent.to_ascii_uppercase().chars().collect();
-    let r: Vec<char> = received.to_ascii_uppercase().chars().collect();
-
-    if s.is_empty() && r.is_empty() {
-        return Vec::new();
-    }
-    if s.is_empty() {
-        return r
-            .into_iter()
-            .map(|ch| AlignmentPair {
-                sent_char: None,
-                received_char: Some(ch),
-                matched: false,
-            })
-            .collect();
-    }
-    if r.is_empty() {
-        return s
-            .into_iter()
-            .map(|ch| AlignmentPair {
-                sent_char: Some(ch),
-                received_char: None,
-                matched: false,
-            })
-            .collect();
+    let s: Vec<char> = sent.chars().map(|c| c.to_ascii_uppercase()).collect();
+    let r: Vec<char> = received.chars().map(|c| c.to_ascii_uppercase()).collect();
+    let pair = |sent_char: Option<char>, received_char: Option<char>| AlignmentPair {
+        sent_char,
+        received_char,
+        matched: sent_char.is_some() && sent_char == received_char,
+    };
+    // A clean copy is the common case, and needs no table.
+    if s == r {
+        return s.iter().map(|&c| pair(Some(c), Some(c))).collect();
     }
 
-    let m = s.len();
-    let n = r.len();
-    let mut dp = vec![vec![0usize; n + 1]; m + 1];
-    for i in 0..=m {
-        dp[i][0] = i;
-    }
-    for j in 0..=n {
-        dp[0][j] = j;
+    let (m, n) = (s.len(), r.len());
+    let width = n + 1;
+    let mut dp = vec![0u32; (m + 1) * width];
+    for (j, cell) in dp.iter_mut().take(width).enumerate() {
+        *cell = j as u32;
     }
     for i in 1..=m {
+        dp[i * width] = i as u32;
         for j in 1..=n {
-            let match_cost = if s[i - 1] == r[j - 1] { 0 } else { 1 };
-            dp[i][j] = (dp[i - 1][j] + 1)
-                .min(dp[i][j - 1] + 1)
-                .min(dp[i - 1][j - 1] + match_cost);
+            let match_cost = u32::from(s[i - 1] != r[j - 1]);
+            dp[i * width + j] = (dp[(i - 1) * width + j] + 1)
+                .min(dp[i * width + j - 1] + 1)
+                .min(dp[(i - 1) * width + j - 1] + match_cost);
         }
     }
 
-    let mut alignment = Vec::new();
-    let mut i = m;
-    let mut j = n;
+    let mut alignment = Vec::with_capacity(m.max(n));
+    let (mut i, mut j) = (m, n);
     while i > 0 || j > 0 {
-        if i > 0 && j > 0 {
-            let match_cost = if s[i - 1] == r[j - 1] { 0 } else { 1 };
-            let current = dp[i][j];
-            let substitution = dp[i - 1][j - 1] + match_cost;
-            let deletion = dp[i - 1][j] + 1;
-            if current == substitution {
-                alignment.push(AlignmentPair {
-                    sent_char: Some(s[i - 1]),
-                    received_char: Some(r[j - 1]),
-                    matched: s[i - 1] == r[j - 1],
-                });
-                i -= 1;
-                j -= 1;
-            } else if current == deletion {
-                alignment.push(AlignmentPair {
-                    sent_char: Some(s[i - 1]),
-                    received_char: None,
-                    matched: false,
-                });
-                i -= 1;
-            } else {
-                alignment.push(AlignmentPair {
-                    sent_char: None,
-                    received_char: Some(r[j - 1]),
-                    matched: false,
-                });
-                j -= 1;
-            }
-        } else if i > 0 {
-            alignment.push(AlignmentPair {
-                sent_char: Some(s[i - 1]),
-                received_char: None,
-                matched: false,
-            });
+        let here = dp[i * width + j];
+        if i > 0 && j > 0 && here == dp[(i - 1) * width + j - 1] + u32::from(s[i - 1] != r[j - 1]) {
+            alignment.push(pair(Some(s[i - 1]), Some(r[j - 1])));
+            i -= 1;
+            j -= 1;
+        } else if i > 0 && (j == 0 || here == dp[(i - 1) * width + j] + 1) {
+            alignment.push(pair(Some(s[i - 1]), None));
             i -= 1;
         } else {
-            alignment.push(AlignmentPair {
-                sent_char: None,
-                received_char: Some(r[j - 1]),
-                matched: false,
-            });
+            alignment.push(pair(None, Some(r[j - 1])));
             j -= 1;
         }
     }
@@ -109,50 +64,81 @@ pub fn align_group(sent: &str, received: &str) -> Vec<AlignmentPair> {
     alignment
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LetterAccuracy {
     pub correct: u32,
     pub total: u32,
 }
 
-pub fn calculate_group_letter_accuracy(
-    groups: &[(String, String)],
-) -> std::collections::BTreeMap<char, LetterAccuracy> {
-    let mut letter_accuracy = std::collections::BTreeMap::new();
-    for (sent, received) in groups {
-        for pair in align_group(sent, received) {
-            if let Some(ch) = pair.sent_char {
-                let entry = letter_accuracy.entry(ch).or_insert(LetterAccuracy {
-                    correct: 0,
-                    total: 0,
-                });
-                entry.total += 1;
-                if pair.matched {
-                    entry.correct += 1;
-                }
-            }
-        }
-    }
-    letter_accuracy
+/// What a copy got right and wrong, character by character: one alignment
+/// per group, and everything that is scored read off it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CopyTally {
+    /// For each character sent: how often, and how often it was copied.
+    #[serde(rename = "letterAccuracy", default)]
+    pub sent: BTreeMap<char, LetterAccuracy>,
+    /// Characters typed that were never sent. They cost accuracy like a
+    /// miss does, or typing every candidate for an unsure character would be
+    /// free.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub inserted: BTreeMap<char, u32>,
 }
 
-pub fn calculate_overall_character_accuracy(groups: &[(String, String)]) -> f64 {
-    let mut total_sent = 0u32;
-    let mut correct = 0u32;
-    for (sent, received) in groups {
+impl CopyTally {
+    /// The tally of one group.
+    pub fn of(sent: &str, received: &str) -> Self {
+        let mut tally = Self::default();
+        tally.add(sent, received);
+        tally
+    }
+
+    /// Count one more group.
+    pub fn add(&mut self, sent: &str, received: &str) {
         for pair in align_group(sent, received) {
-            if pair.sent_char.is_some() {
-                total_sent += 1;
-                if pair.matched {
-                    correct += 1;
+            match (pair.sent_char, pair.received_char) {
+                (Some(ch), _) => {
+                    let entry = self.sent.entry(ch).or_default();
+                    entry.total += 1;
+                    entry.correct += u32::from(pair.matched);
                 }
+                (None, Some(ch)) => *self.inserted.entry(ch).or_default() += 1,
+                (None, None) => {}
             }
         }
     }
-    if total_sent == 0 {
-        0.0
-    } else {
-        f64::from(correct) / f64::from(total_sent)
+
+    /// Fold another tally into this one.
+    pub fn merge(&mut self, other: &Self) {
+        for (ch, counts) in &other.sent {
+            let entry = self.sent.entry(*ch).or_default();
+            entry.correct += counts.correct;
+            entry.total += counts.total;
+        }
+        for (ch, count) in &other.inserted {
+            *self.inserted.entry(*ch).or_default() += count;
+        }
+    }
+
+    /// Characters copied right, over everything that had to be got right:
+    /// every character sent and every one typed that was not. Zero when
+    /// there was nothing to copy.
+    pub fn accuracy(&self) -> f64 {
+        self.accuracy_where(|_| true).unwrap_or(0.0)
+    }
+
+    /// The same, counting only the characters `keep` picks — one axis of a
+    /// mixed session. `None` when none of them came up at all.
+    pub fn accuracy_where(&self, keep: impl Fn(char) -> bool) -> Option<f64> {
+        let (mut correct, mut attempts) = (0u32, 0u32);
+        for (_, counts) in self.sent.iter().filter(|(ch, _)| keep(**ch)) {
+            correct += counts.correct;
+            attempts += counts.total;
+        }
+        for (_, count) in self.inserted.iter().filter(|(ch, _)| keep(**ch)) {
+            attempts += count;
+        }
+        (attempts > 0).then(|| f64::from(correct) / f64::from(attempts))
     }
 }
 
@@ -237,27 +223,86 @@ mod tests {
 
     #[test]
     fn letter_accuracy_counts_only_sent_characters() {
-        let groups = vec![("KM".to_string(), "KXU".to_string())];
-        let map = calculate_group_letter_accuracy(&groups);
-        assert_eq!(map.get(&'K').map(|a| (a.correct, a.total)), Some((1, 1)));
-        assert_eq!(map.get(&'M').map(|a| (a.correct, a.total)), Some((0, 1)));
+        let tally = CopyTally::of("KM", "KXU");
+        let counts = |ch| tally.sent.get(&ch).map(|a| (a.correct, a.total));
+        assert_eq!(counts('K'), Some((1, 1)));
+        assert_eq!(counts('M'), Some((0, 1)));
         // The typed-but-never-sent U is not a letter of its own.
-        assert!(!map.contains_key(&'U'));
+        assert!(!tally.sent.contains_key(&'U'));
     }
 
     #[test]
     fn accuracy_of_nothing_is_zero() {
-        assert_eq!(calculate_overall_character_accuracy(&[]), 0.0);
-        assert!(calculate_group_letter_accuracy(&[]).is_empty());
+        assert_eq!(CopyTally::default().accuracy(), 0.0);
+        assert!(CopyTally::of("", "").sent.is_empty());
     }
 
     #[test]
     fn overall_accuracy_counts_sent_letters() {
-        let groups = vec![
-            ("ABC".to_string(), "ABC".to_string()),
-            ("DE".to_string(), "DX".to_string()),
-        ];
-        let acc = calculate_overall_character_accuracy(&groups);
-        assert!((acc - 0.8).abs() < 1e-9);
+        let mut tally = CopyTally::of("ABC", "ABC");
+        tally.add("DE", "DX");
+        assert!((tally.accuracy() - 0.8).abs() < 1e-9);
+    }
+
+    /// Padding an answer, or typing every candidate for a character you were
+    /// not sure of, used to cost nothing: only sent characters were counted.
+    #[test]
+    fn characters_typed_but_never_sent_cost_accuracy() {
+        for (sent, typed, expected) in [
+            ("KMURE", "KMURE", 1.0),
+            ("KMURE", "KXMXUXRXEX", 0.5),
+            ("KM", "KMN", 2.0 / 3.0),
+            ("KMURE", "KMUURE", 5.0 / 6.0),
+            ("KMURE", "KMUSE", 0.8),
+        ] {
+            let tally = CopyTally::of(sent, typed);
+            assert!(
+                (tally.accuracy() - expected).abs() < 1e-9,
+                "{sent} copied as {typed}: {}",
+                tally.accuracy()
+            );
+        }
+        assert_eq!(CopyTally::of("KM", "KMN").inserted.get(&'N'), Some(&1));
+    }
+
+    #[test]
+    fn a_tally_can_be_read_one_axis_at_a_time() {
+        let mut tally = CopyTally::of("KM0", "KM5");
+        tally.add("E1", "E12");
+        let digits = tally.accuracy_where(|c| c.is_ascii_digit());
+        let letters = tally.accuracy_where(|c| !c.is_ascii_digit());
+        assert_eq!(letters, Some(1.0));
+        assert!((digits.unwrap() - 1.0 / 3.0).abs() < 1e-9);
+        assert_eq!(
+            CopyTally::of("KM", "KM").accuracy_where(|c| c.is_ascii_digit()),
+            None
+        );
+    }
+
+    #[test]
+    fn merging_tallies_adds_them_up() {
+        let mut whole = CopyTally::of("KM", "KX");
+        whole.merge(&CopyTally::of("KU", "KUU"));
+        let mut direct = CopyTally::of("KM", "KX");
+        direct.add("KU", "KUU");
+        assert_eq!(whole, direct);
+        assert_eq!(
+            whole.sent[&'K'],
+            LetterAccuracy {
+                correct: 2,
+                total: 2
+            }
+        );
+    }
+
+    #[test]
+    fn a_long_paste_aligns_without_trouble() {
+        let paste = "E".repeat(20_000);
+        let pairs = align_group("KMURE", &paste);
+        assert_eq!(pairs.iter().filter(|p| p.sent_char.is_some()).count(), 5);
+        assert_eq!(
+            pairs.iter().filter(|p| p.received_char.is_some()).count(),
+            20_000
+        );
     }
 }

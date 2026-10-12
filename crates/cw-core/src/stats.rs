@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::alignment::{LetterAccuracy, align_group, calculate_group_letter_accuracy};
+use crate::alignment::{CopyTally, LetterAccuracy, align_group};
 use crate::morse::LCWO_SEQUENCE;
 use crate::pool::compute_char_pool;
 use crate::sampling::{
@@ -107,15 +107,14 @@ fn lcwo_index(ch: char) -> usize {
 }
 
 fn session_letter_accuracy(session: &SessionResult) -> BTreeMap<char, LetterAccuracy> {
-    if !session.letter_accuracy.is_empty() {
-        return session.letter_accuracy.clone();
+    if !session.tally.sent.is_empty() {
+        return session.tally.sent.clone();
     }
-    let pairs: Vec<(String, String)> = session
-        .groups
-        .iter()
-        .map(|g| (g.sent.clone(), g.received.clone()))
-        .collect();
-    calculate_group_letter_accuracy(&pairs)
+    let mut tally = CopyTally::default();
+    for group in &session.groups {
+        tally.add(&group.sent, &group.received);
+    }
+    tally.sent
 }
 
 pub fn classify_mastery(accuracy01: f64, attempts: u32) -> MasteryStatus {
@@ -448,24 +447,7 @@ mod tests {
                 char_wpm: None,
             }],
             accuracy: 0.5,
-            letter_accuracy: {
-                let mut m = BTreeMap::new();
-                m.insert(
-                    'K',
-                    crate::alignment::LetterAccuracy {
-                        correct: 1,
-                        total: 1,
-                    },
-                );
-                m.insert(
-                    'M',
-                    crate::alignment::LetterAccuracy {
-                        correct: 0,
-                        total: 1,
-                    },
-                );
-                m
-            },
+            tally: CopyTally::of("KM", "K?"),
             alphabet_size: 2,
             avg_response_ms: 400.0,
             total_chars: 2,
@@ -494,7 +476,7 @@ mod tests {
         let mut out = session();
         out.date = date.to_string();
         out.timestamp = timestamp;
-        out.letter_accuracy.clear();
+        out.tally = CopyTally::default();
         out.groups = groups
             .iter()
             .map(|(sent, received)| GroupResult {
@@ -744,8 +726,8 @@ mod tests {
         settings.curriculum.char_set_mode = CharSetMode::Koch;
         let mut koch = session();
         koch.char_set_mode = CharSetMode::Koch;
-        koch.letter_accuracy.clear();
-        koch.letter_accuracy.insert(
+        koch.tally = CopyTally::default();
+        koch.tally.sent.insert(
             'K',
             crate::alignment::LetterAccuracy {
                 correct: 10,
@@ -754,7 +736,7 @@ mod tests {
         );
         let mut digits = koch.clone();
         digits.char_set_mode = CharSetMode::Digits;
-        digits.letter_accuracy.insert(
+        digits.tally.sent.insert(
             'K',
             crate::alignment::LetterAccuracy {
                 correct: 0,

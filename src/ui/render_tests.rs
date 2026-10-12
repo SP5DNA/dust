@@ -113,7 +113,7 @@ fn session(date: &str, accuracy: f64) -> SessionResult {
             char_wpm: Some(20.0),
         }],
         accuracy,
-        letter_accuracy: Default::default(),
+        tally: Default::default(),
         alphabet_size: 4,
         avg_response_ms: 450.0,
         total_chars: 40,

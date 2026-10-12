@@ -524,7 +524,7 @@ mod tests {
             groups: Vec::new(),
             group_timings: Vec::new(),
             accuracy: 1.0,
-            letter_accuracy: Default::default(),
+            tally: Default::default(),
             alphabet_size: 1,
             avg_response_ms: 1.0,
             total_chars: 1,
