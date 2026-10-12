@@ -488,10 +488,17 @@ pub fn resolve_station(settings: &TrainingSettings, rng: &mut impl Rng) -> Stati
     // Drawn once per station and carried, so a repeat is the same operator
     // sending again rather than a different one with the same call.
     let spread = settings.playback.fist_variation.clamp(0.0, 1.0);
+    // Tied means no Farnsworth spacing: the gaps go at the character speed.
+    // Drawn again from the copied range they would not, about half the time.
+    let effective_wpm = if settings.playback.link_char_to_effective {
+        char_wpm
+    } else {
+        resolve_effective_wpm(settings, char_wpm, rng)
+    };
     StationVoice {
         tone_hz: resolve_tone_hz(settings, rng),
         char_wpm,
-        effective_wpm: resolve_effective_wpm(settings, char_wpm, rng),
+        effective_wpm,
         volume: resolve_volume(settings, rng),
         weight: 1.0 + spread * rng.pick_in_range(-WEIGHT_SPREAD, WEIGHT_SPREAD),
         dash_ratio: 3.0 + spread * rng.pick_in_range(-DASH_RATIO_SPREAD, DASH_RATIO_SPREAD),
@@ -766,6 +773,22 @@ mod tests {
             seen_high |= n == 4;
         }
         assert!(seen_low && seen_high);
+    }
+
+    /// Tied is the default, and tied means no Farnsworth spacing at all: the
+    /// station sends its gaps at the speed it sends its characters. Drawing
+    /// the effective speed separately from the same range stretched the gaps
+    /// on about half the groups.
+    #[test]
+    fn a_tied_effective_speed_is_the_character_speed() {
+        let settings = TrainingSettings::default().clamp();
+        assert!(settings.playback.link_char_to_effective);
+        assert!(settings.playback.char_wpm_min < settings.playback.char_wpm_max);
+        let mut rng = FastrandRng(11);
+        for _ in 0..2_000 {
+            let voice = resolve_station(&settings, &mut rng);
+            assert_eq!(voice.effective_wpm, voice.char_wpm);
+        }
     }
 
     #[test]

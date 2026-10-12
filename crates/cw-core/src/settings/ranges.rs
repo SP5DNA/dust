@@ -144,6 +144,7 @@ impl TrainingSettings {
         if self.playback.link_char_to_effective {
             self.playback.effective_wpm_min = self.playback.char_wpm_min;
             self.playback.effective_wpm_max = self.playback.char_wpm_max;
+            self.playback.link_effective_wpm = self.playback.link_char_wpm;
         }
     }
 

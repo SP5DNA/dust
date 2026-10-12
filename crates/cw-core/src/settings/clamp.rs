@@ -41,17 +41,21 @@ impl TrainingSettings {
         if self.playback.link_char_wpm {
             self.playback.char_wpm_max = self.playback.char_wpm_min;
         }
-        self.playback.effective_wpm_min = self.playback.effective_wpm_min.clamp(5.0, 80.0);
-        self.playback.effective_wpm_max = self
-            .playback
-            .effective_wpm_max
-            .clamp(self.playback.effective_wpm_min, 80.0);
-        if self.playback.link_effective_wpm {
-            self.playback.effective_wpm_max = self.playback.effective_wpm_min;
-        }
         if self.playback.link_char_to_effective {
+            // Tied, the effective range is a copy of the character range,
+            // link included, so the two can never disagree about it.
             self.playback.effective_wpm_min = self.playback.char_wpm_min;
             self.playback.effective_wpm_max = self.playback.char_wpm_max;
+            self.playback.link_effective_wpm = self.playback.link_char_wpm;
+        } else {
+            self.playback.effective_wpm_min = self.playback.effective_wpm_min.clamp(5.0, 80.0);
+            self.playback.effective_wpm_max = self
+                .playback
+                .effective_wpm_max
+                .clamp(self.playback.effective_wpm_min, 80.0);
+            if self.playback.link_effective_wpm {
+                self.playback.effective_wpm_max = self.playback.effective_wpm_min;
+            }
         }
         self.playback.keyer_wpm = self.playback.keyer_wpm.clamp(5.0, 80.0);
         self.band.filter_width_hz = self

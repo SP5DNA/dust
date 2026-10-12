@@ -925,6 +925,29 @@ mod invariant_tests {
         assert_eq!(s.band.volume_max, 0.4);
     }
 
+    /// Tied, the effective range is the character range, link and all: an
+    /// effective link left over from before the tie must not collapse one
+    /// copy of the range while the other stays open.
+    #[test]
+    fn a_tied_effective_speed_takes_the_whole_character_range() {
+        for link_char in [false, true] {
+            let mut s = TrainingSettings::default();
+            s.playback.link_char_to_effective = true;
+            s.playback.link_char_wpm = link_char;
+            s.playback.link_effective_wpm = !link_char;
+            s.playback.char_wpm_min = 15.0;
+            s.playback.char_wpm_max = 28.0;
+            let s = s.clamp();
+            assert_eq!(
+                (s.playback.effective_wpm_min, s.playback.effective_wpm_max),
+                (s.playback.char_wpm_min, s.playback.char_wpm_max),
+                "char link {link_char}"
+            );
+            assert_eq!(s.playback.link_effective_wpm, s.playback.link_char_wpm);
+            assert_eq!(s.clone().clamp(), s);
+        }
+    }
+
     #[test]
     fn defaults_are_the_documented_ones() {
         assert_eq!(CharSetMode::default(), CharSetMode::Mixed);
