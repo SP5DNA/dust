@@ -384,6 +384,7 @@ pub fn App() -> Element {
             screen.set(to);
         }
     });
+    let go_listen = use_callback(move |()| go_to.call(Screen::Listen));
     let exit_training = use_callback({
         let app = app.clone();
         move |(): ()| {
@@ -462,7 +463,7 @@ pub fn App() -> Element {
                         AppCallbacks {
                             start_training,
                             go_home,
-                            go_listen: EventHandler::new(move |()| go_to.call(Screen::Listen)),
+                            go_listen,
                             start_band_preview,
                             stop_preview,
                             start_listen,

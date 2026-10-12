@@ -148,9 +148,9 @@ pub struct PaddleKeys {
     settings: Signal<TrainingSettings>,
     screen: Signal<Screen>,
     /// What the practice pad shows: the last few letters keyed on Settings.
-    pub heard: Signal<String>,
+    heard: Signal<String>,
     /// Why the sidetone cannot sound, once a try has found out.
-    pub sidetone_error: Signal<Option<String>>,
+    sidetone_error: Signal<Option<String>>,
 }
 
 /// Start the app's keyer, and hand it to every screen below.
@@ -237,7 +237,7 @@ impl PaddleKeys {
     }
 
     /// A paddle closed.
-    pub fn press(mut self, paddle: Paddle) {
+    fn press(mut self, paddle: Paddle) {
         if !self.taking_paddles() {
             return;
         }
@@ -259,7 +259,7 @@ impl PaddleKeys {
 
     /// A paddle opened. Always heard, whatever is taking paddles now: a
     /// release lost is a paddle stuck down.
-    pub fn release(mut self, paddle: Paddle) {
+    fn release(mut self, paddle: Paddle) {
         let out = self.keyer.write().release(paddle, mono_ms());
         self.act(out);
     }
