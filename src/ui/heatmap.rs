@@ -103,7 +103,7 @@ pub fn ActivityHeatmap(sessions: Vec<SessionResult>, today: String) -> Element {
         }
     });
     rsx! {
-        div { class: "card stack-sm heatmap-card",
+        div { class: "card stack-sm",
             CardHead {
                 icon: IconName::Timer,
                 title: "Practice calendar",
@@ -171,6 +171,7 @@ fn HeatmapGridView(
                                 class: cls,
                                 style: paint,
                                 title: "{title}",
+                                aria_label: "{title}",
                                 disabled: html_bool(cell.in_future),
                                 onclick: move |_| on_select.call(date.clone()),
                             }

@@ -79,7 +79,7 @@ pub fn SettingsView(
     on_play_sample: EventHandler<String>,
 ) -> Element {
     rsx! {
-        div { class: "stack settings-page",
+        div { class: "stack",
             header { class: "page-head",
                 h2 { class: "page-title", "Settings" }
                 p { class: "page-sub", "Everything the trainer sends, and how hard it makes you work." }

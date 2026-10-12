@@ -416,6 +416,8 @@ pub fn SliderField(
     let name = id.unwrap_or_else(|| control_id("slider", &label));
     let at_min = value <= min;
     let at_max = value >= max;
+    let less = format!("Decrease {label}");
+    let more = format!("Increase {label}");
     rsx! {
         div { class: if disabled { "slider disabled" } else { "slider" },
             div { class: "slider-head",
@@ -427,7 +429,7 @@ pub fn SliderField(
                     id: control_id("less", &name),
                     class: "step",
                     r#type: "button",
-                    aria_label: "Decrease",
+                    aria_label: less,
                     disabled: html_bool(disabled || at_min),
                     onclick: move |_| onchange.call(nudge(value - step, step, min, max)),
                     "−"
@@ -439,6 +441,7 @@ pub fn SliderField(
                     input {
                         id: name.clone(),
                         r#type: "range",
+                        aria_label: "{label}",
                         min: "{min}",
                         max: "{max}",
                         step: "{step}",
@@ -455,7 +458,7 @@ pub fn SliderField(
                     id: control_id("more", &name),
                     class: "step",
                     r#type: "button",
-                    aria_label: "Increase",
+                    aria_label: more,
                     disabled: html_bool(disabled || at_max),
                     onclick: move |_| onchange.call(nudge(value + step, step, min, max)),
                     "+"
@@ -491,15 +494,17 @@ pub fn NumberField(
     // value itself did not move — 999 into a field already at its top.
     let mut typed = use_signal(|| None::<String>);
     let shown = typed().unwrap_or_else(|| value.to_string());
+    let less = format!("Decrease {label}");
+    let more = format!("Increase {label}");
     rsx! {
         div { class: "field",
-            label { "{label}" }
+            label { r#for: "{name}", "{label}" }
             div { class: "stepper",
                 button {
                     id: control_id("less", &name),
                     class: "step",
                     r#type: "button",
-                    aria_label: "Decrease",
+                    aria_label: less,
                     disabled: html_bool(value <= min),
                     onclick: move |_| onchange.call(nudge(value - step, step, min, max)),
                     "−"
@@ -527,7 +532,7 @@ pub fn NumberField(
                     id: control_id("more", &name),
                     class: "step",
                     r#type: "button",
-                    aria_label: "Increase",
+                    aria_label: more,
                     disabled: html_bool(value >= max),
                     onclick: move |_| onchange.call(nudge(value + step, step, min, max)),
                     "+"

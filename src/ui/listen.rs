@@ -58,7 +58,7 @@ pub fn ListenView(
     let pool_empty = all_chars.is_empty();
     let busy = playing || streaming;
     rsx! {
-        div { class: "stack listen-page",
+        div { class: "stack",
             header { class: "row-between",
                 div {
                     h2 { class: "page-title", "Listen" }

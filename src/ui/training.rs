@@ -18,7 +18,7 @@ const _: () = assert!(INPUT_COMMIT_DEBOUNCE_MS < cw_core::AUTO_CONFIRM_DELAY_MS)
 
 /// The progress header, kept out of the view that updates on every key.
 #[component]
-pub fn TrainingScope(
+pub fn TrainingProgress(
     focused: usize,
     total: usize,
     playing: bool,
@@ -228,6 +228,7 @@ fn GroupCard(
             input {
                 id: "group-input-{idx}",
                 class: input_cls,
+                aria_label: "Answer for group {idx + 1}",
                 value: "{shown}",
                 disabled: html_bool(disabled),
                 readonly: html_bool(input_locked || is_confirmed),

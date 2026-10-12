@@ -117,10 +117,10 @@ pub fn StatsView(settings: TrainingSettings, sessions: Vec<SessionResult>) -> El
     // tab works out its own figures when it is shown, and only then: a tab
     // that is not open costs nothing.
     rsx! {
-        div { class: "stack stats-page",
+        div { class: "stack",
             header { class: "page-head",
                 h2 { class: "page-title", "Stats" }
-                p { class: "page-sub", "Everything scored on this device for the current alphabet." }
+                p { class: "page-sub", "Every session scored on this device, whatever it practised." }
             }
             div { class: "segmented",
                 for (which, label) in TABS {

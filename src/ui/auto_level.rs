@@ -69,7 +69,7 @@ pub fn AutoLevelCard(progress: AutoLevelProgress) -> Element {
         format!("{}/{}", progress.below_count, progress.below_target)
     };
     rsx! {
-        section { class: "card auto-level",
+        section { class: "card",
             CardHead { icon: IconName::Target, title: "Auto level", note: mixed,
                 span { class: "chip", "{progress.threshold as u32}% to pass" }
             }

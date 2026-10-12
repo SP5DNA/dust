@@ -19,11 +19,12 @@ use crate::ui::widgets::{CardHead, IconName, NumberField, SectionReset, Seg, con
 fn AlphabetField(label: &'static str, value: String, on_commit: EventHandler<String>) -> Element {
     let mut typed = use_signal(|| None::<String>);
     let shown = typed().unwrap_or(value);
+    let id = control_id("field", label);
     rsx! {
         div { class: "field",
-            label { "{label}" }
+            label { r#for: "{id}", "{label}" }
             input {
-                id: control_id("field", label),
+                id,
                 class: "mono",
                 value: "{shown}",
                 autocapitalize: "characters",

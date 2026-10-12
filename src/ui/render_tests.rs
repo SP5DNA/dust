@@ -1,9 +1,12 @@
-//! Smoke tests that render every screen to HTML.
+//! Smoke tests that render every screen to HTML, and drive the ones that
+//! own state.
 //!
 //! They run the real component bodies — the rsx, the formatting, the SVG
 //! geometry — so a panic or a broken template shows up here instead of on a
-//! phone. Effects and audio never run: the virtual DOM is rebuilt in place and
-//! thrown away.
+//! phone. The plain renders rebuild the virtual DOM in place and throw it
+//! away, so their effects never run; the `interactions` below go through the
+//! [`Ui`](crate::testing::Ui) harness, which settles effects after every
+//! event the way a renderer would. Audio is a recorder throughout.
 
 use std::rc::Rc;
 
@@ -22,7 +25,7 @@ use super::paddle::{PaddlePad, use_paddle_keys};
 use super::results::ResultsView;
 use super::settings::SettingsView;
 use super::stats::{StatsView, StatsViewProps};
-use super::training::{TrainingScope, TrainingView};
+use super::training::{TrainingProgress, TrainingView};
 use crate::audio::fake::Recorder;
 use crate::state::{AppState, Screen};
 
@@ -69,8 +72,8 @@ fn Keyed(
     }
 }
 
-/// Same shape the router draws: the scope is a sibling of the answer list,
-/// not a child of it.
+/// Same shape the router draws: the progress header is a sibling of the
+/// answer list, not a child of it.
 #[component]
 fn TrainingScreen(
     current: usize,
@@ -93,7 +96,7 @@ fn TrainingScreen(
     rsx! {
         Keyed { screen: Screen::Training, keyer_mode,
             div { class: "stack",
-                TrainingScope {
+                TrainingProgress {
                     focused,
                     total,
                     playing,
@@ -203,7 +206,7 @@ fn home_renders_the_hero_and_stats() {
     assert!(html.contains("94%"));
     // Desktop and web builds have audio, so the silent-build notice stays away.
     assert_eq!(
-        html.contains("no audio yet"),
+        html.contains("This build has no audio"),
         super::super::audio::AUDIO_IS_SILENT
     );
 }
@@ -453,6 +456,13 @@ fn settings_renders_every_card() {
         html.contains("class=\"stepper\""),
         "number fields should keep their steppers"
     );
+    // Every control says what it is to a screen reader: a number field's
+    // label is tied to its input, and a step button names what it steps.
+    assert!(html.contains("for=\"number-key-speed\""), "{html}");
+    assert!(html.contains("aria-label=\"Decrease Key speed\""));
+    assert!(html.contains("aria-label=\"Increase Rise time\""));
+    assert!(html.contains("for=\"field-sequence-order\""));
+    assert!(html.contains("aria-label=\"Rise time\""));
 }
 
 #[test]
@@ -696,6 +706,7 @@ fn an_unlocked_answer_box_does_not_look_disabled() {
         !tag.contains("readonly"),
         "HTML treats readonly=\"false\" as readonly, so the attribute must be absent: {tag}"
     );
+    assert!(tag.contains("aria-label=\"Answer for group 1\""), "{tag}");
 }
 
 #[test]
@@ -1181,8 +1192,8 @@ mod interactions {
         }
     }
 
-    // Under a runtime because the training screen now carries a live scope,
-    // and a scope redraws itself on a timer.
+    // Under a runtime: typing and keying are timed, by the debounce and the
+    // keyer.
     #[test]
     fn typing_is_refused_while_the_group_is_still_being_sent() {
         crate::testing::run(|| async {

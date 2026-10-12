@@ -12,7 +12,7 @@ use crate::ui::listen::ListenView;
 use crate::ui::results::ResultsView;
 use crate::ui::settings::SettingsView;
 use crate::ui::stats::StatsView;
-use crate::ui::training::{TrainingScope, TrainingView};
+use crate::ui::training::{TrainingProgress, TrainingView};
 
 /// What the screens show beyond the session itself: whichever preview is
 /// running, and the sample chip that is lit.
@@ -128,7 +128,7 @@ pub fn app_routes(
                 let keyer_mode = session.settings().playback.keyer_mode;
                 rsx! {
                     div { class: "stack",
-                        TrainingScope {
+                        TrainingProgress {
                             focused: view.focused,
                             total: view.sent.len(),
                             playing,

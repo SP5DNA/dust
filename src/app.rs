@@ -448,7 +448,7 @@ pub fn App() -> Element {
                         }
                     }
                 }
-                div { class: "screen", id: "screen-{screen_key}", key: "{screen_key}",
+                div { class: "screen", id: "screen-{screen_key}",
                     { app_routes(
                         signals,
                         ViewState {
@@ -566,7 +566,7 @@ mod tests {
         .into_iter()
         .map(screen_key)
         .collect();
-        // The key remounts the screen wrapper, so it has to differ per screen.
+        // The key names the screen wrapper, so it has to differ per screen.
         let mut unique = keys.clone();
         unique.sort_unstable();
         unique.dedup();
@@ -1443,11 +1443,11 @@ mod ui_tests {
             ui.click("btn-start-training");
             assert!(ui.run_until(20_000, |ui| ui.screen() == "training").await);
 
-            // A frame of the receiver trace while a group is sending.
+            // Nothing redraws on a timer while a group is sending.
             let _ = ui.take_work();
             ui.advance(40).await;
-            let frame = ui.take_work();
-            assert!(frame <= 4, "a scope frame cost {frame} mutations");
+            let sending = ui.take_work();
+            assert!(sending <= 4, "40 ms of sending cost {sending} mutations");
 
             assert!(ui.run_until(30_000, |ui| ui.has("Your turn")).await);
 

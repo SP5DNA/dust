@@ -108,9 +108,9 @@ pub fn Home(
                 div { class: "notice",
                     Icon { name: IconName::Volume }
                     div {
-                        div { style: "font-weight: 700;", "This build has no audio yet" }
+                        div { style: "font-weight: 700;", "This build has no audio" }
                         p { class: "muted", style: "margin: 0.15rem 0 0;",
-                            "Sessions still run and score at the right pace, they just play nothing. Android audio is the next piece of work."
+                            "It is the one for bringing up a new phone toolchain. Sessions still run and score at the right pace; they just play nothing."
                         }
                     }
                 }
