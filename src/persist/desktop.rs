@@ -189,7 +189,7 @@ impl Store for DesktopStore {
 /// Android hands an app no `HOME`, so `dirs` has nothing to work from. The
 /// first entry of `/proc/self/cmdline` is the package name, and
 /// `/data/data/<package>/files` is the private directory the app owns.
-#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+#[cfg(any(target_os = "android", test))]
 fn package_from_cmdline(raw: &[u8]) -> Option<String> {
     let text = String::from_utf8_lossy(raw);
     let name = text.split('\0').next()?.trim();

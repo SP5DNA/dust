@@ -76,7 +76,12 @@ jobs:
           cargo clippy -p dust --no-default-features --features web --target wasm32-unknown-unknown --locked -- -D warnings
 
       - name: Lint the silent build
-        run: cargo clippy -p dust --no-default-features --features mobile-silent --locked -- -D warnings
+        run: cargo clippy -p dust --no-default-features --features mobile-silent --all-targets --locked -- -D warnings
+
+      # The silent backend is the only one with no device behind it, so its
+      # timing is all a session has to go on: run the app's tests through it.
+      - name: Test the silent build
+        run: cargo test -p dust --no-default-features --features mobile-silent --locked
 
       - name: Upload coverage
         uses: codecov/codecov-action@v5

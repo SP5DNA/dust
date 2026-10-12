@@ -6,6 +6,8 @@
 // The targets are alternatives, not layers: each brings its own runtime and
 // its own audio backend. Say so plainly rather than fail later on a type
 // mismatch three modules away.
+#[cfg(not(any(feature = "native-audio", feature = "web", feature = "silent-audio")))]
+compile_error!("Choose a build: `--features web`, `desktop`, `mobile` or `mobile-silent`.");
 #[cfg(all(feature = "web", feature = "native-runtime"))]
 compile_error!("`web` is the browser build; build it on its own, not with `desktop` or `mobile`.");
 #[cfg(all(feature = "native-audio", feature = "silent-audio"))]

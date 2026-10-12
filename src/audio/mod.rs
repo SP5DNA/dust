@@ -6,18 +6,12 @@
 
 #[cfg(any(feature = "web", test))]
 mod band_queue;
-#[cfg(any(
-    feature = "native-audio",
-    feature = "web",
-    feature = "silent-audio",
-    test
-))]
 mod epoch;
-#[cfg(any(feature = "native-audio", test))]
+#[cfg(feature = "native-audio")]
 mod mixer;
 #[cfg(feature = "native-audio")]
 mod native;
-#[cfg(any(feature = "native-audio", feature = "web", test))]
+#[cfg(any(feature = "native-audio", feature = "web"))]
 mod shape;
 #[cfg(feature = "silent-audio")]
 mod silent;
@@ -25,7 +19,6 @@ mod wait;
 #[cfg(feature = "web")]
 mod web;
 
-#[cfg_attr(not(test), allow(unused_imports))]
 pub use wait::{PlaybackOutcome, PlaybackSignal, PlaybackWait, WaitFlags};
 
 use std::rc::Rc;
@@ -109,10 +102,6 @@ pub fn default_backend() -> Result<Box<dyn MorseBackend>, String> {
     #[cfg(feature = "silent-audio")]
     {
         Ok(Box::new(silent::MorsePlayer::new()?))
-    }
-    #[cfg(not(any(feature = "native-audio", feature = "web", feature = "silent-audio")))]
-    {
-        Err("This build has no audio backend.".to_string())
     }
 }
 

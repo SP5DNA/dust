@@ -114,8 +114,6 @@ web = [
 # Desktop is the system webview (wry). `dx serve --platform desktop` and the
 # shipped installers use this.
 desktop = ["dioxus/desktop", "native-runtime", "native-audio", "dep:tao"]
-# Old name for the same renderer.
-webview = ["desktop"]
 # Android/iOS still use a system webview. `dx` enables this feature
 # automatically for `--platform android`.
 mobile = ["dioxus/mobile", "native-runtime", "native-audio"]
