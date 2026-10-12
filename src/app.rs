@@ -526,6 +526,9 @@ mod ui_tests {
     /// Exit and End session leave a session the same way. Exit used to
     /// decide for itself, from whether anything was confirmed yet, and threw
     /// away an answer End session would have kept.
+    ///
+    /// Clicked on the heels of the last key, too: the letter is still in the
+    /// box's pause on its way to the session, and is kept all the same.
     #[test]
     fn exit_keeps_a_typed_answer_just_as_end_session_does() {
         run(|| async {
@@ -535,14 +538,56 @@ mod ui_tests {
                 let (mut ui, recorder) = awaiting_answer(settings).await;
                 let sent = recorder.texts().first().cloned().expect("a group was sent");
                 ui.type_into("group-input-0", &sent[..1]);
-                ui.advance(200).await;
                 ui.click(button);
                 assert!(
                     ui.run_until(2_000, |ui| ui.screen() == "results").await,
                     "{button} threw the answer away"
                 );
-                assert_eq!(ui.store.load_sessions().len(), 1, "{button}");
+                let stored = ui.store.load_sessions();
+                assert_eq!(stored.len(), 1, "{button}");
+                assert_eq!(stored[0].groups[0].received, sent[..1], "{button}");
             }
+        });
+    }
+
+    /// The answer window closes on everything typed before it did, the last
+    /// key included — even one still in the box's pause on its way to the
+    /// session when the window ran out.
+    #[test]
+    fn the_last_key_before_the_answer_window_closes_is_kept() {
+        run(|| async {
+            let mut settings = short_session();
+            settings.playback.group_timeout = 1.0;
+            let (mut ui, recorder) = awaiting_answer(settings).await;
+            let sent = recorder.texts().first().cloned().expect("a group was sent");
+            // The window opened at most one poll ago. This key lands inside
+            // its last 50 ms, nearer its end than the box's pause is long.
+            ui.advance(970).await;
+            assert_eq!(ui.screen(), "training");
+            ui.type_into("group-input-0", &sent[..1]);
+            assert!(
+                ui.run_until(2_000, |ui| ui.screen() == "results").await,
+                "the answer window never closed"
+            );
+            let stored = ui.store.load_sessions();
+            assert_eq!(stored.len(), 1);
+            assert_eq!(stored[0].groups[0].received, sent[..1]);
+        });
+    }
+
+    /// Enter on the heels of a key confirms what the box shows, not what the
+    /// session had been told before the key.
+    #[test]
+    fn enter_right_after_a_key_confirms_the_whole_answer() {
+        run(|| async {
+            let (mut ui, recorder) = awaiting_answer(short_session()).await;
+            let sent = recorder.texts().first().cloned().expect("a group was sent");
+            ui.type_into("group-input-0", &sent[..1]);
+            ui.press_enter("group-input-0");
+            assert!(ui.run_until(2_000, |ui| ui.screen() == "results").await);
+            let stored = ui.store.load_sessions();
+            assert_eq!(stored.len(), 1);
+            assert_eq!(stored[0].groups[0].received, sent[..1]);
         });
     }
 

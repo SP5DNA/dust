@@ -175,6 +175,7 @@ fn TrainingRoute() -> Element {
                 repeat_total: view.repeat_total,
                 repeat_done: view.repeat_done,
                 keyer_mode,
+                answer: ctx.answer,
                 on_change,
                 on_confirm,
                 on_submit,

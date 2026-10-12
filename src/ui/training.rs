@@ -3,6 +3,7 @@ use dioxus::core::Runtime;
 use dioxus::html::{ScrollBehavior, ScrollLogicalPosition, ScrollToOptions};
 use dioxus::prelude::*;
 
+use crate::session_runtime::AnswerOutbox;
 use crate::time::sleep_ms;
 use crate::ui::paddle::{PaddleKeys, paddle_hint};
 use crate::ui::widgets::{
@@ -40,24 +41,21 @@ pub fn TrainingProgress(
     }
 }
 
-/// The answer being typed into the open box, and what the session has heard
-/// of it.
+/// The answer being typed into the open box.
 ///
-/// Typing stays in the box. The session hears it when its length matches the
-/// group, when it has sat still for the debounce, or when the box is left —
-/// Enter, a click anywhere else, End session — and each of those goes through
-/// [`AnswerDraft::commit`], so "tell the session, unless it has heard this
-/// already" is written once.
+/// Typing stays in the box, and waits in the [`AnswerOutbox`]. The session is
+/// handed it when its length matches the group, or once it has sat still for
+/// the debounce — or, by the runtime, the moment anything else happens to the
+/// session first: Enter, End session, Exit, the answer window closing.
 #[derive(Clone, Copy, PartialEq)]
 struct AnswerDraft {
     /// The text in the box. Only that box reads it, so a key redraws one card.
     text: Signal<String>,
     /// The group `text` is the answer to.
     at: CopyValue<Option<usize>>,
-    /// What the session last heard, and for which group.
-    heard: CopyValue<Option<(usize, String)>>,
-    /// Moved on by every commit and every new group: a debounce that finds
-    /// it moved stands down.
+    outbox: AnswerOutbox,
+    /// Moved on by every key and every new group: a debounce that finds it
+    /// moved stands down.
     epoch: CopyValue<u64>,
     /// The view that owns the debounce, so one still waiting ends with it,
     /// whoever started it — a key in a card, or the paddles.
@@ -66,11 +64,11 @@ struct AnswerDraft {
 }
 
 impl AnswerDraft {
-    fn use_new(on_change: EventHandler<(usize, String)>) -> Self {
+    fn use_new(outbox: AnswerOutbox, on_change: EventHandler<(usize, String)>) -> Self {
         use_hook(|| Self {
             text: Signal::new(String::new()),
             at: CopyValue::new(None),
-            heard: CopyValue::new(None),
+            outbox,
             epoch: CopyValue::new(0),
             owner: dioxus::core::current_scope_id(),
             on_change,
@@ -89,27 +87,29 @@ impl AnswerDraft {
         (*self.at.peek() == Some(idx)).then(|| self.text.peek().clone())
     }
 
-    /// The box for `idx` now holds `text`. The session hears it at once when
-    /// its length matches the group's, or matched what it heard last — a box
-    /// backed off a full answer must stop auto-confirm straight away — and
-    /// otherwise once typing has paused.
+    /// The box for `idx` now holds `text`. The session is handed it at once
+    /// when its length matches the group's, or matched what it was handed
+    /// last — a box backed off a full answer must stop auto-confirm straight
+    /// away — and otherwise once typing has paused.
     fn edit(mut self, idx: usize, text: String, sent: &str) {
-        let full_before = matches!(
-            &*self.heard.peek(),
-            Some((at, heard)) if *at == idx && answer_length_matches(sent, heard)
-        );
+        let full_before = self
+            .outbox
+            .handed_for(idx, |handed| answer_length_matches(sent, handed));
         let full_now = answer_length_matches(sent, &text);
         self.at.set(Some(idx));
-        self.text.set(text);
-        if full_before || full_now {
-            self.commit(idx);
+        self.text.set(text.clone());
+        let epoch = self.cancel_pending();
+        if !self.outbox.hold(idx, text) {
             return;
         }
-        let epoch = self.cancel_pending();
+        if full_before || full_now {
+            self.hand_over();
+            return;
+        }
         Runtime::current().spawn(self.owner, async move {
             sleep_ms(INPUT_COMMIT_DEBOUNCE_MS).await;
             if *self.epoch.peek() == epoch {
-                self.commit(idx);
+                self.hand_over();
             }
         });
     }
@@ -121,18 +121,13 @@ impl AnswerDraft {
         self.edit(idx, text, sent);
     }
 
-    /// Tell the session what the box for `idx` holds now, unless it has heard
-    /// exactly that already. A debounce still waiting has nothing left to do.
-    fn commit(mut self, idx: usize) {
+    /// Hand the session whatever is waiting. A debounce still waiting has
+    /// nothing left to do.
+    fn hand_over(self) {
         self.cancel_pending();
-        let Some(text) = self.peek_for(idx) else {
-            return;
-        };
-        if matches!(&*self.heard.peek(), Some((at, heard)) if *at == idx && *heard == text) {
-            return;
+        if let Some(answer) = self.outbox.take() {
+            self.on_change.call(answer);
         }
-        self.heard.set(Some((idx, text.clone())));
-        self.on_change.call((idx, text));
     }
 
     /// A new group is up, or this one is over: nothing waiting goes out, and
@@ -262,7 +257,6 @@ fn GroupCard(
                         });
                     }
                 },
-                onblur: move |_| draft.commit(idx),
                 oninput: move |e| {
                     if !closed {
                         draft.edit(idx, e.value(), &sent_for_input);
@@ -275,8 +269,8 @@ fn GroupCard(
                         e.prevent_default();
                         return;
                     }
+                    // What is typed reaches the session ahead of the confirm.
                     if e.key() == Key::Enter {
-                        draft.commit(idx);
                         on_confirm.call(());
                     }
                 },
@@ -308,6 +302,8 @@ pub fn TrainingView(
     locked: bool,
     repeat_total: u32,
     repeat_done: u32,
+    /// Where the box's text waits on its way to the session.
+    answer: AnswerOutbox,
     on_change: EventHandler<(usize, String)>,
     on_confirm: EventHandler<()>,
     on_submit: EventHandler<()>,
@@ -315,7 +311,7 @@ pub fn TrainingView(
     #[props(default)] keyer_mode: KeyerMode,
 ) -> Element {
     let send_index = (repeat_done + 1).min(repeat_total.max(1));
-    let draft = AnswerDraft::use_new(on_change);
+    let draft = AnswerDraft::use_new(answer, on_change);
     let current_done = confirmed.get(current).copied().unwrap_or(false);
     let can_paddle = !playing && !locked && !current_done;
     let sent_now = groups.get(current).cloned().unwrap_or_default();
@@ -395,10 +391,7 @@ pub fn TrainingView(
                 button {
                     id: control_id("btn", "end session"),
                     class: "btn btn-primary",
-                    onclick: move |_| {
-                        draft.commit(current);
-                        on_submit.call(());
-                    },
+                    onclick: move |_| on_submit.call(()),
                     Icon { name: IconName::Flag }
                     "End session"
                 }

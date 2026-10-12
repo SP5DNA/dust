@@ -693,15 +693,6 @@ impl Ui {
         self.press_key(id, Key::Enter, dioxus::prelude::Code::Enter);
     }
 
-    /// Leave the field with this id: a click or a tap somewhere else.
-    pub fn blur(&mut self, id: &str) {
-        self.fire(
-            "blur",
-            id,
-            Box::new(dioxus::html::SerializedFocusData::default()),
-        );
-    }
-
     pub fn press_key(&mut self, id: &str, key: Key, code: dioxus::prelude::Code) {
         self.fire(
             "keydown",

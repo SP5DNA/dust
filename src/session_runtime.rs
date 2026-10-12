@@ -61,6 +61,78 @@ impl LiveSession {
     }
 }
 
+/// The open answer box's text, on its way to the session.
+///
+/// The box tells the session what is typed once typing pauses, so a burst of
+/// keys is one event rather than one per character. Until then the text waits
+/// here, and the runtime hands it to the machine ahead of whatever comes next
+/// — the answer window closing, a send ending, Enter, End session, Exit. So
+/// nothing that moves the session on can overtake a keystroke, however close
+/// the two land.
+///
+/// It also remembers what the session was last handed, which is what tells
+/// the box whether a change is news, and whether the answer had already
+/// reached full length.
+#[derive(Clone, Copy, PartialEq)]
+pub struct AnswerOutbox(CopyValue<Outbox>);
+
+#[derive(Default)]
+struct Outbox {
+    /// Typed into the box for this group, and not handed over yet.
+    waiting: Option<(usize, String)>,
+    /// What the session was handed last, and for which group.
+    handed: Option<(usize, String)>,
+}
+
+impl AnswerOutbox {
+    pub fn new() -> Self {
+        Self(CopyValue::new(Outbox::default()))
+    }
+
+    /// Group `index`'s box now holds `text`. Says whether that is news to
+    /// the session: the text it was handed last is not, and nothing waits.
+    pub fn hold(mut self, index: usize, text: String) -> bool {
+        let mut outbox = self.0.write();
+        let news = !matches!(&outbox.handed, Some((at, handed)) if *at == index && *handed == text);
+        outbox.waiting = news.then_some((index, text));
+        news
+    }
+
+    /// Whatever is waiting, now handed over.
+    pub fn take(mut self) -> Option<(usize, String)> {
+        let mut outbox = self.0.write();
+        let waiting = outbox.waiting.take()?;
+        outbox.handed = Some(waiting.clone());
+        Some(waiting)
+    }
+
+    /// Whether what the session was last handed for group `index` passes
+    /// `test`.
+    pub fn handed_for(self, index: usize, test: impl FnOnce(&str) -> bool) -> bool {
+        self.0
+            .peek()
+            .handed
+            .as_ref()
+            .is_some_and(|(at, text)| *at == index && test(text))
+    }
+
+    /// What has to reach the machine ahead of `event`: whatever is waiting,
+    /// unless `event` is that box's own newer word on what it holds.
+    fn take_before(mut self, event: &SessionEvent) -> Option<(usize, String)> {
+        let mut waiting = self.take();
+        if let SessionEvent::Input { index, text } = event {
+            waiting = waiting.filter(|(at, _)| at != index);
+            self.0.write().handed = Some((*index, text.clone()));
+        }
+        waiting
+    }
+
+    /// A new session: nothing typed for the last one carries over.
+    fn clear(mut self) {
+        *self.0.write() = Outbox::default();
+    }
+}
+
 /// The generators one group draws from, one per thing it decides.
 #[derive(Clone, Copy)]
 enum GroupStream {
@@ -108,6 +180,7 @@ pub fn start_session(ctx: AppCtx) {
         }
     };
     // Each session draws from a sampler of its own, seeded afresh.
+    ctx.answer.clear();
     let sampler = Sampler::new(&sessions.peek(), &fitted, seed_rng());
     let (machine, effects) = SessionMachine::start(
         SessionId::new(lease.turn()),
@@ -155,7 +228,16 @@ fn dispatch(ctx: AppCtx, lease: &Lease, event: SessionEvent) {
         else {
             return;
         };
-        let effects = live.machine.apply(event, MonoMs(mono_ms()));
+        let now = MonoMs(mono_ms());
+        // Typing still waiting out the box's pause came before this event,
+        // so the machine hears it first.
+        let mut effects = ctx
+            .answer
+            .take_before(&event)
+            .map_or_else(Vec::new, |(index, text)| {
+                live.machine.apply(SessionEvent::Input { index, text }, now)
+            });
+        effects.extend(live.machine.apply(event, now));
         // Much of what arrives changes nothing — a key while the box is
         // locked, a timer the machine has forgotten — and publishing it
         // anyway would copy the whole session and redraw the screen for it.
@@ -359,6 +441,96 @@ mod tests {
                     .map(|g| g.input().to_string()),
                 Some(String::new())
             );
+        });
+    }
+
+    /// What group `index` holds in the running session.
+    fn input_of(h: &Harness, index: usize) -> Option<String> {
+        h.ctx
+            .runtime
+            .peek()
+            .as_ref()
+            .and_then(|s| s.group(index))
+            .map(|g| g.input().to_string())
+    }
+
+    /// A key still in the box's pause when the answer window closes counts:
+    /// the window closes on it, not on what the session had been told before.
+    #[test]
+    fn typing_still_on_its_way_is_heard_before_the_answer_window_closes() {
+        run(|| async {
+            let mut settings = test_settings();
+            settings.playback.group_timeout = 1.0;
+            let mut h = Harness::with_settings(settings);
+            h.start_training();
+            assert!(h.run_until(4_000, |h| h.awaiting_answer() == Some(0)).await);
+            // Typed, and not yet handed over — nothing will hand it over but
+            // the runtime.
+            assert!(h.ctx.answer.hold(0, "K".into()));
+            assert!(h.run_until(4_000, |h| h.texts().len() == 2).await);
+            assert_eq!(input_of(&h, 0).as_deref(), Some("K"));
+            let confirmed = h.ctx.runtime.peek().as_ref().map(|s| s.view().confirmed);
+            assert_eq!(confirmed, Some(vec![true, false]));
+        });
+    }
+
+    /// The same for every other way a group can close: what was typed gets
+    /// there first.
+    #[test]
+    fn typing_still_on_its_way_is_heard_before_confirm_and_finish() {
+        run(|| async {
+            for event in [SessionEvent::Confirm, SessionEvent::FinishNow] {
+                let mut h = Harness::new();
+                h.start_training();
+                assert!(h.run_until(4_000, |h| h.awaiting_answer() == Some(0)).await);
+                assert!(h.ctx.answer.hold(0, "K".into()));
+                h.send(event.clone());
+                if event == SessionEvent::FinishNow {
+                    let result = h.ctx.result.peek().clone().expect("{event:?} kept it");
+                    assert_eq!(result.groups[0].received, "K", "{event:?}");
+                } else {
+                    assert_eq!(input_of(&h, 0).as_deref(), Some("K"), "{event:?}");
+                }
+            }
+        });
+    }
+
+    /// The box's own word on what it holds is newer than what was waiting.
+    #[test]
+    fn an_input_stands_for_what_was_waiting_for_its_box() {
+        run(|| async {
+            let mut h = Harness::new();
+            h.start_training();
+            assert!(h.run_until(4_000, |h| h.awaiting_answer() == Some(0)).await);
+            assert!(h.ctx.answer.hold(0, "K".into()));
+            h.type_answer(0, "Q");
+            assert_eq!(input_of(&h, 0).as_deref(), Some("Q"));
+            // And the session has been handed "Q": holding it again is no news.
+            assert!(!h.ctx.answer.hold(0, "Q".into()));
+            h.send(SessionEvent::Confirm);
+            assert_eq!(input_of(&h, 0).as_deref(), Some("Q"));
+        });
+    }
+
+    /// A key that lands as a session closes does not carry over into the
+    /// next one.
+    #[test]
+    fn a_new_session_starts_with_nothing_on_its_way() {
+        run(|| async {
+            let mut settings = test_settings();
+            settings.playback.lock_input_during_group_playback = false;
+            let mut h = Harness::with_settings(settings);
+            h.start_training();
+            assert!(h.run_until(4_000, |h| h.awaiting_answer() == Some(0)).await);
+            h.send(SessionEvent::Abort);
+            assert_eq!(h.screen(), Screen::Home);
+            // The closing box takes one more key.
+            assert!(h.ctx.answer.hold(0, "K".into()));
+            h.start_training();
+            assert!(h.run_until(4_000, |h| h.awaiting_answer() == Some(0)).await);
+            assert_eq!(input_of(&h, 0).as_deref(), Some(""));
+            // Nor does what the last session was handed decide what is news.
+            assert!(h.ctx.answer.hold(0, "K".into()));
         });
     }
 

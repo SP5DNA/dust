@@ -27,6 +27,7 @@ use super::settings::SettingsView;
 use super::stats::{StatsView, StatsViewProps};
 use super::training::{TrainingProgress, TrainingView};
 use crate::audio::fake::Recorder;
+use crate::session_runtime::AnswerOutbox;
 use crate::state::{AppState, Screen};
 
 std::thread_local! {
@@ -95,6 +96,7 @@ fn TrainingScreen(
     on_stop: EventHandler<()>,
     #[props(default)] keyer_mode: KeyerMode,
 ) -> Element {
+    let answer = use_hook(AnswerOutbox::new);
     rsx! {
         Keyed { screen: Screen::Training, keyer_mode,
             div { class: "stack",
@@ -116,6 +118,7 @@ fn TrainingScreen(
                     repeat_total,
                     repeat_done,
                     keyer_mode,
+                    answer,
                     on_change,
                     on_confirm,
                     on_submit,
@@ -1112,6 +1115,7 @@ mod interactions {
     fn ClosingBoxHarness() -> Element {
         let mut shown = use_signal(|| true);
         let mut typed = use_signal(String::new);
+        let answer = use_hook(AnswerOutbox::new);
         rsx! {
             Keyed { screen: Screen::Training,
                 if shown() {
@@ -1125,6 +1129,7 @@ mod interactions {
                         locked: false,
                         repeat_total: 1,
                         repeat_done: 1,
+                        answer,
                         on_change: move |(_, value): (usize, String)| typed.set(value),
                         on_confirm: move |()| {},
                         on_submit: move |_| {},
@@ -1331,19 +1336,6 @@ mod interactions {
             key,
             commit: ui.take_work(),
         }
-    }
-
-    /// Leaving the box — for the header's Exit, say, or anywhere else on the
-    /// page — hands the session what was typed, without the debounce.
-    #[test]
-    fn leaving_the_box_commits_what_it_holds() {
-        crate::testing::run(|| async {
-            let mut ui = Ui::new(AnsweringHarness, ());
-            ui.type_into("group-input-0", "K");
-            assert!(!ui.has("committed:"));
-            ui.blur("group-input-0");
-            assert!(ui.has("committed:K"), "{}", ui.html());
-        });
     }
 
     /// One character short of the send stays in the box. The session does not

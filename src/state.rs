@@ -11,7 +11,7 @@ use dioxus::prelude::*;
 use crate::persist::Store;
 use crate::playback::Preview;
 use crate::player::{AudioError, BackendFactory, Player};
-use crate::session_runtime::LiveSession;
+use crate::session_runtime::{AnswerOutbox, LiveSession};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Screen {
@@ -97,6 +97,8 @@ pub struct AppCtx {
     pub preview: Signal<Preview>,
     /// The groups the stream has sent, newest last.
     pub stream_heard: Signal<Vec<String>>,
+    /// The open answer box's text, on its way to the session.
+    pub answer: AnswerOutbox,
     app: CopyValue<AppState>,
 }
 
@@ -114,6 +116,7 @@ impl AppCtx {
             toasts: Toasts::new(),
             preview: Signal::new(Preview::Idle),
             stream_heard: Signal::new(Vec::new()),
+            answer: AnswerOutbox::new(),
             app: CopyValue::new(app),
         }
     }
