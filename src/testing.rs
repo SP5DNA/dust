@@ -193,11 +193,9 @@ impl Harness {
             .in_app(|| app.takeover_audio(&settings_now))
             .expect("the fake player always opens");
         let effects = self
-            .in_app(|| {
-                boot_machine_session(settings_now.clone(), &history, &app, generation, signals)
-            })
+            .in_app(|| boot_machine_session(settings_now, &history, &app, generation, signals))
             .expect("a fresh session always boots");
-        self.in_app(|| spawn_effects(effects, settings_now, app.clone(), generation, signals));
+        self.in_app(|| spawn_effects(effects, app.clone(), generation, signals));
         self.pump();
     }
 
@@ -225,7 +223,11 @@ impl Harness {
     }
 
     pub fn phase(&self) -> Option<cw_core::SessionPhase> {
-        self.app.machine.borrow().as_ref().map(|m| m.phase())
+        self.app
+            .session
+            .borrow()
+            .as_ref()
+            .map(|live| live.machine().phase())
     }
 
     pub fn screen(&self) -> Screen {

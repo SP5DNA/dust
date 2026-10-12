@@ -254,11 +254,11 @@ pub fn App() -> Element {
             };
             let history = sessions();
             let Some(effects) =
-                boot_machine_session(settings_now.clone(), &history, &app, generation, signals)
+                boot_machine_session(settings_now, &history, &app, generation, signals)
             else {
                 return;
             };
-            spawn_effects(effects, settings_now, (*app).clone(), generation, signals);
+            spawn_effects(effects, (*app).clone(), generation, signals);
         }
     });
 

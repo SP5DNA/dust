@@ -2,12 +2,13 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use cw_core::{
-    FastrandRng, GroupSession, Sampler, SessionMachine, SessionResult, StationVoice,
-    TrainingSettings, Transmission, resolve_pileup, resolve_station,
+    FastrandRng, GroupSession, SessionResult, StationVoice, TrainingSettings, Transmission,
+    resolve_pileup, resolve_station,
 };
 use dioxus::prelude::*;
 
 use crate::audio::MorseBackend;
+use crate::session_runtime::LiveSession;
 use crate::time::seed_rng;
 
 /// A factory for the audio backend. Injectable so the session runtime can be
@@ -43,7 +44,7 @@ pub struct AppState {
     pub session_gen: Rc<Cell<u64>>,
     pub player: Rc<RefCell<Option<Box<dyn MorseBackend>>>>,
     pub rng: Rc<RefCell<FastrandRng>>,
-    pub machine: Rc<RefCell<Option<SessionMachine<Sampler>>>>,
+    pub session: Rc<RefCell<Option<LiveSession>>>,
     make_player: BackendFactory,
 }
 
@@ -57,7 +58,7 @@ impl AppState {
             session_gen: Rc::new(Cell::new(0)),
             player: Rc::new(RefCell::new(None)),
             rng: Rc::new(RefCell::new(FastrandRng(seed_rng()))),
-            machine: Rc::new(RefCell::new(None)),
+            session: Rc::new(RefCell::new(None)),
             make_player,
         }
     }
@@ -65,7 +66,7 @@ impl AppState {
     pub fn bump_session(&self) -> u64 {
         let next = self.session_gen.get() + 1;
         self.session_gen.set(next);
-        *self.machine.borrow_mut() = None;
+        *self.session.borrow_mut() = None;
         next
     }
 

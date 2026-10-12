@@ -54,13 +54,36 @@ impl Default for FastrandRng {
 impl Rng for FastrandRng {
     fn f64(&mut self) -> f64 {
         // SplitMix64 → unit interval, no extra crate in cw-core.
-        self.0 = self.0.wrapping_add(0x9E3779B97F4A7C15);
-        let mut z = self.0;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
-        z ^= z >> 31;
-        (z >> 11) as f64 / ((1u64 << 53) as f64)
+        self.0 = self.0.wrapping_add(SPLITMIX_GAMMA);
+        (mix(self.0) >> 11) as f64 / ((1u64 << 53) as f64)
     }
+}
+
+impl FastrandRng {
+    /// A generator of its own for `stream`, derived from this one's state
+    /// without drawing from it: the same state and stream always give the
+    /// same generator, and any other pair an unrelated one.
+    ///
+    /// Adding to the seed is not the same thing. SplitMix64 steps its state
+    /// by a fixed increment, so a seed that is another plus a multiple of
+    /// that increment is the other's stream a few draws on — two streams
+    /// seeded that way overlap, draw for draw. Hashing the stream into the
+    /// state puts each one somewhere unrelated on the cycle.
+    #[must_use]
+    pub fn fork(&self, stream: u64) -> Self {
+        Self(mix(self.0 ^ mix(stream)))
+    }
+}
+
+/// SplitMix64's state increment.
+const SPLITMIX_GAMMA: u64 = 0x9E37_79B9_7F4A_7C15;
+
+/// SplitMix64's output function: a bijection on `u64` that scatters nearby
+/// inputs across the whole range.
+fn mix(mut z: u64) -> u64 {
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
 }
 
 /// One of `pool`, each as likely as its weight; a missing weight counts as
@@ -206,5 +229,28 @@ mod tests {
         // A different seed gives a different stream.
         let mut other = FastrandRng(1);
         assert_ne!(FastrandRng::default().f64(), other.f64());
+    }
+
+    /// Streams forked from neighbouring seeds, and neighbouring streams of
+    /// one seed, share no draws. Seeding each with a multiple of SplitMix64's
+    /// own increment added in made one session's stations the last-but-one
+    /// session's, two draws on.
+    #[test]
+    fn forked_streams_do_not_overlap() {
+        let mut seen = std::collections::HashSet::new();
+        for seed in 0..64u64 {
+            for stream in 0..16u64 {
+                let mut rng = FastrandRng(seed).fork(stream);
+                for _ in 0..8 {
+                    assert!(
+                        seen.insert(rng.f64().to_bits()),
+                        "seed {seed}, stream {stream} repeats a draw of another stream"
+                    );
+                }
+            }
+        }
+        // And the same seed and stream are the same generator, every time.
+        assert_eq!(FastrandRng(5).fork(3), FastrandRng(5).fork(3));
+        assert_ne!(FastrandRng(5).fork(3), FastrandRng(5).fork(4));
     }
 }

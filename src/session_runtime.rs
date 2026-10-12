@@ -1,9 +1,9 @@
 //! Owns the session machine, audio, and effect execution. UI sends events only.
 
 use cw_core::{
-    CharSamplingState, FastrandRng, MonoMs, Rng, Sampler, SessionEffect, SessionEvent,
-    SessionMachine, StationVoice, TrainingSettings, Transmission, apply_auto_level,
-    evaluate_auto_level, generate_training_group, resolve_pileup, resolve_station,
+    CharSamplingState, FastrandRng, MonoMs, Sampler, SessionEffect, SessionEvent, SessionMachine,
+    TrainingSettings, Transmission, apply_auto_level, evaluate_auto_level, generate_training_group,
+    resolve_pileup, resolve_station,
 };
 use dioxus::prelude::*;
 
@@ -12,7 +12,66 @@ use crate::persist::{
 };
 use crate::playback::{PlayError, play_text_now, sleep_cancelable};
 use crate::state::{AppState, Screen, SessionSignals};
-use crate::time::{local_date_string, mono_ms, now_ms};
+use crate::time::{local_date_string, mono_ms, now_ms, seed_rng};
+
+/// A session in progress: the machine that decides it, and the stations it
+/// is sent by.
+pub struct LiveSession {
+    machine: SessionMachine<Sampler>,
+    /// Where every group's stations are drawn from. Drawn afresh for each
+    /// session, so no two sessions — in one launch or across launches — hear
+    /// the same operators.
+    stations: FastrandRng,
+}
+
+impl LiveSession {
+    pub fn machine(&self) -> &SessionMachine<Sampler> {
+        &self.machine
+    }
+
+    /// What the receiver hears for group `index`: the station being copied,
+    /// and whoever else is calling across it.
+    ///
+    /// Both are drawn from generators that depend only on the session and
+    /// the group, so every repeat of a group — and every retry after a
+    /// stalled send — comes from the same operators, with the same pile-up
+    /// around them: a station repeating its call does not change frequency,
+    /// speed or strength between sends. Nothing has to be carried across the
+    /// sends for that, while the next group is somebody else.
+    ///
+    /// The others send groups of their own, drawn from the same curriculum
+    /// so they sound like stations rather than noise — but off a blank
+    /// slate, so a pile-up never teaches the sampler anything. Only the
+    /// station you answer counts.
+    fn transmission(&self, index: usize, text: String) -> Transmission {
+        let settings = self.machine.session().settings();
+        let group = self.stations.fork(index as u64);
+        let voice = resolve_station(settings, &mut group.fork(GroupStream::Voice as u64));
+        let most = settings.band.stations_max.max(1) as usize;
+        if most <= 1 {
+            return Transmission::alone(text, voice);
+        }
+        let mut rng = group.fork(GroupStream::Callers as u64);
+        let mut elsewhere = CharSamplingState::default();
+        let texts: Vec<String> = (0..most.saturating_sub(1))
+            .map(|_| generate_training_group(settings, &mut elsewhere, &mut rng))
+            .collect();
+        Transmission {
+            others: resolve_pileup(settings, &voice, &text, &texts, &mut rng),
+            text,
+            voice,
+        }
+    }
+}
+
+/// The generators one group draws from, one per thing it decides.
+#[derive(Clone, Copy)]
+enum GroupStream {
+    /// The station you are copying.
+    Voice,
+    /// Whoever else is calling.
+    Callers,
+}
 
 pub fn dispatch_event(
     app: &AppState,
@@ -23,33 +82,26 @@ pub fn dispatch_event(
     if app.session_gen.get() != expected_gen {
         return Vec::new();
     }
-    let mut slot = app.machine.borrow_mut();
-    let Some(machine) = slot.as_mut() else {
+    let mut slot = app.session.borrow_mut();
+    let Some(live) = slot.as_mut() else {
         return Vec::new();
     };
-    if machine.session().session_id().raw() != expected_gen {
+    if live.machine.session().session_id().raw() != expected_gen {
         return Vec::new();
     }
-    let effects = machine.apply(event, MonoMs(mono_ms()));
-    runtime.set(Some(machine.session().clone()));
+    let effects = live.machine.apply(event, MonoMs(mono_ms()));
+    runtime.set(Some(live.machine.session().clone()));
     effects
 }
 
 pub fn send_command(app: AppState, signals: SessionSignals, event: SessionEvent) {
     let generation = app.session_gen.get();
-    let settings = signals
-        .runtime
-        .read()
-        .as_ref()
-        .map(|s| s.settings().clone())
-        .unwrap_or_else(|| (signals.settings)());
     let effects = dispatch_event(&app, signals.runtime, event, generation);
-    spawn_effects(effects, settings, app, generation, signals);
+    spawn_effects(effects, app, generation, signals);
 }
 
 pub fn spawn_effects(
     effects: Vec<SessionEffect>,
-    settings: TrainingSettings,
     app: AppState,
     generation: u64,
     signals: SessionSignals,
@@ -58,7 +110,7 @@ pub fn spawn_effects(
         return;
     }
     spawn(async move {
-        drive_effects(effects, settings, app, generation, signals).await;
+        drive_effects(effects, app, generation, signals).await;
     });
 }
 
@@ -80,8 +132,7 @@ pub fn boot_machine_session(
         return None;
     }
     // Each session draws from a sampler of its own, seeded afresh.
-    let seed = (app.rng.borrow_mut().f64() * u64::MAX as f64) as u64;
-    let sampler = Sampler::new(history, &settings, seed);
+    let sampler = Sampler::new(history, &settings, seed_rng());
     let (machine, effects) = SessionMachine::start(
         cw_core::SessionId::new(generation),
         MonoMs(mono_ms()),
@@ -90,13 +141,15 @@ pub fn boot_machine_session(
     );
     runtime.set(Some(machine.session().clone()));
     screen.set(Screen::Training);
-    *app.machine.borrow_mut() = Some(machine);
+    *app.session.borrow_mut() = Some(LiveSession {
+        machine,
+        stations: FastrandRng(seed_rng()),
+    });
     Some(effects)
 }
 
 async fn drive_effects(
     mut pending: Vec<SessionEffect>,
-    settings: TrainingSettings,
     app: AppState,
     generation: u64,
     signals: SessionSignals,
@@ -110,82 +163,13 @@ async fn drive_effects(
             if app.session_gen.get() != generation {
                 return;
             }
-            pending.extend(handle_effect(effect, &settings, &app, generation, signals).await);
+            pending.extend(handle_effect(effect, &app, generation, signals).await);
         }
     }
 }
 
-/// The station behind one group.
-///
-/// Derived from the session and the group's place in it, so every repeat of
-/// that group comes from the same operator — a station repeating its call does
-/// not change frequency, speed or strength between sends — while the next
-/// group is somebody else. Deriving it beats remembering it: nothing has to be
-/// carried across the sends, and a retry after a stalled send tunes back in to
-/// the same station rather than a new one.
-fn station_for(settings: &TrainingSettings, generation: u64, index: usize) -> StationVoice {
-    resolve_station(settings, &mut group_rng(generation, index, 0))
-}
-
-/// A generator that depends only on the session and the group, so every repeat
-/// of a group — and every retry after a stalled send — tunes back in to the
-/// same operators rather than a new set.
-fn group_rng(generation: u64, index: usize, salt: u64) -> FastrandRng {
-    FastrandRng(
-        generation
-            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
-            .wrapping_add((index as u64).wrapping_mul(0x2545_F491))
-            .wrapping_add(salt)
-            | 1,
-    )
-}
-
-/// What the receiver hears for this group: the station being copied, and
-/// whoever else is calling across it.
-///
-/// The others send groups of their own, drawn from the same curriculum so they
-/// sound like stations rather than noise — but from a generator of their own,
-/// off a blank slate, so a pile-up never teaches the sampler anything. Only
-/// the station you answer counts.
-fn transmission_for(
-    settings: &TrainingSettings,
-    generation: u64,
-    index: usize,
-    text: String,
-) -> Transmission {
-    let voice = station_for(settings, generation, index);
-    let most = settings.band.stations_max.max(1) as usize;
-    if most <= 1 {
-        return Transmission::alone(text, voice);
-    }
-    let mut rng = group_rng(generation, index, 0x51ED_2701);
-    let mut elsewhere = CharSamplingState::default();
-    let texts: Vec<String> = (0..most.saturating_sub(1))
-        .map(|_| generate_training_group(settings, &mut elsewhere, &mut rng))
-        .collect();
-    Transmission {
-        others: resolve_pileup(settings, &voice, &text, &texts, &mut rng),
-        text,
-        voice,
-    }
-}
-
-/// The settings a session was started with.
-///
-/// Every group in a session is built from these, not from whatever the
-/// settings screen holds now: a change made mid-session belongs to the next
-/// one, or the alphabet could shift under a session already being scored.
-/// Falls back to what the caller was handed when there is no machine yet.
-fn session_settings(
-    machine: Option<&SessionMachine<Sampler>>,
-    fallback: &TrainingSettings,
-) -> TrainingSettings {
-    machine.map_or_else(|| fallback.clone(), |m| m.session().settings().clone())
-}
-
 async fn handle_effect(
     effect: SessionEffect,
-    settings: &TrainingSettings,
     app: &AppState,
     generation: u64,
     signals: SessionSignals,
@@ -205,8 +189,15 @@ async fn handle_effect(
             if app.session_gen.get() != generation {
                 return Vec::new();
             }
-            let snapshot = session_settings(app.machine.borrow().as_ref(), settings);
-            let transmission = transmission_for(&snapshot, generation, index, text);
+            // Every group is built from the settings the session started with,
+            // not from whatever the settings screen holds now: a change made
+            // mid-session belongs to the next one.
+            let Some((snapshot, transmission)) = app.session.borrow().as_ref().map(|live| {
+                let settings = live.machine.session().settings().clone();
+                (settings, live.transmission(index, text))
+            }) else {
+                return Vec::new();
+            };
             let outcome = play_text_now(app, generation, &transmission, &snapshot).await;
             if app.session_gen.get() != generation {
                 return Vec::new();
@@ -233,14 +224,12 @@ async fn handle_effect(
             dispatch_event(app, runtime, SessionEvent::TimerFired { id }, generation)
         }
         SessionEffect::PersistAndShowResults => {
-            *app.machine.borrow_mut() = None;
             finish_session(app.clone(), signals);
             Vec::new()
         }
         SessionEffect::AbortToHome => {
             app.bump_session();
             app.silence_audio();
-            *app.machine.borrow_mut() = None;
             runtime.set(None);
             screen.set(Screen::Home);
             Vec::new()
@@ -326,7 +315,7 @@ mod tests {
             assert_eq!(h.sessions.peek().len(), 1);
             assert_eq!(crate::persist::load_sessions().len(), 1);
             // The machine is torn down, and the audio with it.
-            assert!(h.app.machine.borrow().is_none());
+            assert!(h.app.session.borrow().is_none());
             assert!(h.calls().contains(&Call::Shutdown));
             // Two groups, one send each.
             assert_eq!(h.texts().len(), 2);
@@ -483,11 +472,11 @@ mod tests {
             assert_eq!(h.screen(), Screen::Training);
             assert!(!matches!(h.phase(), Some(SessionPhase::Aborted)));
             assert_eq!(
-                h.app
-                    .machine
-                    .borrow()
-                    .as_ref()
-                    .map(|m| m.session().session_id().raw()),
+                h.app.session.borrow().as_ref().map(|live| live
+                    .machine()
+                    .session()
+                    .session_id()
+                    .raw()),
                 Some(second_gen)
             );
             // And the session in view is the new one.
@@ -507,7 +496,7 @@ mod tests {
             h.send(SessionEvent::Abort);
             assert_eq!(h.screen(), Screen::Home);
             assert!(h.runtime.peek().is_none());
-            assert!(h.app.machine.borrow().is_none());
+            assert!(h.app.session.borrow().is_none());
 
             h.advance(5_000).await;
             assert_eq!(h.screen(), Screen::Home);
@@ -725,6 +714,32 @@ mod tests {
         });
     }
 
+    /// Every launch tunes in its own stations. The first session of every
+    /// launch used to bring the same pitch, speed, strength and fist for each
+    /// of its groups, and the same callers across them, because the stations
+    /// were drawn from a counter that starts at zero each time the app does.
+    #[test]
+    fn two_launches_do_not_hear_the_same_stations() {
+        run(|| async {
+            let first_session = || {
+                let mut settings = test_settings();
+                settings.playback.char_wpm_min = 15.0;
+                settings.playback.char_wpm_max = 40.0;
+                settings.band.side_tone_min = 400.0;
+                settings.band.side_tone_max = 900.0;
+                settings.band.link_volume = false;
+                settings.band.volume_min = 0.2;
+                settings.band.volume_max = 1.0;
+                let mut h = Harness::with_settings(settings);
+                h.start_training();
+                h.recorder.voices()
+            };
+            let (one, other) = (first_session(), first_session());
+            assert_eq!(one.len(), 1);
+            assert_ne!(one, other, "two launches opened on the same station");
+        });
+    }
+
     /// A pile-up changes what you hear, not what you answer. The session still
     /// scores the station you were copying, and the others are only ever in the
     /// way — which is the whole point of them.
@@ -909,7 +924,7 @@ mod tests {
             let effects =
                 h.in_app(|| boot_machine_session(test_settings(), &[], &app, generation, signals));
             assert!(effects.is_none());
-            assert!(app.machine.borrow().is_none());
+            assert!(app.session.borrow().is_none());
             assert_eq!(h.screen(), Screen::Home);
         });
     }
@@ -982,13 +997,11 @@ mod tests {
             h.start_training();
             let app = h.app.clone();
             let generation = app.session_gen.get();
-            let settings_now = h.settings.peek().clone();
             let signals = h.signals();
             // A timer the machine never started.
             h.in_app(|| {
                 spawn_effects(
                     vec![SessionEffect::StartTimer { id: 999, ms: 20 }],
-                    settings_now,
                     app.clone(),
                     generation,
                     signals,
@@ -1007,7 +1020,6 @@ mod tests {
             h.start_training();
             let app = h.app.clone();
             let generation = app.session_gen.get();
-            let settings_now = h.settings.peek().clone();
             let signals = h.signals();
             h.send(SessionEvent::Abort);
             h.recorder.clear();
@@ -1017,7 +1029,6 @@ mod tests {
                         index: 1,
                         text: "KM".into(),
                     }],
-                    settings_now,
                     app.clone(),
                     generation,
                     signals,
@@ -1042,12 +1053,10 @@ mod tests {
             // The machine is gone; an effect that arrives late finds nothing.
             let app = h.app.clone();
             let generation = app.session_gen.get();
-            let settings_now = h.settings.peek().clone();
             let signals = h.signals();
             h.in_app(|| {
                 spawn_effects(
                     vec![SessionEffect::StartTimer { id: 1, ms: 10 }],
-                    settings_now,
                     app.clone(),
                     generation,
                     signals,
