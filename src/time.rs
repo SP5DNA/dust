@@ -22,32 +22,32 @@ pub fn now_ms() -> u64 {
 /// keyer, and the session's response times, which a wall clock stepped back
 /// would turn negative.
 ///
-/// Tests run on a paused Tokio clock, so wall time would make every straight-key
-/// hold look like a dit. When a Tokio runtime is up, this follows that clock;
-/// a browser has its own monotonic clock in `performance.now()`.
+/// Natively this is Tokio's clock, which is the system's monotonic clock in
+/// the app and the paused, hand-advanced one in tests, so a test's session
+/// is timed by the same clock its timers run on. A browser has its own
+/// monotonic clock in `performance.now()`.
 pub fn mono_ms() -> u64 {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        if tokio::runtime::Handle::try_current().is_ok() {
-            return CLOCK_ORIGIN.with(|origin| {
-                let start = origin.get().unwrap_or_else(|| {
-                    let now = tokio::time::Instant::now();
-                    origin.set(Some(now));
-                    now
-                });
-                tokio::time::Instant::now()
-                    .saturating_duration_since(start)
-                    .as_millis() as u64
+        CLOCK_ORIGIN.with(|origin| {
+            let start = origin.get().unwrap_or_else(|| {
+                let now = tokio::time::Instant::now();
+                origin.set(Some(now));
+                now
             });
-        }
+            tokio::time::Instant::now()
+                .saturating_duration_since(start)
+                .as_millis() as u64
+        })
     }
     #[cfg(target_arch = "wasm32")]
     {
-        if let Some(performance) = web_sys::window().and_then(|window| window.performance()) {
-            return performance.now().max(0.0) as u64;
-        }
+        // Every page has a window; the wall clock is only for a context
+        // without one, which this app never runs in.
+        web_sys::window()
+            .and_then(|window| window.performance())
+            .map_or_else(now_ms, |performance| performance.now().max(0.0) as u64)
     }
-    now_ms()
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -93,6 +93,17 @@ pub fn seed_rng() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    /// Outside any runtime too: the clock runs forward, never back.
+    #[test]
+    fn the_monotonic_clock_never_runs_back() {
+        let mut last = super::mono_ms();
+        for _ in 0..1_000 {
+            let now = super::mono_ms();
+            assert!(now >= last);
+            last = now;
+        }
+    }
+
     #[test]
     fn no_two_seeds_are_the_same() {
         let seeds: std::collections::BTreeSet<u64> = (0..64).map(|_| super::seed_rng()).collect();

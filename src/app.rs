@@ -832,6 +832,52 @@ mod ui_tests {
         });
     }
 
+    /// Dragging a band slider during the preview moves the band a few times
+    /// a second, not on every frame: each move rebuilds the band and
+    /// measures its AGC, on the thread the slider is drawn on.
+    #[test]
+    fn the_band_follows_a_dragged_slider_without_rebuilding_every_frame() {
+        run(|| async {
+            let (mut ui, recorder) = Ui::app_with_settings(with_receiver());
+            ui.click("nav-settings");
+            ui.click("btn-band-preview");
+            assert!(ui.run_until(20_000, |_| !recorder.texts().is_empty()).await);
+            let rebuilds = || {
+                recorder
+                    .calls()
+                    .iter()
+                    .filter(|call| matches!(call, crate::audio::fake::Call::Band(_)))
+                    .count()
+            };
+            let before = rebuilds();
+            for step in 0..20 {
+                ui.type_into("slider-filter-width", &format!("{}", 300 + 10 * step));
+                ui.advance(16).await;
+            }
+            ui.advance(200).await;
+            let followed = rebuilds() - before;
+            assert!(
+                (1..=6).contains(&followed),
+                "{followed} rebuilds for one drag"
+            );
+            // And it ends on where the slider was left.
+            let last = recorder
+                .calls()
+                .into_iter()
+                .rev()
+                .find_map(|call| match call {
+                    crate::audio::fake::Call::Band(key) => Some(key),
+                    _ => None,
+                });
+            let mut expected = with_receiver();
+            expected.band.filter_width_hz = 490.0;
+            assert_eq!(
+                last,
+                Some(cw_core::band::BandKey::of(&expected.clamp().band))
+            );
+        });
+    }
+
     #[test]
     fn the_band_preview_can_be_stopped_where_it_was_started() {
         run(|| async {

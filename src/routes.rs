@@ -4,20 +4,28 @@
 //! practice screen's history, and a key in a training answer does not
 //! rebuild the shell.
 
-use cw_core::{Paddle, SessionEvent, compute_char_pool, dit_ms_for_wpm};
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use cw_core::{Paddle, SessionEvent, TrainingSettings, compute_char_pool, dit_ms_for_wpm};
 use dioxus::prelude::*;
 
 use crate::persist::auto_progress;
 use crate::playback;
 use crate::session_runtime::{send_event, start_session};
 use crate::state::{AppCtx, Screen};
-use crate::time::local_date_string;
+use crate::time::{local_date_string, sleep_ms};
 use crate::ui::home::Home;
 use crate::ui::listen::ListenView;
 use crate::ui::results::ResultsView;
 use crate::ui::settings::SettingsView;
 use crate::ui::stats::StatsView;
 use crate::ui::training::{TrainingScope, TrainingView};
+
+/// How often the band follows the settings while it is being previewed:
+/// often enough to sound live, seldom enough that a slider dragged across
+/// the noise does not rebuild the band, and measure its AGC, every frame.
+const BAND_FOLLOW_MS: u32 = 80;
 
 /// The paddle keyer the shell runs for every screen but training, as the
 /// screens that show it need it.
@@ -71,13 +79,7 @@ fn SettingsRoute() -> Element {
     let on_preview_band = use_callback(move |()| playback::start_band_preview(ctx));
     let on_stop_band = use_callback(move |()| ctx.stop_audio());
     let on_play_sample = use_callback(move |text| playback::start_sample(ctx, text));
-    use_effect(move || {
-        if !ctx.preview.read().is_band() {
-            return;
-        }
-        let settings = ctx.settings.read().clone().clamp();
-        ctx.app().player.follow_band(&settings);
-    });
+    use_band_follow(ctx);
     let preview = ctx.preview.read();
     rsx! {
         SettingsView {
@@ -92,6 +94,33 @@ fn SettingsRoute() -> Element {
             on_paddle_up: paddles.up,
         }
     }
+}
+
+/// While the band preview runs, the band follows the settings: the latest
+/// of them, at most every [`BAND_FOLLOW_MS`].
+fn use_band_follow(ctx: AppCtx) {
+    let latest = use_hook(|| Rc::new(RefCell::new(None::<TrainingSettings>)));
+    use_effect(move || {
+        if !ctx.preview.read().is_band() {
+            return;
+        }
+        let settings = ctx.settings.read().clone().clamp();
+        if latest.borrow_mut().replace(settings).is_some() {
+            // A follow is already on its way, and will take these.
+            return;
+        }
+        let latest = latest.clone();
+        spawn(async move {
+            sleep_ms(BAND_FOLLOW_MS).await;
+            let settings = latest.borrow_mut().take();
+            // A preview stopped meanwhile stays silent.
+            if let Some(settings) = settings
+                && ctx.preview.peek().is_band()
+            {
+                ctx.app().player.follow_band(&settings);
+            }
+        });
+    });
 }
 
 #[component]
