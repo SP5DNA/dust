@@ -483,23 +483,29 @@ fn listen_document_paddles(keys: PaddleKeys) {
 #[cfg(not(feature = "web"))]
 fn listen_document_paddles(_keys: PaddleKeys) {}
 
+/// How to key with the paddles in `mode`: what the practice pad and the
+/// training screen both tell you.
+pub fn paddle_hint(mode: KeyerMode) -> &'static str {
+    match mode {
+        KeyerMode::Straight => {
+            "Hold [ or ] as a straight key — a short press is a dit, a long one a dah."
+        }
+        KeyerMode::Ultimatic => {
+            "Hold [ for dits and ] for dahs. The last paddle you close repeats — squeeze for the middle of X or P."
+        }
+        KeyerMode::IambicA | KeyerMode::IambicB => {
+            "Hold [ for dits and ] for dahs. Squeeze both to alternate; a hold repeats at the key speed."
+        }
+    }
+}
+
 /// Where the paddles are tried out on Settings: a focus target with the
 /// letters they key, and why there is no sidetone when there is none. The
 /// keys themselves are the app's: they reach the keyer from the page root.
 #[component]
 pub fn PaddlePad(mode: KeyerMode) -> Element {
     let keys = use_context::<PaddleKeys>();
-    let hint = match mode {
-        KeyerMode::Straight => {
-            "Hold [ or ] as a straight key — a short press is a dit, a long one a dah."
-        }
-        KeyerMode::Ultimatic => {
-            "Hold [ for dits and ] for dahs. The last paddle you close repeats. The sidetone plays here, not only in training."
-        }
-        KeyerMode::IambicA | KeyerMode::IambicB => {
-            "Hold [ for dits and ] for dahs. Squeeze both to alternate. The sidetone plays here, not only in training."
-        }
-    };
+    let hint = paddle_hint(mode);
     let heard = keys.heard.read();
     let shown = if heard.is_empty() {
         "· −"
@@ -511,7 +517,9 @@ pub fn PaddlePad(mode: KeyerMode) -> Element {
             id: control_id("paddle", "practice"),
             class: "paddle-practice",
             tabindex: "0",
-            p { class: "muted", style: "margin: 0; font-size: 0.8rem;", "{hint}" }
+            p { class: "muted", style: "margin: 0; font-size: 0.8rem;",
+                "{hint} The sidetone plays here, not only in training."
+            }
             p {
                 id: "paddle-heard",
                 class: "paddle-heard",

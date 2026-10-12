@@ -1,7 +1,7 @@
 use cw_core::{AutoLevelChange, AutoLevelProgress, LevelAxis, MixedAutoLevelAxis};
 use dioxus::prelude::*;
 
-use crate::ui::widgets::Icon;
+use crate::ui::widgets::{CardHead, IconName};
 
 /// What to tell the user when a session moved their level.
 pub fn change_message(change: &AutoLevelChange) -> String {
@@ -70,14 +70,7 @@ pub fn AutoLevelCard(progress: AutoLevelProgress) -> Element {
     };
     rsx! {
         section { class: "card auto-level",
-            div { class: "card-head",
-                div { class: "card-head-main",
-                    span { class: "card-icon", Icon { name: "target" } }
-                    div {
-                        h3 { class: "card-title", "Auto level" }
-                        p { class: "card-note", "{mixed}" }
-                    }
-                }
+            CardHead { icon: IconName::Target, title: "Auto level", note: mixed,
                 span { class: "chip", "{progress.threshold as u32}% to pass" }
             }
             div { class: "auto-bars",

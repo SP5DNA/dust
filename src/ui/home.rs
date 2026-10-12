@@ -8,7 +8,7 @@ use crate::audio::AUDIO_IS_SILENT;
 use crate::ui::auto_level::AutoLevelCard;
 use crate::ui::heatmap::{ActivityHeatmap, StreakCard};
 use crate::ui::tips::TipsCarousel;
-use crate::ui::widgets::{Icon, control_id, pretty_number};
+use crate::ui::widgets::{CardHead, Icon, IconName, control_id, pretty_number};
 
 /// Where the learner is, as Home says it: in the hero, and on the tile.
 #[derive(Debug, PartialEq)]
@@ -106,7 +106,7 @@ pub fn Home(
             }
             if AUDIO_IS_SILENT {
                 div { class: "notice",
-                    Icon { name: "volume" }
+                    Icon { name: IconName::Volume }
                     div {
                         div { style: "font-weight: 700;", "This build has no audio yet" }
                         p { class: "muted", style: "margin: 0.15rem 0 0;",
@@ -119,7 +119,7 @@ pub fn Home(
                 div { class: "hero-top",
                     span { class: "eyebrow", "Current alphabet" }
                     span { class: "hero-level",
-                        Icon { name: "flag" }
+                        Icon { name: IconName::Flag }
                         "{level.summary}"
                     }
                 }
@@ -163,14 +163,14 @@ pub fn Home(
                         id: control_id("btn", "start training"),
                         class: "btn btn-primary",
                         onclick: move |_| on_start.call(()),
-                        Icon { name: "play" }
+                        Icon { name: IconName::Play }
                         "Start training"
                     }
                     button {
                         id: control_id("btn", "listen to letters"),
                         class: "btn btn-hero",
                         onclick: move |_| on_listen.call(()),
-                        Icon { name: "headphones" }
+                        Icon { name: IconName::Headphones }
                         "Listen"
                     }
                 }
@@ -192,14 +192,10 @@ pub fn Home(
                 }
             } else {
                 div { class: "card",
-                    div { class: "card-head",
-                        div { class: "card-head-main",
-                            span { class: "card-icon", Icon { name: "sparkle" } }
-                            div {
-                                h3 { class: "card-title", "First session" }
-                                p { class: "card-note", "{pool_len} characters are in the pool right now." }
-                            }
-                        }
+                    CardHead {
+                        icon: IconName::Sparkle,
+                        title: "First session",
+                        note: format!("{pool_len} characters are in the pool right now."),
                     }
                     p { class: "muted", style: "margin: 0;",
                         "Type what you hear — the trainer scores every character, then moves the level for you."

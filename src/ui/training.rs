@@ -4,8 +4,10 @@ use dioxus::html::{ScrollBehavior, ScrollLogicalPosition, ScrollToOptions};
 use dioxus::prelude::*;
 
 use crate::time::sleep_ms;
-use crate::ui::paddle::PaddleKeys;
-use crate::ui::widgets::{CharacterComparison, Icon, ProgressHeader, control_id, html_bool};
+use crate::ui::paddle::{PaddleKeys, paddle_hint};
+use crate::ui::widgets::{
+    CharacterComparison, Icon, IconName, ProgressHeader, control_id, html_bool,
+};
 
 /// Incomplete answers wait this long before the session sees them. Short
 /// enough that a pause still lands well before auto-confirm would have cared,
@@ -216,7 +218,7 @@ fn GroupCard(
                     if is_confirmed {
                         span { class: "sent", "{sent}" }
                         span { class: if correct { "badge good" } else { "badge bad" },
-                            Icon { name: if correct { "check" } else { "x" } }
+                            Icon { name: if correct { IconName::Check } else { IconName::X } }
                         }
                     } else {
                         span { class: "sent", "•••" }
@@ -331,21 +333,11 @@ pub fn TrainingView(
         keys.stop();
     }));
     let hint = if playing && locked {
-        "Listen — the answer box unlocks when the group finishes."
+        "Listen — the answer box unlocks when the group finishes.".to_string()
     } else if playing {
-        "Listen, or type along — the box stays open while this group is sent."
+        "Listen, or type along — the box stays open while this group is sent.".to_string()
     } else {
-        match keyer_mode {
-            KeyerMode::Straight => {
-                "Type the letters, or hold [ or ] as a straight key — a short press is a dit, a long one a dah."
-            }
-            KeyerMode::Ultimatic => {
-                "Type the letters, or hold [ for dits and ] for dahs. The last paddle you close repeats — squeeze for the middle of X or P."
-            }
-            KeyerMode::IambicA | KeyerMode::IambicB => {
-                "Type the letters, or hold [ for dits and ] for dahs. Squeeze both to alternate. A hold repeats at the key speed."
-            }
-        }
+        format!("Type the letters, or key them. {}", paddle_hint(keyer_mode))
     };
     rsx! {
         div { style: "display: contents;",
@@ -354,7 +346,7 @@ pub fn TrainingView(
                     p { class: "muted", style: "margin: 0;", "{hint}" }
                     if repeat_total > 1 {
                         span { class: "chip",
-                            Icon { name: "repeat" }
+                            Icon { name: IconName::Repeat }
                             "{repeat_total}× per group"
                         }
                     }
@@ -410,14 +402,14 @@ pub fn TrainingView(
                         draft.commit(current);
                         on_submit.call(());
                     },
-                    Icon { name: "flag" }
+                    Icon { name: IconName::Flag }
                     "End session"
                 }
                 button {
                     id: control_id("btn", "discard"),
                     class: "btn btn-danger",
                     onclick: move |_| on_stop.call(()),
-                    Icon { name: "x" }
+                    Icon { name: IconName::X }
                     "Discard"
                 }
             }

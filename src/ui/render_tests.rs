@@ -348,42 +348,10 @@ fn the_app_shell_renders_the_practice_screen() {
 
 #[test]
 fn every_icon_draws_something() {
-    for name in [
-        "signal",
-        "chart",
-        "sliders",
-        "play",
-        "stop",
-        "headphones",
-        "check",
-        "x",
-        "chevron",
-        "back",
-        "sun",
-        "moon",
-        "auto",
-        "envelope",
-        "gauge",
-        "waves",
-        "target",
-        "shuffle",
-        "repeat",
-        "letters",
-        "timer",
-        "volume",
-        "trophy",
-        "sparkle",
-        "flag",
-        "nonsense",
-    ] {
-        let html = render_props(
-            super::widgets::Icon,
-            super::widgets::IconProps {
-                name: name.to_string(),
-            },
-        );
-        assert!(html.contains("<svg"), "{name} rendered no svg");
-        assert!(html.contains("<path"), "{name} rendered no path");
+    for name in super::widgets::IconName::ALL {
+        let html = render_props(super::widgets::Icon, super::widgets::IconProps { name });
+        assert!(html.contains("<svg"), "{name:?} rendered no svg");
+        assert!(html.contains("<path"), "{name:?} rendered no path");
     }
 }
 

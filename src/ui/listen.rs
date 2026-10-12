@@ -1,7 +1,7 @@
 use cw_core::{TrainingSettings, compute_char_pool, morse_for, newest_unlocked};
 use dioxus::prelude::*;
 
-use crate::ui::widgets::{Icon, control_id, html_bool};
+use crate::ui::widgets::{Icon, IconName, control_id, html_bool};
 
 /// A character chip's id. Most characters slug to themselves; `?`, `/`, `.`
 /// and the rest would slug to nothing and share one, so they go by their
@@ -74,7 +74,7 @@ pub fn ListenView(
                     id: control_id("btn", "listen back"),
                     class: "btn btn-secondary btn-sm",
                     onclick: move |_| on_back.call(()),
-                    Icon { name: "back" }
+                    Icon { name: IconName::Back }
                     "Back"
                 }
             }
@@ -145,7 +145,7 @@ pub fn ListenView(
                         id: control_id("btn", "stop"),
                         class: "btn btn-secondary",
                         onclick: move |_| on_stop.call(()),
-                        Icon { name: "stop" }
+                        Icon { name: IconName::Stop }
                         "Stop"
                     }
                 } else {
@@ -154,7 +154,7 @@ pub fn ListenView(
                             id: control_id("btn", "play"),
                             class: "btn btn-primary",
                             onclick: move |_| on_play.call(ch.to_string()),
-                            Icon { name: "play" }
+                            Icon { name: IconName::Play }
                             "Play {ch}"
                         }
                     }
@@ -163,7 +163,7 @@ pub fn ListenView(
                         class: "btn btn-secondary",
                         disabled: html_bool(pool_empty),
                         onclick: move |_| on_play.call(all_chars.clone()),
-                        Icon { name: "headphones" }
+                        Icon { name: IconName::Headphones }
                         "Play all"
                     }
                     button {
@@ -171,7 +171,7 @@ pub fn ListenView(
                         class: "btn btn-secondary",
                         disabled: html_bool(pool_empty),
                         onclick: move |_| on_stream.call(()),
-                        Icon { name: "repeat" }
+                        Icon { name: IconName::Repeat }
                         "Stream groups"
                     }
                 }

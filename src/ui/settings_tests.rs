@@ -178,3 +178,28 @@ fn the_practice_pad_shows_what_was_keyed_until_settings_is_left() {
         assert!(ui.has("· −"));
     });
 }
+
+/// A setting that moves redraws its own card, not the page. Every card used
+/// to read the whole of the settings, so one slider tick redrew all of them
+/// — about thirty mutations a tick, while being dragged.
+#[test]
+fn a_slider_tick_redraws_its_own_card_only() {
+    run(|| async {
+        let (mut ui, _recorder) = Ui::app_with_settings(test_settings());
+        ui.click("nav-settings");
+        ui.advance(50).await;
+        for (control, most) in [
+            ("more-slider-qrn-intensity", 10),
+            ("more-number-key-speed", 6),
+            ("more-slider-rise-time", 16),
+        ] {
+            let _ = ui.take_work();
+            ui.click(control);
+            let work = ui.take_work();
+            assert!(
+                work <= most,
+                "{control} cost {work} mutations; its card alone is at most {most}"
+            );
+        }
+    });
+}

@@ -11,7 +11,7 @@ use crate::state::{AppState, Screen, SessionSignals};
 use crate::theme::Theme;
 use crate::time::sleep_ms;
 use crate::ui::paddle::use_paddle_keys;
-use crate::ui::widgets::{Icon, control_id};
+use crate::ui::widgets::{Icon, IconName, control_id};
 
 // Desktop inlines this in the window head. Web loads it through `asset!` so
 // `dx bundle` copies the file; compiling the sheet into wasm would ship it
@@ -479,21 +479,21 @@ pub fn App() -> Element {
                             id: control_id("nav", "practice"),
                             class: if matches!(screen(), Screen::Home | Screen::Listen | Screen::Results) { "nav-item active" } else { "nav-item" },
                             onclick: move |_| go_home.call(()),
-                            Icon { name: "signal" }
+                            Icon { name: IconName::Signal }
                             span { "Practice" }
                         }
                         button {
                             id: control_id("nav", "stats"),
                             class: if screen() == Screen::Stats { "nav-item active" } else { "nav-item" },
                             onclick: move |_| go_to.call(Screen::Stats),
-                            Icon { name: "chart" }
+                            Icon { name: IconName::Chart }
                             span { "Stats" }
                         }
                         button {
                             id: control_id("nav", "settings"),
                             class: if screen() == Screen::Settings { "nav-item active" } else { "nav-item" },
                             onclick: move |_| go_to.call(Screen::Settings),
-                            Icon { name: "sliders" }
+                            Icon { name: IconName::Sliders }
                             span { "Settings" }
                         }
                     }

@@ -1,7 +1,7 @@
 use cw_core::SessionResult;
 use dioxus::prelude::*;
 
-use crate::ui::widgets::{GroupResultRow, Icon, ScoreRing, control_id};
+use crate::ui::widgets::{CardHead, GroupResultRow, Icon, IconName, ScoreRing, control_id};
 
 #[component]
 pub fn ResultsView(
@@ -41,7 +41,7 @@ pub fn ResultsView(
             }
             if let Some(msg) = auto_message {
                 div { class: "auto-banner",
-                    Icon { name: "sparkle" }
+                    Icon { name: IconName::Sparkle }
                     span { "{msg}" }
                 }
             }
@@ -60,14 +60,10 @@ pub fn ResultsView(
                 }
             }
             div { class: "card",
-                div { class: "card-head",
-                    div { class: "card-head-main",
-                        span { class: "card-icon", Icon { name: "letters" } }
-                        div {
-                            h3 { class: "card-title", "Group by group" }
-                            p { class: "card-note", "Sent on top, your copy below." }
-                        }
-                    }
+                CardHead {
+                    icon: IconName::Letters,
+                    title: "Group by group",
+                    note: "Sent on top, your copy below.",
                 }
                 div { class: "result-rows",
                     for (idx, group) in result.groups.iter().cloned().enumerate() {
@@ -80,14 +76,14 @@ pub fn ResultsView(
                     id: control_id("btn", "train again"),
                     class: "btn btn-primary",
                     onclick: move |_| on_again.call(()),
-                    Icon { name: "repeat" }
+                    Icon { name: IconName::Repeat }
                     "Train again"
                 }
                 button {
                     id: control_id("btn", "back"),
                     class: "btn btn-secondary",
                     onclick: move |_| on_home.call(()),
-                    Icon { name: "back" }
+                    Icon { name: IconName::Back }
                     "Back"
                 }
             }

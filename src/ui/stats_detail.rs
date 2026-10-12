@@ -1,11 +1,12 @@
 use cw_core::{
-    CharacterDiagnostic, GROUP_START_BIGRAM_TOKEN, MasteryStatus, SessionResult, TrainingSettings,
-    mistake_stats, sampling_rows, session_history,
+    GROUP_START_BIGRAM_TOKEN, MasteryStatus, SessionResult, TrainingSettings,
+    character_diagnostics, mistake_stats, sampling_rows, session_history,
 };
 use dioxus::prelude::*;
 
 #[component]
-pub fn LettersTab(letters: Vec<CharacterDiagnostic>) -> Element {
+pub fn LettersTab(sessions: Vec<SessionResult>) -> Element {
+    let letters = character_diagnostics(&sessions);
     if letters.is_empty() {
         return rsx! {
             div { class: "card", p { class: "muted", "No letter data yet." } }
