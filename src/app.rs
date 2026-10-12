@@ -548,6 +548,11 @@ mod ui_tests {
                 let stored = ui.store.load_sessions();
                 assert_eq!(stored.len(), 1, "{button}");
                 assert_eq!(stored[0].groups[0].received, sent[..1], "{button}");
+                // The box's pause was still running when the session ended,
+                // and it ends with the box: running it out on the results
+                // screen must find nothing to do.
+                ui.advance(200).await;
+                assert_eq!(ui.screen(), "results", "{button}");
             }
         });
     }
@@ -574,6 +579,9 @@ mod ui_tests {
             let stored = ui.store.load_sessions();
             assert_eq!(stored.len(), 1);
             assert_eq!(stored[0].groups[0].received, sent[..1]);
+            // The pause the key started ends with the box, harmlessly.
+            ui.advance(200).await;
+            assert_eq!(ui.screen(), "results");
         });
     }
 
@@ -605,6 +613,11 @@ mod ui_tests {
             let stored = ui.store.load_sessions();
             assert_eq!(stored.len(), 1);
             assert_eq!(stored[0].groups[0].received, "T");
+            // The keyer's own wake, still set for the letter space, finds the
+            // letter gone and the box with it.
+            ui.advance(400).await;
+            assert_eq!(ui.screen(), "results");
+            assert_eq!(ui.store.load_sessions()[0].groups[0].received, "T");
         });
     }
 
@@ -621,6 +634,8 @@ mod ui_tests {
             let stored = ui.store.load_sessions();
             assert_eq!(stored.len(), 1);
             assert_eq!(stored[0].groups[0].received, sent[..1]);
+            ui.advance(200).await;
+            assert_eq!(ui.screen(), "results");
         });
     }
 

@@ -57,7 +57,7 @@ struct AnswerDraft {
     /// Moved on by every key and every new group: a debounce that finds it
     /// moved stands down.
     epoch: CopyValue<u64>,
-    /// The view that owns the debounce, so one still waiting ends with it,
+    /// The view the debounce belongs to, so one still waiting ends with it,
     /// whoever started it — a key in a card, or the paddles.
     owner: ScopeId,
     on_change: EventHandler<(usize, String)>,
@@ -101,11 +101,17 @@ impl AnswerDraft {
             self.hand_over();
             return;
         }
-        Runtime::current().spawn(self.owner, async move {
-            sleep_ms(INPUT_COMMIT_DEBOUNCE_MS).await;
-            if *self.epoch.peek() == epoch {
-                self.hand_over();
-            }
+        // Spawned from inside the view's own scope, which is what ties the
+        // pause to it: a session ending on the heels of a key takes the view
+        // away, and the pause goes with it rather than waking to a draft that
+        // is gone. (`Runtime::spawn` on a scope id does not.)
+        Runtime::current().in_scope(self.owner, || {
+            spawn(async move {
+                sleep_ms(INPUT_COMMIT_DEBOUNCE_MS).await;
+                if *self.epoch.peek() == epoch {
+                    self.hand_over();
+                }
+            })
         });
     }
 
