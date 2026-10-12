@@ -6,8 +6,6 @@ use crate::session::SessionResult;
 use crate::streak::{date_to_day_index, day_index_to_date, weekday_monday0};
 
 pub const HEATMAP_WEEKS: u32 = 16;
-pub const EMPTY_COLOR: &str = "#e5e7eb";
-pub const NO_ACCURACY_COLOR: &str = "#cbd5e1";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HeatmapColorMode {
@@ -46,7 +44,11 @@ pub struct HeatmapCell {
     pub sessions: u32,
     pub group_count: u32,
     pub avg_accuracy: Option<f64>,
-    pub color: String,
+    /// How strongly to shade the day, from 0 to 1, by what the grid is
+    /// showing: the share of the busiest day's characters, or the day's
+    /// accuracy. None where there is nothing to shade — a day with no
+    /// practice, one still to come, or one whose accuracy could not be read.
+    pub intensity: Option<f64>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -85,30 +87,6 @@ pub fn aggregate_heatmap(sessions: &[SessionResult]) -> BTreeMap<String, Heatmap
     days
 }
 
-pub fn hsl_from_normalized(n: f64) -> String {
-    let clamped = n.clamp(0.0, 1.0);
-    let hue = 120.0 * clamped;
-    format!("hsl({hue:.0}, 75%, 45%)")
-}
-
-pub fn color_for_count(count: u32, max_count: u32) -> String {
-    if count == 0 {
-        return EMPTY_COLOR.to_string();
-    }
-    let n = f64::from(count) / f64::from(max_count.max(1));
-    hsl_from_normalized(n.min(1.0))
-}
-
-pub fn color_for_accuracy(sessions: u32, avg_accuracy: Option<f64>) -> String {
-    if sessions == 0 {
-        return EMPTY_COLOR.to_string();
-    }
-    match avg_accuracy {
-        Some(acc) => hsl_from_normalized(acc),
-        None => NO_ACCURACY_COLOR.to_string(),
-    }
-}
-
 pub fn build_heatmap(
     sessions: &[SessionResult],
     today: &str,
@@ -141,12 +119,13 @@ pub fn build_heatmap(
             let sessions_n = day.map(|d| d.sessions).unwrap_or(0);
             let group_count = day.map(|d| d.group_count).unwrap_or(0);
             let avg_accuracy = day.and_then(HeatmapDay::avg_accuracy);
-            let color = if in_future {
-                EMPTY_COLOR.to_string()
+            let intensity = if in_future || sessions_n == 0 {
+                None
             } else {
                 match mode {
-                    HeatmapColorMode::Volume => color_for_count(chars, max_chars),
-                    HeatmapColorMode::Accuracy => color_for_accuracy(sessions_n, avg_accuracy),
+                    HeatmapColorMode::Volume => (chars > 0)
+                        .then(|| (f64::from(chars) / f64::from(max_chars.max(1))).min(1.0)),
+                    HeatmapColorMode::Accuracy => avg_accuracy.map(|a| a.clamp(0.0, 1.0)),
                 }
             };
             HeatmapCell {
@@ -156,7 +135,7 @@ pub fn build_heatmap(
                 sessions: sessions_n,
                 group_count,
                 avg_accuracy,
-                color,
+                intensity,
             }
         })
         .collect();
@@ -242,22 +221,41 @@ mod tests {
     }
 
     #[test]
-    fn colours_run_from_empty_through_red_to_green() {
-        assert_eq!(color_for_count(0, 10), EMPTY_COLOR);
-        assert_eq!(color_for_count(10, 10), hsl_from_normalized(1.0));
-        assert_eq!(color_for_count(5, 0), hsl_from_normalized(1.0));
-        assert_eq!(hsl_from_normalized(0.0), "hsl(0, 75%, 45%)");
-        assert_eq!(hsl_from_normalized(1.0), "hsl(120, 75%, 45%)");
-        // Out-of-range input is clamped rather than producing a broken colour.
-        assert_eq!(hsl_from_normalized(-1.0), hsl_from_normalized(0.0));
-        assert_eq!(hsl_from_normalized(9.0), hsl_from_normalized(1.0));
+    fn volume_shades_each_day_against_the_busiest() {
+        let grid = build_heatmap(
+            &[
+                session("2026-07-16", 5, 1.0),
+                session("2026-07-17", 10, 1.0),
+            ],
+            "2026-07-17",
+            1,
+            HeatmapColorMode::Volume,
+        )
+        .expect("grid");
+        let day = |date: &str| {
+            grid.cells
+                .iter()
+                .find(|c| c.date == date)
+                .unwrap()
+                .intensity
+        };
+        assert_eq!(day("2026-07-17"), Some(1.0));
+        assert_eq!(day("2026-07-16"), Some(0.5));
+        assert_eq!(day("2026-07-15"), None, "no practice, nothing to shade");
     }
 
     #[test]
-    fn accuracy_colour_falls_back_when_a_day_has_no_accuracy() {
-        assert_eq!(color_for_accuracy(0, Some(1.0)), EMPTY_COLOR);
-        assert_eq!(color_for_accuracy(2, None), NO_ACCURACY_COLOR);
-        assert_eq!(color_for_accuracy(2, Some(1.0)), hsl_from_normalized(1.0));
+    fn a_day_whose_accuracy_cannot_be_read_is_not_shaded() {
+        let grid = build_heatmap(
+            &[session("2026-07-17", 4, f64::NAN)],
+            "2026-07-17",
+            1,
+            HeatmapColorMode::Accuracy,
+        )
+        .expect("grid");
+        let friday = grid.cells.iter().find(|c| c.date == "2026-07-17").unwrap();
+        assert_eq!(friday.sessions, 1);
+        assert_eq!(friday.intensity, None);
     }
 
     #[test]
@@ -281,11 +279,11 @@ mod tests {
         assert_eq!(friday.sessions, 1);
         assert_eq!(friday.group_count, 1);
         assert_eq!(friday.avg_accuracy, Some(0.5));
-        assert_eq!(friday.color, hsl_from_normalized(0.5));
+        assert_eq!(friday.intensity, Some(0.5));
         assert!(!friday.in_future);
         let sunday = grid.cells.last().expect("sunday");
         assert!(sunday.in_future);
-        assert_eq!(sunday.color, EMPTY_COLOR);
+        assert_eq!(sunday.intensity, None);
         // Zero weeks still draws one.
         assert_eq!(
             build_heatmap(&[], "2026-07-17", 0, HeatmapColorMode::Volume)

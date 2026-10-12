@@ -62,6 +62,12 @@ pub fn StreakCard(status: StreakStatus) -> Element {
     }
 }
 
+/// The shade of a day on the practice calendar: red through yellow to green
+/// as `intensity` runs from 0 to 1. One formula for the grid and its legend.
+fn heat_color(intensity: f64) -> String {
+    format!("hsl({:.0}, 75%, 45%)", 120.0 * intensity.clamp(0.0, 1.0))
+}
+
 #[component]
 pub fn ActivityHeatmap(sessions: Vec<SessionResult>, today: String) -> Element {
     let mut mode = use_signal(|| HeatmapColorMode::Volume);
@@ -123,9 +129,9 @@ pub fn ActivityHeatmap(sessions: Vec<SessionResult>, today: String) -> Element {
             div { class: "heatmap-legend",
                 span { class: "tiny", style: "text-transform: none; letter-spacing: 0;", "Less" }
                 span { class: "heat-cell" }
-                span { class: "heat-cell", style: "background: hsl(0, 75%, 45%);" }
-                span { class: "heat-cell", style: "background: hsl(60, 75%, 45%);" }
-                span { class: "heat-cell", style: "background: hsl(120, 75%, 45%);" }
+                for intensity in [0.0, 0.5, 1.0] {
+                    span { class: "heat-cell", style: "background: {heat_color(intensity)};" }
+                }
                 span { class: "tiny", style: "text-transform: none; letter-spacing: 0;", "{legend}" }
             }
             if let Some(summary) = selected_summary {
@@ -157,7 +163,7 @@ fn HeatmapGridView(
                         let date = cell.date.clone();
                         let is_selected = selected.as_deref() == Some(date.as_str());
                         let cls = if is_selected { "heat-cell selected" } else { "heat-cell" };
-                        let paint = (cell.sessions > 0).then(|| format!("background: {};", cell.color));
+                        let paint = cell.intensity.map(|intensity| format!("background: {};", heat_color(intensity)));
                         let title = if cell.sessions == 0 {
                             format!("{} — no practice", cell.date)
                         } else {
@@ -177,5 +183,20 @@ fn HeatmapGridView(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::heat_color;
+
+    #[test]
+    fn days_shade_from_red_through_yellow_to_green() {
+        assert_eq!(heat_color(0.0), "hsl(0, 75%, 45%)");
+        assert_eq!(heat_color(0.5), "hsl(60, 75%, 45%)");
+        assert_eq!(heat_color(1.0), "hsl(120, 75%, 45%)");
+        // Out-of-range input is clamped rather than producing a broken colour.
+        assert_eq!(heat_color(-1.0), heat_color(0.0));
+        assert_eq!(heat_color(9.0), heat_color(1.0));
     }
 }
