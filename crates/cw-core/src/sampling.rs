@@ -9,7 +9,6 @@ use crate::pool::compute_char_pool;
 use crate::rng::{FastrandRng, Rng, weighted_random_pick};
 use crate::session::SessionResult;
 use crate::settings::{CharSetMode, LevelAxis, TrainingSettings};
-use crate::timing::resolve_group_repeats;
 
 pub const CHAR_SAMPLING_PRIOR_ALPHA: f64 = 1.0;
 pub const CHAR_SAMPLING_PRIOR_BETA: f64 = 1.0;
@@ -357,6 +356,22 @@ pub(crate) fn generate_callsign_group(
 
     state.count_sent(&best);
     best
+}
+
+/// How many times one group is sent before the answer window opens.
+pub fn resolve_group_repeats(settings: &TrainingSettings, rng: &mut impl Rng) -> u32 {
+    let min = settings.playback.group_repeat_min.clamp(
+        crate::settings::GROUP_REPEAT_MIN,
+        crate::settings::GROUP_REPEAT_MAX,
+    );
+    let max = settings
+        .playback
+        .group_repeat_max
+        .clamp(min, crate::settings::GROUP_REPEAT_MAX);
+    if settings.playback.link_group_repeat || min == max {
+        return min;
+    }
+    rng.usize_in(min as usize, max as usize) as u32
 }
 
 /// The next group for `settings`, drawn by the sampler and counted as sent.
@@ -788,6 +803,52 @@ mod edge_tests {
         sampler.learn(&CopyTally::of("MMMMM", "XXXXX"));
         let missed = sampler.state.beliefs[&'M'];
         assert_eq!(missed.beta, CHAR_SAMPLING_PRIOR_BETA + 5.0);
+    }
+
+    #[test]
+    fn group_repeats_stay_inside_the_range() {
+        let mut settings = TrainingSettings::default();
+        let mut rng = FastrandRng::default();
+        assert_eq!(resolve_group_repeats(&settings, &mut rng), 1);
+        settings.playback.link_group_repeat = false;
+        settings.playback.group_repeat_min = 2;
+        settings.playback.group_repeat_max = 4;
+        let mut seen_low = false;
+        let mut seen_high = false;
+        for _ in 0..400 {
+            let n = resolve_group_repeats(&settings, &mut rng);
+            assert!((2..=4).contains(&n));
+            seen_low |= n == 2;
+            seen_high |= n == 4;
+        }
+        assert!(seen_low && seen_high);
+    }
+
+    #[test]
+    fn repeats_are_drawn_from_the_range_when_it_is_not_linked() {
+        let mut settings = TrainingSettings::default();
+        settings.playback.link_group_repeat = false;
+        settings.playback.group_repeat_min = 2;
+        settings.playback.group_repeat_max = 4;
+        let mut low = ScriptedRng::new(&[0.0]);
+        assert_eq!(resolve_group_repeats(&settings, &mut low), 2);
+        let mut high = ScriptedRng::new(&[0.999_999]);
+        assert_eq!(resolve_group_repeats(&settings, &mut high), 4);
+
+        // Linked, the lower bound is used whatever the draw.
+        settings.playback.link_group_repeat = true;
+        let mut high = ScriptedRng::new(&[0.999_999]);
+        assert_eq!(resolve_group_repeats(&settings, &mut high), 2);
+
+        // Out-of-range settings are pulled back into the allowed span.
+        settings.playback.link_group_repeat = false;
+        settings.playback.group_repeat_min = 0;
+        settings.playback.group_repeat_max = 99;
+        let mut high = ScriptedRng::new(&[0.999_999]);
+        assert_eq!(
+            resolve_group_repeats(&settings, &mut high),
+            crate::settings::GROUP_REPEAT_MAX
+        );
     }
 
     #[test]

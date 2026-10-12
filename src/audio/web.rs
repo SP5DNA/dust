@@ -875,7 +875,7 @@ impl MorsePlayer {
             let param = gain.gain();
             let _ = param.set_value_at_time(0.0, t0);
             if event.envelope.len() >= 2 {
-                let mut curve = event.envelope.clone();
+                let mut curve = event.envelope.to_vec();
                 if param
                     .set_value_curve_at_time(&mut curve, t0, event.duration_sec)
                     .is_err()

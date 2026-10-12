@@ -14,7 +14,7 @@ use crate::{
     PILEUP_LEVEL_MAX_DB, PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN, Rng,
     STATIONS_MAX, STATIONS_MIN, Sampler, SessionId, SessionPhase, TrainingSettings, Transmission,
     align_group, apply_auto_level, compute_char_pool, evaluate_auto_level, generate_training_group,
-    parse_callsign, plan_morse_playback, plan_transmission, resolve_pileup, resolve_station,
+    parse_callsign, plan_morse_playback_for, plan_transmission, resolve_pileup, resolve_station,
 };
 
 /// Enough seeds to be worth running on every commit, and cheap enough to.
@@ -213,7 +213,8 @@ fn any_settings_clamp_into_something_the_trainer_can_start_from() {
             "seed {seed}: {group:?} strays outside {pool:?}"
         );
 
-        let plan = plan_morse_playback(&group, &settings, &mut rng);
+        let plan =
+            plan_morse_playback_for(&group, &settings, &resolve_station(&settings, &mut rng));
         assert!(
             plan.duration_sec.is_finite() && plan.duration_sec > 0.0,
             "seed {seed}"
@@ -584,7 +585,7 @@ fn every_callsign_the_trainer_can_send_is_a_real_one() {
         }
 
         // And it has to be sendable, at whatever speed the settings ask for.
-        let plan = plan_morse_playback(&call, &settings, &mut rng);
+        let plan = plan_morse_playback_for(&call, &settings, &resolve_station(&settings, &mut rng));
         assert!(
             plan.duration_sec.is_finite() && plan.duration_sec > 0.0,
             "seed {seed}: {call:?} has no length"

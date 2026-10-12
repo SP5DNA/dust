@@ -50,7 +50,7 @@ pub use morse::{
 };
 pub use pool::{compute_char_pool, current_practice_window, unlocked_practice_count};
 pub use rng::{FastrandRng, Rng, weighted_random_pick};
-pub use sampling::{CharSamplingState, Sampler, generate_training_group};
+pub use sampling::{CharSamplingState, Sampler, generate_training_group, resolve_group_repeats};
 pub use sequences::{PresetId, SEQUENCE_PRESETS, SequenceChoice, SequencePreset};
 pub use session::{
     Group, GroupResult, GroupSession, MIN_RESPONSE_MS_PER_CHAR, MonoMs, SessionId, SessionPhase,
@@ -71,8 +71,6 @@ pub use stats::{
 pub use streak::{StreakState, StreakStatus, compute_streak_status};
 pub use timing::{
     EnvelopePoint, EnvelopeShape, Interferer, PlannedTransmission, PlaybackPlan, StationVoice,
-    ToneEvent, Transmission, build_envelope_curve, compute_after_group_gap_ms,
-    compute_group_gap_for_wpm, compute_group_gap_ms, dot_seconds, envelope_shape,
-    plan_morse_playback, plan_morse_playback_for, plan_transmission, resolve_group_repeats,
-    resolve_pileup, resolve_station,
+    ToneEvent, Transmission, compute_after_group_gap_ms, compute_group_gap_for_wpm, dot_seconds,
+    envelope_shape, plan_morse_playback_for, plan_transmission, resolve_pileup, resolve_station,
 };

@@ -385,7 +385,7 @@ impl BandPlayback {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cw_core::{FastrandRng, plan_morse_playback};
+    use cw_core::{FastrandRng, plan_morse_playback_for, resolve_station};
 
     /// A send carrying a pile-up tells the band how many are calling across
     /// it for as long as it plays, and lets go when it is done — so the
@@ -440,7 +440,7 @@ mod tests {
         settings.band.link_volume = true;
         settings.band.volume_min = 1.0;
         let mut rng = FastrandRng(1);
-        plan_morse_playback(text, &settings, &mut rng)
+        plan_morse_playback_for(text, &settings, &resolve_station(&settings, &mut rng))
     }
 
     #[test]
@@ -472,7 +472,7 @@ mod tests {
             duration_sec: 1.0,
             frequency_hz: 600.0,
             target_gain: 0.5,
-            envelope: vec![0.0, 1.0],
+            envelope: vec![0.0, 1.0].into(),
         };
         assert_eq!(envelope_gain(&event, 0.0), 0.0);
         assert_eq!(envelope_gain(&event, 0.5), 0.5);
@@ -489,7 +489,7 @@ mod tests {
             duration_sec: 1.0,
             frequency_hz: 600.0,
             target_gain: 0.25,
-            envelope: vec![1.0],
+            envelope: vec![1.0].into(),
         };
         assert_eq!(envelope_gain(&flat, 0.5), 0.25);
         let instant = ToneEvent {
