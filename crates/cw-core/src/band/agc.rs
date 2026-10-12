@@ -82,6 +82,9 @@ pub const AGC_LOOKAHEAD_SEC: f64 = 0.002;
 /// How fast the ceiling closes: a fifth of the look-ahead, so it has finished
 /// before the crest it saw coming is played.
 const AGC_CEILING_ATTACK_SEC: f64 = AGC_LOOKAHEAD_SEC / 5.0;
+/// Where the detector's power counts as nothing: a tone 300 dB under full
+/// scale, far below any knee.
+const SETTLED_POWER: f64 = 1e-30;
 
 /// The knee width of the browser's compressor, in decibels. Web Audio's knee
 /// starts at the threshold and is fully on six decibels later, so the
@@ -376,6 +379,13 @@ impl Agc {
         let input = (2.0 * heard * heard).max(send_peak * send_peak);
         let input = if input.is_finite() { input } else { 0.0 };
         self.power = input + (self.power - input) * self.smoothing;
+        // In silence the average dies away towards zero for ever; brought to
+        // rest once it is nothing, rather than left to sink into the
+        // subnormal range, where it and the square root below would take a
+        // microcode assist on every sample.
+        if self.power < SETTLED_POWER {
+            self.power = 0.0;
+        }
         let level = self.power.sqrt();
         let wanted = self.law(level);
 
@@ -992,6 +1002,27 @@ mod tests {
         let mut agc = Agc::off();
         assert!(agc.is_off() && agc.knee().is_none());
         assert_eq!(agc.next_gain(10.0, 10.0), 1.0);
+    }
+
+    /// The detector's average dies away after the last sound, and has to reach
+    /// zero rather than hang on in the subnormal range, where every multiply
+    /// and the square root after it take a microcode assist on every sample
+    /// of a silent band.
+    #[test]
+    fn the_detector_comes_to_rest_in_silence() {
+        let mut agc = Agc::new(SR, 0.1);
+        for i in 0..SR / 10 {
+            let phase = std::f64::consts::TAU * 600.0 * f64::from(i) / f64::from(SR);
+            agc.next_gain(0.5 * phase.sin(), 0.0);
+        }
+        for n in 0..SR * 10 {
+            agc.next_gain(0.0, 0.0);
+            assert!(
+                !agc.power.is_subnormal(),
+                "the detector went subnormal {n} samples into the silence"
+            );
+        }
+        assert_eq!(agc.power, 0.0);
     }
 
     /// The knee follows a louder floor up, so plain hiss never pumps the

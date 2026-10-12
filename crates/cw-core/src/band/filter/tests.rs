@@ -524,6 +524,38 @@ fn every_corner_of_the_controls_is_stable_and_finite() {
     }
 }
 
+/// A filter left ringing into silence has to come to rest rather than hang on
+/// in the subnormal range, where every operation on a double takes a
+/// microcode assist: inside the audio callback that is hundreds of
+/// nanoseconds a sample for as long as the band is silent. The narrowest
+/// filter rings longest and its poles decay at rates five times apart, so the
+/// fast ones get there within a second or two of the last sound. Ten seconds
+/// of silence after a click, and no state is ever subnormal on the way.
+#[test]
+fn a_filter_ringing_into_silence_comes_to_rest() {
+    for shape in ALL_SHAPES {
+        for sample_rate in [8_000, 48_000] {
+            let design = FilterDesign::new(500.0, FILTER_WIDTH_MIN, shape);
+            let mut filter = ReceiverFilter::new(sample_rate, &design);
+            filter.process(1.0);
+            for n in 0..sample_rate * 10 {
+                filter.process(0.0);
+                let states = filter.resonators[..filter.len]
+                    .iter()
+                    .flat_map(|r| [r.s1, r.s2]);
+                for state in states {
+                    assert!(
+                        !state.is_subnormal(),
+                        "{shape:?} at {sample_rate} Hz: a state went subnormal {n} samples \
+                         into the silence"
+                    );
+                }
+            }
+            assert_eq!(filter.process(0.0), 0.0, "{shape:?} never came to rest");
+        }
+    }
+}
+
 /// The passband the pile-up is placed in is half the bandwidth either side of
 /// the pitch, stopping short of zero beat; and the mirror is in hertz.
 #[test]

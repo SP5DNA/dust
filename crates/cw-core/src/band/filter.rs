@@ -709,7 +709,20 @@ impl PhaseScore {
 pub struct ReceiverFilter {
     resonators: [Resonator; MAX_RECEIVER_SECTIONS],
     len: usize,
+    /// Samples until the resonators are next brought to rest
+    /// ([`Resonator::settle`]).
+    until_settle: u32,
 }
+
+/// How often, in samples, the resonators are checked for a state that has
+/// died away to nothing. Once a block rather than once a sample, so the
+/// running filter pays for it in one predictable branch.
+const SETTLE_EVERY: u32 = 32;
+/// Where a state counts as nothing: 600 dB under full scale. Even the fastest
+/// pole of the widest filter at 8 kHz decays only some 400 dB in a block, so
+/// a state is set to zero long before it could reach the subnormal range,
+/// below 10⁻³⁰⁸.
+const SETTLED: f64 = 1e-30;
 
 impl ReceiverFilter {
     pub fn new(sample_rate: u32, design: &FilterDesign) -> Self {
@@ -718,6 +731,7 @@ impl ReceiverFilter {
         Self {
             resonators: sections.slots.map(Resonator::new),
             len: sections.len,
+            until_settle: SETTLE_EVERY,
         }
     }
 
@@ -726,10 +740,18 @@ impl ReceiverFilter {
     }
 
     pub fn process(&mut self, input: f64) -> f64 {
-        self.resonators[..self.len]
+        let out = self.resonators[..self.len]
             .iter_mut()
             .map(|resonator| resonator.process(input))
-            .sum()
+            .sum();
+        self.until_settle -= 1;
+        if self.until_settle == 0 {
+            self.until_settle = SETTLE_EVERY;
+            for resonator in &mut self.resonators[..self.len] {
+                resonator.settle();
+            }
+        }
+        out
     }
 
     /// Run a rendered send through the receiver, in place.
@@ -775,6 +797,24 @@ impl Resonator {
         self.s1 = self.b1 * input - self.a1 * out + self.s2;
         self.s2 = -self.a2 * out;
         out
+    }
+
+    /// Bring a resonator that has died away to nothing to rest at zero.
+    ///
+    /// In silence a resonator's state decays towards zero for ever without
+    /// reaching it: a second or two after the last sound it is in the
+    /// subnormal range, where every operation on it takes a microcode assist,
+    /// and rounding there keeps it ringing at the smallest numbers a double
+    /// holds indefinitely. Zero is where it was heading, and stays put.
+    ///
+    /// Both states at once or neither: they hold one ringing between them,
+    /// often as two nearly opposite numbers, and zeroing one alone would hand
+    /// the other a ring of its own — enough, repeated, to keep it going.
+    fn settle(&mut self) {
+        if self.s1.abs() < SETTLED && self.s2.abs() < SETTLED {
+            self.s1 = 0.0;
+            self.s2 = 0.0;
+        }
     }
 }
 
