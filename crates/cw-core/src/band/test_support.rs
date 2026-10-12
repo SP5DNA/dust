@@ -4,7 +4,25 @@
 use std::f64::consts::{SQRT_2, TAU};
 
 use super::filter::{FilterDesign, ReceiverFilter};
-use crate::settings::FilterShape;
+use super::knee::agc_knee;
+use super::source::BandSource;
+use crate::settings::{FilterShape, TrainingSettings};
+
+/// The receiver `settings` describe, running.
+pub fn receiver_for(sample_rate: u32, settings: &TrainingSettings) -> ReceiverFilter {
+    ReceiverFilter::new(sample_rate, &FilterDesign::from_settings(settings))
+}
+
+/// The band `settings` describe, before the receiver.
+pub fn source_for(sample_rate: u32, settings: &TrainingSettings, seed: u64) -> BandSource {
+    let receiver = FilterDesign::from_settings(settings);
+    BandSource::new(sample_rate, &settings.band, &receiver, seed)
+}
+
+/// Where the AGC `settings` describe starts to act.
+pub fn knee_for(settings: &TrainingSettings) -> Option<f64> {
+    agc_knee(&settings.band, &FilterDesign::from_settings(settings))
+}
 
 /// Every shape the control offers.
 pub const ALL_SHAPES: [FilterShape; 3] =

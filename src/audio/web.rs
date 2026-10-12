@@ -352,8 +352,13 @@ impl BandStream {
             output,
             floor_output,
             splitter,
-            source: BandSource::new(sample_rate as u32, settings, seed),
-            floor: AudioFloor::from_settings(sample_rate as u32, settings, seed),
+            source: BandSource::new(
+                sample_rate as u32,
+                &settings.band,
+                &FilterDesign::from_settings(settings),
+                seed,
+            ),
+            floor: AudioFloor::for_band(sample_rate as u32, &settings.band, seed),
             chunk: vec![0.0; chunk],
             floor_chunk: vec![0.0; chunk],
             next_start: now,
@@ -732,7 +737,7 @@ impl MorsePlayer {
     /// the audio-stage floor, which has not ([`limiter_feed`]).
     fn tune_agc(&self, settings: &TrainingSettings) {
         let knee = if BandMixer::needs_background(settings) {
-            agc_knee(settings)
+            agc_knee(&settings.band, &FilterDesign::from_settings(settings))
         } else {
             None
         };

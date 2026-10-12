@@ -58,15 +58,15 @@
 
 use std::f64::consts::{PI, SQRT_2, TAU};
 
+use super::calibration::{REFERENCE_BANDWIDTH_HZ, SIGNAL_RMS, reference_floor_rms};
 use super::dsp::{db_to_gain, finite_or, gain_to_db};
 use super::filter::{FilterDesign, passband_edges};
-use super::noise::{REFERENCE_BANDWIDTH_HZ, SIGNAL_RMS, noise_floor_rms};
 use super::qsb::MULTIPATH_RATES;
 use super::random::Draw;
 use crate::callsign::generate_callsign;
 use crate::morse::morse_for;
 use crate::rng::Rng;
-use crate::settings::{BandSettings, STATIONS_MAX, STATIONS_MIN, TrainingSettings};
+use crate::settings::{BandSettings, STATIONS_MAX, STATIONS_MIN};
 
 /// Transmitters that can be on the air at once, carriers included: enough
 /// for the busiest band the stations setting makes, heard through the widest
@@ -322,17 +322,16 @@ struct Tuning {
 }
 
 impl Tuning {
-    fn from_settings(settings: &TrainingSettings) -> Self {
-        let band = &settings.band;
+    /// The band `band` describes, listened to through `receiver`: the filter
+    /// as it is really built, at least wide enough for the side-tone range,
+    /// and with the skirts its shape gives it.
+    fn new(band: &BandSettings, receiver: &FilterDesign) -> Self {
         let defaults = BandSettings::default();
         let tone_min = finite_or(band.side_tone_min, defaults.side_tone_min).max(100.0);
         let tone_max = finite_or(band.side_tone_max, defaults.side_tone_max).max(tone_min);
         let center = tone_min + (tone_max - tone_min) / 2.0;
-        // The filter as it is really built: at least wide enough for the
-        // side-tone range, and with the skirts its shape gives it.
-        let design = FilterDesign::from_settings(settings);
-        let (_, upper_edge) = passband_edges(center, design.width_hz());
-        let (heard_low_hz, heard_high_hz) = design.edges_at(HEARD_DB);
+        let (_, upper_edge) = passband_edges(center, receiver.width_hz());
+        let (heard_low_hz, heard_high_hz) = receiver.edges_at(HEARD_DB);
         let high = (center + SPAWN_ABOVE_PITCH_HZ).max(upper_edge + SPAWN_ABOVE_EDGE_HZ);
         // The quietest the wanted station is ever heard, against the floor
         // every level here is measured from: its quietest send, at the pitch
@@ -342,7 +341,6 @@ impl Tuning {
         // and the guard has to hold there too: the margin is as heard, not as
         // sent.
         let volume = finite_or(band.volume_min, defaults.volume_min).clamp(0.1, 1.0);
-        let receiver = &design;
         let response_over = |low: f64, high: f64| {
             (0..=GUARD_POINTS).map(move |i| {
                 receiver.response_at(low + (high - low) * i as f64 / GUARD_POINTS as f64)
@@ -359,7 +357,7 @@ impl Tuning {
             guard_high_hz: tone_max + GUARD_MARGIN_HZ,
             heard_low_hz,
             heard_high_hz,
-            wanted_db: gain_to_db(wanted_rms / reference_rms()) + bin_over_reference_db(),
+            wanted_db: gain_to_db(wanted_rms / reference_floor_rms()) + bin_over_reference_db(),
         }
     }
 
@@ -383,25 +381,23 @@ impl Tuning {
     }
 }
 
-/// RMS of the floor every level is measured against: the default floor, the
-/// one QRN is calibrated to. Stations are absolute, like static — turning the
-/// hiss down does not turn the band's traffic down with it.
-fn reference_rms() -> f64 {
-    noise_floor_rms(BandSettings::default().noise_level)
-}
-
 impl BandActivity {
-    /// The band these settings describe, as busy as the number of stations
-    /// that may call at once allows; none at all when that is only yours.
-    /// `seed` is the band's own, which the stations turn into one of their
-    /// own.
-    pub fn from_settings(sample_rate: u32, settings: &TrainingSettings, seed: u64) -> Option<Self> {
-        let others = settings.band.stations_max.clamp(STATIONS_MIN, STATIONS_MAX) - STATIONS_MIN;
+    /// The band `band` describes, heard through `receiver`: as busy as the
+    /// number of stations that may call at once allows, and none at all when
+    /// that is only yours. `seed` is the band's own, which the stations turn
+    /// into one of their own.
+    pub fn for_band(
+        sample_rate: u32,
+        band: &BandSettings,
+        receiver: &FilterDesign,
+        seed: u64,
+    ) -> Option<Self> {
+        let others = band.stations_max.clamp(STATIONS_MIN, STATIONS_MAX) - STATIONS_MIN;
         let profile = TrafficProfile::for_others(others)?;
         Some(Self::new(
             sample_rate,
             profile,
-            Tuning::from_settings(settings),
+            Tuning::new(band, receiver),
             seed,
         ))
     }
@@ -415,7 +411,7 @@ impl BandActivity {
         let mut band = Self {
             sample_rate: fs,
             tuning,
-            unit: SQRT_2 * reference_rms() * db_to_gain(-bin_over_reference_db()),
+            unit: SQRT_2 * reference_floor_rms() * db_to_gain(-bin_over_reference_db()),
             level_median_db: LEVEL_MEDIAN_DB + CONTEST_LEVEL_RISE_DB * contest,
             wpm_median: WPM_MEDIAN + CONTEST_WPM_RISE * contest,
             station_rate: profile.arrivals_per_khz_minute.max(0.0) * tuning.width_khz() / 60.0,

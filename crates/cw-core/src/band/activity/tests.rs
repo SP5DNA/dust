@@ -7,9 +7,8 @@
 //! the number the calibration is for.
 
 use super::*;
-use crate::band::ReceiverFilter;
-use crate::band::test_support::{Fft, hann};
-use crate::settings::FILTER_WIDTH_MAX;
+use crate::band::test_support::{Fft, hann, receiver_for};
+use crate::settings::{FILTER_WIDTH_MAX, TrainingSettings};
 
 /// Rate for the bookkeeping tests, which never listen: a station's dits are
 /// still ten samples long, and an hour of band costs next to nothing.
@@ -28,12 +27,23 @@ fn uncapped(sample_rate: u32, settings: &TrainingSettings, others: u32, seed: u6
         cap: MAX_EMITTERS,
         ..TrafficProfile::for_others(others).expect("a band with others on it")
     };
-    BandActivity::new(sample_rate, profile, Tuning::from_settings(settings), seed)
+    BandActivity::new(sample_rate, profile, tuning(settings), seed)
+}
+
+/// Where `settings` listen to the band from.
+fn tuning(settings: &TrainingSettings) -> Tuning {
+    Tuning::new(&settings.band, &FilterDesign::from_settings(settings))
+}
+
+/// The band `settings` describe, if it has others calling on it.
+fn band_for(sample_rate: u32, settings: &TrainingSettings, seed: u64) -> Option<BandActivity> {
+    let receiver = FilterDesign::from_settings(settings);
+    BandActivity::for_band(sample_rate, &settings.band, &receiver, seed)
 }
 
 /// The band `settings` describe, which has others calling on it.
 fn calling_band(sample_rate: u32, settings: &TrainingSettings, seed: u64) -> BandActivity {
-    BandActivity::from_settings(sample_rate, settings, seed).expect("a band with others on it")
+    band_for(sample_rate, settings, seed).expect("a band with others on it")
 }
 
 /// An ordinary evening's band, and a contest's: one other station allowed to
@@ -277,7 +287,7 @@ fn listen(x: &[f64], fs: u32, points: usize, hop_sec: f64, center: f64) -> Heard
     let energy: f64 = window.iter().map(|w| w * w).sum();
     // The reference floor is white at this variance, and the filter's
     // passband leaves it so.
-    let variance = reference_rms().powi(2) * fs / (2.0 * REFERENCE_BANDWIDTH_HZ);
+    let variance = reference_floor_rms().powi(2) * fs / (2.0 * REFERENCE_BANDWIDTH_HZ);
     let threshold = 10.0 * variance * energy;
     let bin_hz = fs / points as f64;
     let hop = (hop_sec * fs).round() as usize;
@@ -364,7 +374,7 @@ fn through_receiver(
     seconds: f64,
 ) -> Vec<f64> {
     let mut band = stations_only(band);
-    let mut filter = ReceiverFilter::from_settings(fs, settings);
+    let mut filter = receiver_for(fs, settings);
     (0..(seconds * f64::from(fs)) as usize)
         .map(|_| filter.process(band.next_sample()))
         .collect()
@@ -484,7 +494,7 @@ fn keying_over(band: &mut BandActivity, seconds: f64) -> Vec<usize> {
 /// else on it at all.
 #[test]
 fn one_station_calling_is_an_empty_band() {
-    assert!(BandActivity::from_settings(8_000, &calling(1), 1).is_none());
+    assert!(band_for(8_000, &calling(1), 1).is_none());
     assert!(TrafficProfile::for_others(0).is_none());
 }
 
@@ -665,7 +675,8 @@ fn nothing_keyed_is_heard_near_the_station_you_want() {
                 .map(|i| design.response_at(low + (high - low) * f64::from(i) / 64.0))
                 .fold(f64::INFINITY, f64::min);
             let volume = settings.band.volume_min.clamp(0.1, 1.0);
-            let wanted_heard = 20.0 * (SIGNAL_RMS * volume * weakest / reference_rms()).log10()
+            let wanted_heard = 20.0
+                * (SIGNAL_RMS * volume * weakest / reference_floor_rms()).log10()
                 + bin_over_reference_db();
             let (band, drawn) = {
                 let mut band = calling_band(48_000, &settings, 23);

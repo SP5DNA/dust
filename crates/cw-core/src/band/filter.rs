@@ -42,8 +42,8 @@
 
 use std::f64::consts::{PI, TAU};
 
+use super::calibration::REFERENCE_BANDWIDTH_HZ;
 use super::dsp::{Biquad, db_to_gain, finite_or, gain_to_db};
-use super::noise::REFERENCE_BANDWIDTH_HZ;
 use crate::settings::{
     DEFAULT_FILTER_WIDTH_HZ, FILTER_WIDTH_MAX, FILTER_WIDTH_MIN, FilterShape, TrainingSettings,
 };
@@ -737,10 +737,6 @@ impl ReceiverFilter {
             len: sections.len,
             until_settle: SETTLE_EVERY,
         }
-    }
-
-    pub fn from_settings(sample_rate: u32, settings: &TrainingSettings) -> Self {
-        Self::new(sample_rate, &FilterDesign::from_settings(settings))
     }
 
     pub fn process(&mut self, input: f64) -> f64 {

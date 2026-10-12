@@ -461,9 +461,13 @@ pub(super) fn agc_law_db(over_db: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::band::noise::{NoiseFloor, noise_floor_rms};
-    use crate::band::test_support::rms;
-    use crate::band::{BandMixer, ReceiverFilter, agc_knee};
+    use std::f64::consts::TAU;
+
+    use crate::band::BandMixer;
+    use crate::band::calibration::noise_floor_rms;
+    use crate::band::knee::{FLOOR_MEASURE_RATE, band_standing_level, reference_floor_level};
+    use crate::band::noise::NoiseFloor;
+    use crate::band::test_support::{knee_for, receiver_for, rms};
     use crate::settings::{FILTER_WIDTH_MAX, FilterShape, TrainingSettings};
     use crate::timing::{StationVoice, plan_morse_playback_for};
 
@@ -547,12 +551,12 @@ mod tests {
                     let frac = pos - k as f64;
                     let env = f64::from(event.envelope[k]) * (1.0 - frac)
                         + f64::from(event.envelope[k + 1]) * frac;
-                    let phase = std::f64::consts::TAU * event.frequency_hz * i as f64 / sr;
+                    let phase = TAU * event.frequency_hz * i as f64 / sr;
                     samples[first + i] += (env * phase.sin()) as f32;
                 }
             }
         }
-        ReceiverFilter::from_settings(SR, settings).apply(&mut samples);
+        receiver_for(SR, settings).apply(&mut samples);
         Keyed { samples, downs }
     }
 
@@ -620,7 +624,7 @@ mod tests {
             let (mut heard, mut sent) = (Agc::new(SR, knee), Agc::new(SR, knee));
             let (mut in_band, mut as_send) = (1.0, 1.0);
             for i in 0..SR / 2 {
-                let phase = std::f64::consts::TAU * 600.0 * f64::from(i) / f64::from(SR);
+                let phase = TAU * 600.0 * f64::from(i) / f64::from(SR);
                 in_band = heard.next_gain(amplitude * phase.sin(), 0.0);
                 as_send = sent.next_gain(0.0, amplitude);
             }
@@ -762,10 +766,10 @@ mod tests {
                 "{:?} {:.0} Hz",
                 settings.band.filter_shape, settings.band.filter_width_hz
             );
-            let knee = agc_knee(&settings).unwrap();
+            let knee = knee_for(&settings).unwrap();
             let mut agc = Agc::new(SR, knee);
             let mut floor = NoiseFloor::new(SR, noise_floor_rms(0.5), 3);
-            let mut receiver = ReceiverFilter::from_settings(SR, &settings);
+            let mut receiver = receiver_for(SR, &settings);
             // An impulse whose peak through a 500 Hz filter is the default
             // floor's RMS, the way the static is calibrated; this cluster is
             // five of them twenty decibels louder, across five milliseconds.
@@ -830,8 +834,8 @@ mod tests {
                 "{:?} {:.0} Hz",
                 settings.band.filter_shape, settings.band.filter_width_hz
             );
-            let mut agc = Agc::new(SR, agc_knee(&settings).unwrap());
-            let mut receiver = ReceiverFilter::from_settings(SR, &settings);
+            let mut agc = Agc::new(SR, knee_for(&settings).unwrap());
+            let mut receiver = receiver_for(SR, &settings);
             // A return stroke sixty decibels over the default floor: ten
             // impulses across three milliseconds.
             let unit = noise_floor_rms(0.5) * f64::from(SR) / 1_000.0;
@@ -893,7 +897,7 @@ mod tests {
             settings.band.qrn_level = qrn;
             // The band sounds the same at any rate, and this one keeps ten
             // minutes of it quick.
-            let rate = crate::band::FLOOR_MEASURE_RATE;
+            let rate = FLOOR_MEASURE_RATE;
             let mut mixer = BandMixer::new(rate, &settings, 0xC0FFEE);
             let frame = rate as usize / 200;
             let gains: Vec<f64> = (0..length * 200)
@@ -985,13 +989,51 @@ mod tests {
         settings.band.qrn_enabled = true;
         settings.band.qrn_level = 1.0;
         settings.band.noise_level = 1.0;
-        assert_eq!(agc_knee(&settings), None);
+        assert_eq!(knee_for(&settings), None);
         let keyed = station(&settings, &["TEST"], 0.2, 0.0);
         let (_, gain) = ride(&settings, &keyed.samples, 3.0);
         assert!(gain.iter().all(|g| *g == 1.0));
         let mut agc = Agc::off();
         assert!(agc.is_off());
         assert_eq!(agc.next_gain(10.0, 10.0), 1.0);
+    }
+
+    /// A crash has to duck the band — the AGC catching it within a couple of
+    /// milliseconds — and then let it straight back up. A crash is a few
+    /// milliseconds of ringing; a receiver that held the band down for most of a
+    /// second after each one dug holes in the floor that real ones do not.
+    #[test]
+    fn a_crash_ducks_the_band_and_it_comes_back() {
+        // The knee a band at 0.05 would have: its peaks, 2.2 times over.
+        let mut agc = Agc::new(SR, 0.05 * AGC_TRIGGER);
+        let tone =
+            |amplitude: f64, i: u32| amplitude * (TAU * 600.0 * f64::from(i) / f64::from(SR)).sin();
+        let mut steady = 1.0;
+        for i in 0..SR {
+            steady = agc.next_gain(tone(0.05, i), 0.0);
+        }
+        assert!(
+            steady == 1.0,
+            "a steady band should be left alone, gain {steady:.2}"
+        );
+
+        let mut ducked = 1.0_f64;
+        for i in 0..SR / 100 {
+            ducked = ducked.min(agc.next_gain(tone(1.0, i), 0.0));
+        }
+        assert!(
+            ducked < 0.5,
+            "the crash should have pulled the band down, gain {ducked:.2}"
+        );
+
+        let mut back = 0.0;
+        for i in 0..SR / 10 {
+            back = agc.next_gain(tone(0.05, i), 0.0);
+        }
+        assert!(
+            back > 0.9,
+            "a tenth of a second on the band was still down at {back:.2}"
+        );
     }
 
     /// The detector's average dies away after the last sound, and has to reach
@@ -1002,7 +1044,7 @@ mod tests {
     fn the_detector_comes_to_rest_in_silence() {
         let mut agc = Agc::new(SR, 0.1);
         for i in 0..SR / 10 {
-            let phase = std::f64::consts::TAU * 600.0 * f64::from(i) / f64::from(SR);
+            let phase = TAU * 600.0 * f64::from(i) / f64::from(SR);
             agc.next_gain(0.5 * phase.sin(), 0.0);
         }
         for n in 0..SR * 10 {
@@ -1035,9 +1077,9 @@ mod tests {
         let knee = |edit: fn(&mut TrainingSettings)| {
             let mut s = floor_only();
             edit(&mut s);
-            agc_knee(&s.clamp()).unwrap()
+            knee_for(&s.clamp()).unwrap()
         };
-        let held = AGC_TRIGGER * crate::band::reference_floor_level();
+        let held = AGC_TRIGGER * reference_floor_level();
         let reference = knee(|_| {});
         let loud = knee(|s| s.band.noise_level = 0.8);
         let wide = knee(|s| s.band.filter_width_hz = FILTER_WIDTH_MAX);
@@ -1050,8 +1092,10 @@ mod tests {
         let silent = knee(|s| s.band.noise_enabled = false);
         // The default band is under the reference floor, by about what the
         // noise bandwidths say.
-        let under = db(crate::band::reference_floor_level()
-            / crate::band::band_standing_level(crate::band::FLOOR_MEASURE_RATE, &floor_only()));
+        let floor = floor_only();
+        let receiver = crate::band::FilterDesign::from_settings(&floor);
+        let under = db(reference_floor_level()
+            / band_standing_level(FLOOR_MEASURE_RATE, &floor.band, &receiver));
         assert!(
             (4.5..7.0).contains(&under),
             "the default floor is {under:.2} dB under"

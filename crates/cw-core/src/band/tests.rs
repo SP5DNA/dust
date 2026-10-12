@@ -8,11 +8,11 @@
 use std::f64::consts::TAU;
 
 use super::agc::agc_law_db;
-use super::noise::{
-    Atmospherics, FLOOR_BELOW_DB, NoiseFloor, REFERENCE_BANDWIDTH_HZ, SIGNAL_RMS, noise_floor_rms,
-    noise_floor_snr_db,
+use super::calibration::{REFERENCE_BANDWIDTH_HZ, SIGNAL_RMS, noise_floor_rms, noise_floor_snr_db};
+use super::noise::{Atmospherics, FLOOR_BELOW_DB, NoiseFloor};
+use super::test_support::{
+    ALL_SHAPES, Fft, IF_SHAPES, knee_for, kurtosis, peak, receiver_for, rms, source_for, welch,
 };
-use super::test_support::{ALL_SHAPES, Fft, IF_SHAPES, kurtosis, peak, rms, welch};
 use super::*;
 use crate::settings::{FILTER_WIDTH_MAX, FILTER_WIDTH_MIN, FilterShape};
 
@@ -76,7 +76,7 @@ fn filtered_floor(
     seconds: f64,
 ) -> Vec<f32> {
     let mut floor = NoiseFloor::new(sample_rate, noise_floor_rms(level), 77);
-    let mut filter = ReceiverFilter::from_settings(sample_rate, settings);
+    let mut filter = receiver_for(sample_rate, settings);
     let n = (f64::from(sample_rate) * seconds) as usize;
     // Let the filter fill before measuring.
     for _ in 0..sample_rate / 10 {
@@ -407,8 +407,8 @@ fn turning_the_static_up_brings_more_crashes_and_louder_ones() {
 fn static_is_as_loud_at_any_sample_rate() {
     let levels = |sample_rate: u32| {
         let settings = at(only_qrn(0.8), 600.0, 500.0, FilterShape::Sharp);
-        let mut source = Atmospherics::from_settings(sample_rate, &settings, 31);
-        let mut filter = ReceiverFilter::from_settings(sample_rate, &settings);
+        let mut source = Atmospherics::for_band(sample_rate, &settings.band, 31);
+        let mut filter = receiver_for(sample_rate, &settings);
         let block = sample_rate as usize / 100;
         let mut peaks: Vec<f64> = (0..6_000)
             .map(|_| {
@@ -508,41 +508,6 @@ fn the_loudest_band_is_limited_and_never_clipped() {
             "{shape:?} hit full scale"
         );
     }
-    assert_eq!(soft_limit(0.0), 0.0);
-    assert_eq!(soft_limit(0.5), 0.5, "below the knee it does nothing");
-    assert_eq!(soft_limit(-0.5), -0.5);
-    assert!(soft_limit(4.0) < 1.0 && soft_limit(4.0) > 0.9);
-    assert!(soft_limit(-4.0) > -1.0 && soft_limit(-4.0) < -0.9);
-    assert!(
-        soft_limit(2.0) < soft_limit(3.0),
-        "limiting, not clipping flat"
-    );
-}
-
-/// The browser limits with a lookup table of the same curve, so the table
-/// has to be the curve: identical below the knee, never past full scale,
-/// always rising.
-#[test]
-fn the_soft_limit_table_is_the_soft_limit() {
-    let curve = soft_limit_curve(4_097);
-    assert_eq!(curve.len(), 4_097);
-    assert!(
-        curve.windows(2).all(|w| w[1] >= w[0]),
-        "it must rise everywhere"
-    );
-    // At most full scale: the far ends round to exactly 1.0 in f32.
-    assert!(curve.iter().all(|v| v.abs() <= 1.0));
-    // The midpoint is silence, and the ends are as loud as it gets.
-    assert_eq!(curve[2_048], 0.0);
-    assert!(curve[4_096] > 0.99 && curve[0] < -0.99);
-    // Below the knee it is the identity, once the headroom scaling is undone.
-    for (i, value) in curve.iter().enumerate() {
-        let x = (2.0 * i as f64 / 4_096.0 - 1.0) * SOFT_LIMIT_HEADROOM;
-        if x.abs() <= 0.7 {
-            assert!((f64::from(*value) - x).abs() < 1e-6, "at {x}");
-        }
-    }
-    assert_eq!(soft_limit_curve(0).len(), 2);
 }
 
 /// The whole point of the bandwidth control, through the whole receiver:
@@ -558,84 +523,6 @@ fn a_narrower_receiver_is_quieter_and_the_agc_does_not_undo_it() {
     };
     let quieter = 20.0 * (band(1_000.0) / band(FILTER_WIDTH_MIN)).log10();
     assert!(quieter > 6.0, "narrowing only bought {quieter:.1} dB");
-}
-
-/// The AGC's knee follows this number up on a noisy band, so it has to be
-/// the floor the receiver actually hears: it falls with the filter.
-#[test]
-fn the_measured_floor_falls_with_the_filter() {
-    let mut s = TrainingSettings::default();
-    s.band.qrn_level = 0.6;
-    s.band.noise_level = 0.6;
-    let floor_at = |bandwidth: f64| {
-        let mut s = s.clone();
-        s.band.filter_width_hz = bandwidth;
-        band_standing_level(SR, &s.clamp())
-    };
-    let (wide, narrow) = (floor_at(1_000.0), floor_at(FILTER_WIDTH_MIN));
-    assert!(wide > 0.0 && narrow > 0.0, "the band measured as silent");
-    assert!(
-        wide > narrow * 1.4,
-        "the floor barely moved: {wide:.5} against {narrow:.5}"
-    );
-}
-
-/// Both backends measure the floor at a low sample rate — the browser does it
-/// on its main thread — which is only sound because the floor does not
-/// depend on it.
-#[test]
-fn the_measured_floor_does_not_depend_on_the_sample_rate() {
-    for shape in IF_SHAPES {
-        let mut s = TrainingSettings::default();
-        s.band.filter_shape = shape;
-        s.band.noise_level = 0.6;
-        let s = s.clamp();
-        let low = band_standing_level(16_000, &s);
-        let high = band_standing_level(48_000, &s);
-        let spread = 20.0 * (low / high).log10();
-        assert!(
-            spread.abs() < 1.5,
-            "{shape:?}: 16 kHz and 48 kHz floors differ by {spread:.2} dB"
-        );
-    }
-}
-
-/// A crash has to duck the band — the AGC catching it within a couple of
-/// milliseconds — and then let it straight back up. A crash is a few
-/// milliseconds of ringing; a receiver that held the band down for most of a
-/// second after each one dug holes in the floor that real ones do not.
-#[test]
-fn a_crash_ducks_the_band_and_it_comes_back() {
-    // The knee a band at 0.05 would have: its peaks, 2.2 times over.
-    let mut agc = Agc::new(SR, 0.05 * AGC_TRIGGER);
-    let tone =
-        |amplitude: f64, i: u32| amplitude * (TAU * 600.0 * f64::from(i) / f64::from(SR)).sin();
-    let mut steady = 1.0;
-    for i in 0..SR {
-        steady = agc.next_gain(tone(0.05, i), 0.0);
-    }
-    assert!(
-        steady == 1.0,
-        "a steady band should be left alone, gain {steady:.2}"
-    );
-
-    let mut ducked = 1.0_f64;
-    for i in 0..SR / 100 {
-        ducked = ducked.min(agc.next_gain(tone(1.0, i), 0.0));
-    }
-    assert!(
-        ducked < 0.5,
-        "the crash should have pulled the band down, gain {ducked:.2}"
-    );
-
-    let mut back = 0.0;
-    for i in 0..SR / 10 {
-        back = agc.next_gain(tone(0.05, i), 0.0);
-    }
-    assert!(
-        back > 0.9,
-        "a tenth of a second on the band was still down at {back:.2}"
-    );
 }
 
 /// A receiver's gain answers to everything reaching it, the signal included,
@@ -698,7 +585,7 @@ fn a_silent_band_needs_no_background_stream_and_mixes_to_silence() {
     mixer.fill_background(&mut out);
     assert!(out.iter().all(|s| *s == 0.0));
     let mut out = [1.0f32; 64];
-    BandSource::new(8_000, &quiet(), 1).fill(&mut out);
+    source_for(8_000, &quiet(), 1).fill(&mut out);
     assert!(out.iter().all(|s| *s == 0.0));
 }
 
@@ -745,9 +632,9 @@ fn the_source_is_the_same_band_for_the_same_seed() {
     // A busy band, so the stations are part of what has to repeat.
     let mut settings = TrainingSettings::default();
     settings.band.stations_max = crate::settings::STATIONS_MAX;
-    let mut a = BandSource::new(SR, &settings, 5);
-    let mut b = BandSource::new(SR, &settings, 5);
-    let mut c = BandSource::new(SR, &settings, 6);
+    let mut a = source_for(SR, &settings, 5);
+    let mut b = source_for(SR, &settings, 5);
+    let mut c = source_for(SR, &settings, 6);
     let (mut x, mut y, mut z) = (
         vec![0.0f32; 4_096],
         vec![0.0f32; 4_096],
@@ -763,7 +650,7 @@ fn the_source_is_the_same_band_for_the_same_seed() {
     // pitched by nature.
     let floor = TrainingSettings::default();
     let mut x = vec![0.0f32; 4_096];
-    BandSource::new(SR, &floor, 5).fill(&mut x);
+    source_for(SR, &floor, 5).fill(&mut x);
     let lag1: f64 = x
         .windows(2)
         .map(|w| f64::from(w[0]) * f64::from(w[1]))
@@ -960,7 +847,7 @@ fn the_audio_floor_is_its_own_noise() {
 fn the_agc_ducks_the_hiss_but_not_the_audio_floor() {
     let settings = hiss_only(None);
     let pitch = settings.side_tone_center();
-    let knee = agc_knee(&settings).expect("the AGC is on by default");
+    let knee = knee_for(&settings).expect("the AGC is on by default");
     let quiet = render(&mut BandMixer::new(SR, &settings, STAGE_SEED), 0.0, 10);
     let mut mixer = BandMixer::new(SR, &settings, STAGE_SEED);
     let under = render(&mut mixer, 10.0 * knee, 10);
@@ -974,32 +861,4 @@ fn the_agc_ducks_the_hiss_but_not_the_audio_floor() {
     let report = format!("AGC {duck:.2} dB: hiss {hiss:.2} dB, floor {floor:.2} dB");
     assert!((hiss - duck).abs() < 0.5, "{report}");
     assert!(floor.abs() < 1.0, "{report}");
-}
-
-/// The browser's floor comes into the graph after the compressor and goes
-/// straight to the limiter, so it has none of the compressor's make-up gain
-/// to take back, and arrives at unity — as the native player adds it —
-/// whether the AGC is on or off. The receiver's output, which does carry the
-/// make-up gain, has it taken back off, and arrives at unity below the knee.
-#[test]
-fn the_browser_feeds_its_limiter_at_the_native_gains() {
-    let on = agc_knee(&TrainingSettings::default());
-    assert!(on.is_some(), "the AGC is on by default");
-    for knee in [None, on, Some(1e-4), Some(0.5)] {
-        let setting = agc_compressor(knee);
-        let feed = limiter_feed(&setting);
-        // The shaper maps its input back up by the headroom before limiting.
-        let floor = feed.audio_floor * SOFT_LIMIT_HEADROOM;
-        let receiver = 10f64.powf(setting.makeup_db / 20.0) * feed.receiver * SOFT_LIMIT_HEADROOM;
-        assert!((floor - 1.0).abs() < 1e-12, "{knee:?}: floor at {floor}");
-        assert!(
-            (receiver - 1.0).abs() < 1e-12,
-            "{knee:?}: receiver at {receiver}"
-        );
-    }
-    // With the AGC on there is a make-up gain to keep the floor clear of:
-    // through the receiver's feed it would have come out that much quieter.
-    let setting = agc_compressor(on);
-    assert!(setting.makeup_db > 1.0, "{} dB make-up", setting.makeup_db);
-    assert!(limiter_feed(&setting).receiver < limiter_feed(&setting).audio_floor);
 }

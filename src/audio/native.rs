@@ -12,7 +12,7 @@ use std::time::Instant;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{BufferSize, FromSample, Sample, SampleFormat, SizedSample};
-use cw_core::band::{BandMixer, ReceiverFilter};
+use cw_core::band::{BandMixer, FilterDesign, ReceiverFilter};
 use cw_core::{TrainingSettings, Transmission, plan_transmission};
 
 use super::render::{BandPlayback, LiveAgc, LiveQsb, TonePlayback, mix_plan_into, render_plan};
@@ -387,7 +387,7 @@ fn render_send(
     for other in &planned.others {
         mix_plan_into(&mut samples, other, sample_rate);
     }
-    ReceiverFilter::from_settings(sample_rate, settings).apply(&mut samples);
+    ReceiverFilter::new(sample_rate, &FilterDesign::from_settings(settings)).apply(&mut samples);
     samples
 }
 

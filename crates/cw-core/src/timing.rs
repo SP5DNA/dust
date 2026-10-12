@@ -1471,14 +1471,15 @@ mod pileup_tests {
 
     #[test]
     fn the_station_you_want_is_still_the_strongest_through_the_filter() {
-        use crate::band::ReceiverFilter;
+        use crate::band::{FilterDesign, ReceiverFilter};
 
         const SAMPLE_RATE: u32 = 48_000;
 
         // Steady-state amplitude of a tone at `hz` once it is through the
         // receiver: let the filter settle first, then measure.
         fn through_filter(settings: &TrainingSettings, hz: f64) -> f64 {
-            let mut filter = ReceiverFilter::from_settings(SAMPLE_RATE, settings);
+            let mut filter =
+                ReceiverFilter::new(SAMPLE_RATE, &FilterDesign::from_settings(settings));
             let step = std::f64::consts::TAU * hz / f64::from(SAMPLE_RATE);
             let settle = SAMPLE_RATE as usize / 4;
             let measure = SAMPLE_RATE as usize / 8;

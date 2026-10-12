@@ -11,8 +11,8 @@
 //! Levels are absolute, in units of the station you are copying: a floor is
 //! set by its signal-to-noise ratio in a [`REFERENCE_BANDWIDTH_HZ`] filter,
 //! and a sferic by how far its peak through that filter stands above the
-//! default floor. Everything is scaled by the sample rate so a band sounds
-//! the same at 44.1 kHz as at 48 kHz.
+//! reference floor ([`super::calibration`]). Everything is scaled by the
+//! sample rate so a band sounds the same at 44.1 kHz as at 48 kHz.
 //!
 //! One noise here comes in after the receiver rather than before it: the
 //! [`AudioFloor`], the faint wide hiss of the receiver's own audio stage,
@@ -20,88 +20,13 @@
 
 use std::f64::consts::{PI, SQRT_2};
 
-use super::activity::BandActivity;
+use super::calibration::{
+    REFERENCE_BANDWIDTH_HZ, noise_floor_rms, noise_level, qrn_level, reference_floor_rms,
+};
 use super::dsp::{Biquad, db_to_gain};
 use super::random::{Draw, Gaussian};
 use crate::rng::Rng;
-use crate::settings::{BandSettings, TrainingSettings};
-use crate::timing::DEFAULT_TARGET_GAIN;
-
-/// Key-down RMS of a station at full level: what every signal-to-noise figure
-/// here is measured against.
-pub const SIGNAL_RMS: f64 = DEFAULT_TARGET_GAIN / SQRT_2;
-
-/// The bandwidth noise levels are quoted in, as CW signal reports are.
-pub const REFERENCE_BANDWIDTH_HZ: f64 = 500.0;
-
-/// Signal-to-noise in the reference bandwidth at each end of the noise
-/// control. Forty decibels is a hiss you hear only between elements; two is
-/// a station barely out of the noise, where copying is genuinely hard but a
-/// trained ear still gets most of it.
-const NOISE_SNR_QUIET_DB: f64 = 40.0;
-const NOISE_SNR_LOUD_DB: f64 = 2.0;
-
-/// The noise level QRN is calibrated against — the default floor — so static
-/// sits the same distance above an ordinary band whether or not the floor is
-/// switched on.
-pub(crate) const QRN_REFERENCE_NOISE_LEVEL: f64 = 0.5;
-
-/// How loud the band's noise floor is set, from 0 to 1: nothing when it is
-/// switched off, whatever its level says.
-pub fn noise_level(band: &BandSettings) -> f64 {
-    if band.noise_enabled {
-        band.noise_level
-    } else {
-        0.0
-    }
-}
-
-/// How bad the static is set, from 0 to 1: nothing when it is switched off.
-pub fn qrn_level(band: &BandSettings) -> f64 {
-    if band.qrn_enabled {
-        band.qrn_level
-    } else {
-        0.0
-    }
-}
-
-/// Signal-to-noise of the floor at `level`, in decibels in the reference
-/// bandwidth.
-///
-/// Linear in decibels, because loudness is: every step of the slider is the
-/// same audible step, rather than all the action bunched at one end.
-pub fn noise_floor_snr_db(level: f64) -> f64 {
-    let level = level.clamp(0.0, 1.0);
-    NOISE_SNR_QUIET_DB + (NOISE_SNR_LOUD_DB - NOISE_SNR_QUIET_DB) * level
-}
-
-/// RMS of the floor at `level` through a filter [`REFERENCE_BANDWIDTH_HZ`]
-/// wide. Zero means off.
-pub fn noise_floor_rms(level: f64) -> f64 {
-    if level.is_nan() || level <= 0.0 {
-        return 0.0;
-    }
-    SIGNAL_RMS * db_to_gain(-noise_floor_snr_db(level))
-}
-
-/// Signal-to-noise of the floor at `level` as heard through a receiver whose
-/// noise bandwidth is `noise_bandwidth_hz`
-/// ([`super::FilterDesign::noise_bandwidth_hz`]): the reference figure,
-/// improved by however much less noise the receiver lets in. Halve the
-/// width, gain 3 dB — which is the reason to reach for the filter at all.
-///
-/// The noise bandwidth rather than the width on the control, because that is
-/// what the hiss actually comes through: the floor is white, so it comes out
-/// of any filter with exactly that many hertz' worth of power, and a soft or
-/// peaked filter lets in less of it than a sharp one the same width.
-pub fn heard_snr_db(level: f64, noise_bandwidth_hz: f64) -> f64 {
-    let bandwidth = if noise_bandwidth_hz.is_finite() && noise_bandwidth_hz > 0.0 {
-        noise_bandwidth_hz
-    } else {
-        REFERENCE_BANDWIDTH_HZ
-    };
-    noise_floor_snr_db(level) + 10.0 * (REFERENCE_BANDWIDTH_HZ / bandwidth).log10()
-}
+use crate::settings::BandSettings;
 
 /// The receiver's noise floor: white Gaussian noise, at a level that comes
 /// out of a [`REFERENCE_BANDWIDTH_HZ`] filter at the RMS it was given.
@@ -132,10 +57,10 @@ impl NoiseFloor {
         }
     }
 
-    /// The floor for these settings. `seed` is the band's own, which the
-    /// floor turns into one of its own.
-    pub fn from_settings(sample_rate: u32, settings: &TrainingSettings, seed: u64) -> Self {
-        let rms = noise_floor_rms(noise_level(&settings.band));
+    /// The floor `band` sets. `seed` is the band's own, which the floor
+    /// turns into one of its own.
+    pub fn for_band(sample_rate: u32, band: &BandSettings, seed: u64) -> Self {
+        let rms = noise_floor_rms(noise_level(band));
         Self::new(sample_rate, rms, seed ^ NOISE_FLOOR_SEED)
     }
 
@@ -224,10 +149,10 @@ impl AudioFloor {
         }
     }
 
-    /// The floor for these settings. `seed` is the band's own, which the
-    /// floor turns into one of its own.
-    pub fn from_settings(sample_rate: u32, settings: &TrainingSettings, seed: u64) -> Self {
-        let rms = noise_floor_rms(noise_level(&settings.band));
+    /// The audio stage under the band `band` sets. `seed` is the band's own,
+    /// which the floor turns into one of its own.
+    pub fn for_band(sample_rate: u32, band: &BandSettings, seed: u64) -> Self {
+        let rms = noise_floor_rms(noise_level(band));
         Self::new(sample_rate, rms, seed ^ AUDIO_FLOOR_SEED)
     }
 
@@ -289,7 +214,7 @@ pub struct Atmospherics {
     random: Draw,
     sample_rate: f64,
     /// Sample amplitude of an impulse whose peak through the reference filter
-    /// equals the reference floor's RMS.
+    /// equals the reference floor's RMS ([`reference_floor_rms`]).
     unit: f64,
     crackle: Arrivals,
     crackle_median_db: f64,
@@ -393,7 +318,7 @@ impl Atmospherics {
             // filter B wide turns that into a peak of about 2B·a/fs, while
             // passing noise at RMS σ·√(2B/fs). Equating the two fixes the
             // impulse that peaks at the reference floor.
-            unit: noise_floor_rms(QRN_REFERENCE_NOISE_LEVEL) * fs / (2.0 * REFERENCE_BANDWIDTH_HZ),
+            unit: reference_floor_rms() * fs / (2.0 * REFERENCE_BANDWIDTH_HZ),
             crackle,
             crackle_median_db: between(CRACKLE_MEDIAN_DB_MIN, CRACKLE_MEDIAN_DB_MAX),
             flashes,
@@ -403,10 +328,10 @@ impl Atmospherics {
         }
     }
 
-    /// The static for these settings. `seed` is the band's own, which the
-    /// static turns into one of its own.
-    pub fn from_settings(sample_rate: u32, settings: &TrainingSettings, seed: u64) -> Self {
-        Self::new(sample_rate, qrn_level(&settings.band), seed ^ STATIC_SEED)
+    /// The static `band` sets. `seed` is the band's own, which the static
+    /// turns into one of its own.
+    pub fn for_band(sample_rate: u32, band: &BandSettings, seed: u64) -> Self {
+        Self::new(sample_rate, qrn_level(band), seed ^ STATIC_SEED)
     }
 
     fn is_silent(&self) -> bool {
@@ -625,71 +550,16 @@ impl Flash {
     }
 }
 
-/// Everything the band puts into the receiver, before the receiver: the noise
-/// floor, the static and the other stations. Both backends play this — the
-/// native player runs it through its filter sample by sample, the browser
-/// streams it in buffers into a filter made of nodes.
-#[derive(Clone, Debug)]
-pub struct BandSource {
-    floor: NoiseFloor,
-    atmospherics: Atmospherics,
-    /// None when the only station that may call is yours.
-    activity: Option<BandActivity>,
-}
-
-impl BandSource {
-    /// The band these settings describe. Each layer turns `seed` into one of
-    /// its own, so the same seed is the same band, and no two layers share
-    /// their noise.
-    pub fn new(sample_rate: u32, settings: &TrainingSettings, seed: u64) -> Self {
-        Self {
-            floor: NoiseFloor::from_settings(sample_rate, settings, seed),
-            atmospherics: Atmospherics::from_settings(sample_rate, settings, seed),
-            activity: BandActivity::from_settings(sample_rate, settings, seed),
-        }
-    }
-
-    /// A pile-up is calling with this many stations besides yours, and they
-    /// count against how many of the band's own may key at once.
-    pub fn reserve_stations(&mut self, callers: usize) {
-        if let Some(activity) = &mut self.activity {
-            activity.reserve(callers);
-        }
-    }
-
-    pub fn next_sample(&mut self) -> f64 {
-        let stations = self
-            .activity
-            .as_mut()
-            .map_or(0.0, BandActivity::next_sample);
-        self.floor.next_sample() + self.atmospherics.next_sample() + stations
-    }
-
-    pub fn fill(&mut self, out: &mut [f32]) {
-        for slot in out {
-            *slot = self.next_sample() as f32;
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::band::test_support::{receiver_for, source_for};
+    use crate::settings::TrainingSettings;
 
     const SR: u32 = 48_000;
 
     fn geometric_mean(values: &[f64]) -> f64 {
         (values.iter().map(|v| v.ln()).sum::<f64>() / values.len() as f64).exp()
-    }
-
-    #[test]
-    fn a_narrower_filter_hears_a_better_signal_to_noise_ratio() {
-        let reference = heard_snr_db(0.5, REFERENCE_BANDWIDTH_HZ);
-        assert!((reference - noise_floor_snr_db(0.5)).abs() < 1e-12);
-        assert!((heard_snr_db(0.5, 250.0) - reference - 3.0103).abs() < 1e-3);
-        assert!(heard_snr_db(0.5, 2_000.0) < reference);
-        assert!((heard_snr_db(0.5, f64::NAN) - reference).abs() < 1e-12);
-        assert!(heard_snr_db(1.0, 500.0) < heard_snr_db(0.0, 500.0));
     }
 
     /// Lightning, as counted by the people who count it: a cloud-to-ground
@@ -789,8 +659,8 @@ mod tests {
         settings.band.side_tone_min = 600.0;
         settings.band.side_tone_max = 600.0;
         let settings = settings.clamp();
-        let mut source = BandSource::new(RATE, &settings, 101);
-        let mut receiver = super::super::ReceiverFilter::from_settings(RATE, &settings);
+        let mut source = source_for(RATE, &settings, 101);
+        let mut receiver = receiver_for(RATE, &settings);
         // One millisecond at a time: its peak, which is the envelope, and its
         // power, which is the level.
         let ms = RATE as usize / 1_000;
@@ -953,9 +823,9 @@ mod tests {
         assert!((0..1_000).all(|_| off.next_sample() == 0.0));
         let mut settings = TrainingSettings::default();
         settings.band.noise_enabled = false;
-        assert!(AudioFloor::from_settings(SR, &settings, 1).is_silent());
+        assert!(AudioFloor::for_band(SR, &settings.band, 1).is_silent());
         settings.band.noise_enabled = true;
-        assert!(!AudioFloor::from_settings(SR, &settings, 1).is_silent());
+        assert!(!AudioFloor::for_band(SR, &settings.band, 1).is_silent());
         // A sample rate too low to hold the band still makes numbers.
         let mut degenerate = AudioFloor::new(1, 0.1, 1);
         assert!((0..1_000).all(|_| degenerate.next_sample().is_finite()));
