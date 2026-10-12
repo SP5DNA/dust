@@ -17,6 +17,7 @@ mod app;
 mod audio;
 mod persist;
 mod playback;
+mod player;
 mod routes;
 mod session_runtime;
 mod state;
@@ -33,9 +34,12 @@ fn themed_document_head() -> String {
     let mut head = String::from("<style>");
     head.push_str(crate::app::STYLESHEET);
     head.push_str("</style>");
-    head.push_str(
-        r#"<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;700&family=Figtree:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;700&display=optional" media="print" onload="this.media='all'">"#,
-    );
+    // The font sheet must not hold up the first paint: it loads as print
+    // media and switches itself on once it has arrived.
+    head.push_str(&format!(
+        r#"<link rel="stylesheet" href="{}" media="print" onload="this.media='all'">"#,
+        crate::app::FONT_CSS_URL
+    ));
     head
 }
 

@@ -136,7 +136,6 @@ fn GroupCard(
     debounce_gen: Signal<u64>,
     on_change: EventHandler<(usize, String)>,
     on_confirm: EventHandler<usize>,
-    on_focus: EventHandler<usize>,
     #[props(default)] paddle_swap: bool,
     #[props(default)] on_paddle_down: EventHandler<Paddle>,
     #[props(default)] on_paddle_up: EventHandler<Paddle>,
@@ -209,7 +208,7 @@ fn GroupCard(
                         let _ = evt;
                     }
                 },
-                onfocus: move |_| on_focus.call(idx),
+
                 oninput: move |e| {
                     if closed {
                         return;
@@ -293,7 +292,6 @@ pub fn TrainingView(
     repeat_done: u32,
     on_change: EventHandler<(usize, String)>,
     on_confirm: EventHandler<usize>,
-    on_focus: EventHandler<usize>,
     on_submit: EventHandler<()>,
     on_stop: EventHandler<()>,
     #[props(default)] paddle_swap: bool,
@@ -473,7 +471,6 @@ pub fn TrainingView(
                                     debounce_gen,
                                     on_change,
                                     on_confirm,
-                                    on_focus,
                                     paddle_swap,
                                     on_paddle_down,
                                     on_paddle_up,

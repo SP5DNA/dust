@@ -38,7 +38,6 @@ fn TrainingScreen(
     repeat_done: u32,
     on_change: EventHandler<(usize, String)>,
     on_confirm: EventHandler<usize>,
-    on_focus: EventHandler<usize>,
     on_submit: EventHandler<()>,
     on_stop: EventHandler<()>,
     #[props(default)] keyer_mode: KeyerMode,
@@ -65,7 +64,6 @@ fn TrainingScreen(
                 keyer_mode,
                 on_change,
                 on_confirm,
-                on_focus,
                 on_submit,
                 on_stop,
             }
@@ -509,7 +507,6 @@ fn training_shows_the_send_counter_while_repeating() {
                 repeat_done: 1,
                 on_change: move |_: (usize, String)| {},
                 on_confirm: move |_: usize| {},
-                on_focus: move |_: usize| {},
                 on_submit: move |_| {},
                 on_stop: move |_| {},
             }
@@ -538,7 +535,6 @@ fn training_without_repeats_omits_the_counter() {
                 repeat_done: 1,
                 on_change: move |_: (usize, String)| {},
                 on_confirm: move |_: usize| {},
-                on_focus: move |_: usize| {},
                 on_submit: move |_| {},
                 on_stop: move |_| {},
             }
@@ -582,7 +578,6 @@ fn an_unlocked_answer_box_does_not_look_disabled() {
                 repeat_done: 1,
                 on_change: move |_: (usize, String)| {},
                 on_confirm: move |_: usize| {},
-                on_focus: move |_: usize| {},
                 on_submit: move |_| {},
                 on_stop: move |_| {},
             }
@@ -620,7 +615,6 @@ fn a_locked_answer_box_is_readonly_not_disabled() {
                 repeat_done: 0,
                 on_change: move |_: (usize, String)| {},
                 on_confirm: move |_: usize| {},
-                on_focus: move |_: usize| {},
                 on_submit: move |_| {},
                 on_stop: move |_| {},
             }
@@ -658,7 +652,6 @@ fn a_confirmed_answer_box_cannot_be_typed_in() {
                 repeat_done: 1,
                 on_change: move |_: (usize, String)| {},
                 on_confirm: move |_: usize| {},
-                on_focus: move |_: usize| {},
                 on_submit: move |_| {},
                 on_stop: move |_| {},
             }
@@ -964,7 +957,6 @@ mod interactions {
 
     #[component]
     fn TrainingHarness() -> Element {
-        let mut focused = use_signal(|| 0usize);
         let mut typed = use_signal(String::new);
         rsx! {
             TrainingScreen {
@@ -973,14 +965,13 @@ mod interactions {
                 groups: vec!["KM".to_string(), "UR".to_string()],
                 inputs: vec![typed(), String::new()],
                 confirmed: vec![false, false],
-                focused: focused(),
+                focused: 0,
                 playing: true,
                 locked: true,
                 repeat_total: 2,
                 repeat_done: 0,
                 on_change: move |(_, value): (usize, String)| typed.set(value),
                 on_confirm: move |_: usize| typed.set("confirmed".into()),
-                on_focus: move |index: usize| focused.set(index),
                 on_submit: move |_| {},
                 on_stop: move |_| {},
             }
@@ -998,9 +989,6 @@ mod interactions {
             // The keypress is swallowed rather than confirming the group.
             ui.press_enter("group-input-0");
             assert!(!ui.has("confirmed"));
-            // Focusing a group reports it upwards.
-            ui.focus("group-input-0");
-            assert!(ui.has("group focused"));
         });
     }
 
@@ -1021,7 +1009,6 @@ mod interactions {
                 repeat_done: 1,
                 on_change: move |(_, value): (usize, String)| typed.set(value),
                 on_confirm: move |_: usize| {},
-                on_focus: move |_: usize| {},
                 on_submit: move |_| {},
                 on_stop: move |_| {},
             }
@@ -1048,7 +1035,6 @@ mod interactions {
                 repeat_done: 1,
                 on_change: move |(_, value): (usize, String)| typed.set(value),
                 on_confirm: move |_: usize| {},
-                on_focus: move |_: usize| {},
                 on_submit: move |_| {},
                 on_stop: move |_| {},
             }
@@ -1078,7 +1064,6 @@ mod interactions {
                 repeat_done: 1,
                 on_change: move |(_, value): (usize, String)| typed.set(value),
                 on_confirm: move |_: usize| {},
-                on_focus: move |_: usize| {},
                 on_submit: move |_| {},
                 on_stop: move |_| {},
             }
@@ -1184,7 +1169,6 @@ mod interactions {
                 keyer_mode: KeyerMode::Straight,
                 on_change: move |(_, value): (usize, String)| typed.set(value),
                 on_confirm: move |_: usize| {},
-                on_focus: move |_: usize| {},
                 on_submit: move |_| {},
                 on_stop: move |_| {},
             }
@@ -1228,7 +1212,6 @@ mod interactions {
                 repeat_done: if playing() { 0 } else { 1 },
                 on_change: move |(_, value): (usize, String)| typed.set(value),
                 on_confirm: move |_: usize| {},
-                on_focus: move |_: usize| {},
                 on_submit: move |_| {},
                 on_stop: move |_| {},
             }

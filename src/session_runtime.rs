@@ -1,301 +1,295 @@
-//! Owns the session machine, audio, and effect execution. UI sends events only.
+//! Runs a training session: the machine decides, and this carries out what
+//! it decides — sends, timers, the results screen — under the session's
+//! lease on the audio. The UI only hands it events.
+//!
+//! Its tasks belong to the app rather than to whichever screen started the
+//! session, which is gone the moment the session's own screen comes up: they
+//! are spawned on the root scope, and the lease, not a component, decides
+//! how long they live.
 
 use cw_core::{
-    CharSamplingState, FastrandRng, MonoMs, Rng, Sampler, SessionEffect, SessionEvent,
-    SessionMachine, StationVoice, TrainingSettings, Transmission, apply_auto_level,
-    evaluate_auto_level, generate_training_group, resolve_pileup, resolve_station,
+    CharSamplingState, CountersKey, CountersUpdate, FastrandRng, MonoMs, Sampler, SessionEffect,
+    SessionEvent, SessionId, SessionMachine, Transmission, complete_session,
+    generate_training_group, resolve_station,
 };
+use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
 
-use crate::persist::{
-    clear_auto_counters, load_auto_counters, save_auto_counters, save_sessions, save_settings,
-};
-use crate::playback::{PlayError, play_text_now, sleep_cancelable};
-use crate::state::{AppState, Screen, SessionSignals};
-use crate::time::{local_date_string, mono_ms, now_ms};
+use crate::playback::Preview;
+use crate::player::{AudioError, Lease};
+use crate::state::{AppCtx, Screen};
+use crate::time::{local_date_string, mono_ms, now_ms, seed_rng};
 
-pub fn dispatch_event(
-    app: &AppState,
-    mut runtime: Signal<Option<cw_core::GroupSession>>,
-    event: SessionEvent,
-    expected_gen: u64,
-) -> Vec<SessionEffect> {
-    if app.session_gen.get() != expected_gen {
-        return Vec::new();
-    }
-    let mut slot = app.machine.borrow_mut();
-    let Some(machine) = slot.as_mut() else {
-        return Vec::new();
-    };
-    if machine.session().session_id().raw() != expected_gen {
-        return Vec::new();
-    }
-    let effects = machine.apply(event, MonoMs(mono_ms()));
-    runtime.set(Some(machine.session().clone()));
-    effects
+/// A session in progress: the machine that decides it, the stations it is
+/// sent by, and its hold on the audio.
+pub struct LiveSession {
+    machine: SessionMachine<Sampler>,
+    /// Where every group's stations are drawn from. Drawn afresh for each
+    /// session, so no two sessions — in one launch or across launches — hear
+    /// the same operators.
+    stations: FastrandRng,
+    lease: Lease,
 }
 
-pub fn send_command(app: AppState, signals: SessionSignals, event: SessionEvent) {
-    let generation = app.session_gen.get();
-    let settings = signals
-        .runtime
-        .read()
-        .as_ref()
-        .map(|s| s.settings().clone())
-        .unwrap_or_else(|| (signals.settings)());
-    let effects = dispatch_event(&app, signals.runtime, event, generation);
-    spawn_effects(effects, settings, app, generation, signals);
+impl LiveSession {
+    /// What the receiver hears for group `index`: the station being copied,
+    /// and whoever else is calling across it.
+    ///
+    /// Both are drawn from generators that depend only on the session and
+    /// the group, so every repeat of a group — and every retry after a
+    /// stalled send — comes from the same operators, with the same pile-up
+    /// around them: a station repeating its call does not change frequency,
+    /// speed or strength between sends. Nothing has to be carried across the
+    /// sends for that, while the next group is somebody else.
+    ///
+    /// The others send groups of their own, drawn from the same curriculum
+    /// so they sound like stations rather than noise — but off a blank
+    /// slate, so a pile-up never teaches the sampler anything. Only the
+    /// station you answer counts.
+    fn transmission(&self, index: usize, text: String) -> Transmission {
+        let settings = self.machine.session().settings();
+        let group = self.stations.fork(index as u64);
+        let voice = resolve_station(settings, &mut group.fork(GroupStream::Voice as u64));
+        let mut elsewhere = CharSamplingState::default();
+        Transmission::calling(
+            settings,
+            text,
+            voice,
+            &mut group.fork(GroupStream::Callers as u64),
+            |rng| generate_training_group(settings, &mut elsewhere, rng),
+        )
+    }
 }
 
-pub fn spawn_effects(
-    effects: Vec<SessionEffect>,
-    settings: TrainingSettings,
-    app: AppState,
-    generation: u64,
-    signals: SessionSignals,
-) {
-    if effects.is_empty() {
+/// The generators one group draws from, one per thing it decides.
+#[derive(Clone, Copy)]
+enum GroupStream {
+    /// The station you are copying.
+    Voice,
+    /// Whoever else is calling.
+    Callers,
+}
+
+/// Start a session from the settings as they are.
+///
+/// Starting first settles the alphabet in the settings themselves, so the
+/// session and the screens agree on what is being practised before anything
+/// sounds. The machine is built here, on the UI thread, so Training has its
+/// groups before the first paint.
+pub fn start_session(ctx: AppCtx) {
+    // Held before anything is written, not just before the audio is taken:
+    // a session already running must leave the stored settings exactly as
+    // they are.
+    if ctx.session_running() {
         return;
     }
-    spawn(async move {
-        drive_effects(effects, settings, app, generation, signals).await;
-    });
-}
-
-/// Build the session machine on the UI thread so Training has groups before the
-/// first paint, and so a cancelled start cannot resurrect a dead session.
-pub fn boot_machine_session(
-    settings: TrainingSettings,
-    history: &[cw_core::SessionResult],
-    app: &AppState,
-    generation: u64,
-    signals: SessionSignals,
-) -> Option<Vec<SessionEffect>> {
-    let SessionSignals {
-        mut runtime,
+    let AppCtx {
         mut screen,
+        mut runtime,
+        mut settings,
+        sessions,
+        toasts,
+        mut preview,
         ..
-    } = signals;
-    if app.session_gen.get() != generation {
-        return None;
+    } = ctx;
+    let fitted = settings.peek().clone().clamp();
+    if *settings.peek() != fitted {
+        settings.set(fitted.clone());
     }
+    // The session has the audio now, whether or not it can open it: any
+    // preview that had it has stopped.
+    preview.set(Preview::Idle);
+    let app = ctx.app();
+    let lease = match app.player.claim(&fitted) {
+        Ok(lease) => lease,
+        Err(err) => {
+            toasts.show(err.to_string());
+            return;
+        }
+    };
     // Each session draws from a sampler of its own, seeded afresh.
-    let seed = (app.rng.borrow_mut().f64() * u64::MAX as f64) as u64;
-    let sampler = Sampler::new(history, &settings, seed);
+    let sampler = Sampler::new(&sessions.peek(), &fitted, seed_rng());
     let (machine, effects) = SessionMachine::start(
-        cw_core::SessionId::new(generation),
+        SessionId::new(lease.turn()),
         MonoMs(mono_ms()),
-        settings,
+        fitted,
         sampler,
     );
     runtime.set(Some(machine.session().clone()));
     screen.set(Screen::Training);
-    *app.machine.borrow_mut() = Some(machine);
-    Some(effects)
+    *app.session.borrow_mut() = Some(LiveSession {
+        machine,
+        stations: FastrandRng(seed_rng()),
+        lease: lease.clone(),
+    });
+    run_effects(ctx, &lease, effects);
 }
 
-async fn drive_effects(
-    mut pending: Vec<SessionEffect>,
-    settings: TrainingSettings,
-    app: AppState,
-    generation: u64,
-    signals: SessionSignals,
-) {
-    while !pending.is_empty() {
-        if app.session_gen.get() != generation {
+/// Hand the running session something the user did. Nothing happens when
+/// no session is running.
+pub fn send_event(ctx: AppCtx, event: SessionEvent) {
+    let lease = ctx
+        .app()
+        .session
+        .borrow()
+        .as_ref()
+        .map(|live| live.lease.clone());
+    if let Some(lease) = lease {
+        dispatch(ctx, &lease, event);
+    }
+}
+
+/// Let the machine decide what `event` means, then do what it says.
+///
+/// `lease` is the session the event belongs to: an event from a session
+/// that has ended, or from one before the session now running, is dropped
+/// rather than handed to a machine it means nothing to.
+fn dispatch(ctx: AppCtx, lease: &Lease, event: SessionEvent) {
+    let mut runtime = ctx.runtime;
+    let app = ctx.app();
+    let effects = {
+        let mut slot = app.session.borrow_mut();
+        let Some(live) = slot
+            .as_mut()
+            .filter(|live| live.lease.is(lease) && lease.is_current())
+        else {
             return;
+        };
+        let effects = live.machine.apply(event, MonoMs(mono_ms()));
+        // Much of what arrives changes nothing — a key while the box is
+        // locked, a timer the machine has forgotten — and publishing it
+        // anyway would copy the whole session and redraw the screen for it.
+        let session = live.machine.session();
+        if runtime.peek().as_ref() != Some(session) {
+            runtime.set(Some(session.clone()));
         }
-        let batch = std::mem::take(&mut pending);
-        for effect in batch {
-            if app.session_gen.get() != generation {
-                return;
+        effects
+    };
+    run_effects(ctx, lease, effects);
+}
+
+fn run_effects(ctx: AppCtx, lease: &Lease, effects: Vec<SessionEffect>) {
+    for effect in effects {
+        match effect {
+            SessionEffect::StopAudio => lease.stop_sending(),
+            SessionEffect::Play { index, text } => play(ctx, lease, index, text),
+            SessionEffect::StartTimer { id, ms } => {
+                let lease = lease.clone();
+                // One wait for the whole of it. A timer the machine has since
+                // forgotten wakes once, is told so, and is gone.
+                spawn_forever(async move {
+                    if lease.sleep(ms).await.is_ok() {
+                        dispatch(ctx, &lease, SessionEvent::TimerFired { id });
+                    }
+                });
             }
-            pending.extend(handle_effect(effect, &settings, &app, generation, signals).await);
+            SessionEffect::PersistAndShowResults => finish_session(ctx),
+            SessionEffect::AbortToHome => abandon_session(ctx),
         }
     }
 }
 
-/// The station behind one group.
-///
-/// Derived from the session and the group's place in it, so every repeat of
-/// that group comes from the same operator — a station repeating its call does
-/// not change frequency, speed or strength between sends — while the next
-/// group is somebody else. Deriving it beats remembering it: nothing has to be
-/// carried across the sends, and a retry after a stalled send tunes back in to
-/// the same station rather than a new one.
-fn station_for(settings: &TrainingSettings, generation: u64, index: usize) -> StationVoice {
-    resolve_station(settings, &mut group_rng(generation, index, 0))
+/// Send group `index`, and tell the machine how it went.
+fn play(ctx: AppCtx, lease: &Lease, index: usize, text: String) {
+    // Every group is built from the settings the session started with, not
+    // from whatever the settings screen holds now: a change made mid-session
+    // belongs to the next one.
+    let Some((settings, transmission)) = ctx.app().session.borrow().as_ref().map(|live| {
+        let settings = live.machine.session().settings().clone();
+        (settings, live.transmission(index, text))
+    }) else {
+        return;
+    };
+    let lease = lease.clone();
+    spawn_forever(async move {
+        let event = match lease.send(&transmission, &settings).await {
+            Ok(sent) => SessionEvent::PlaybackEnded {
+                index,
+                duration_sec: sent.duration_sec,
+                char_wpm: sent.char_wpm,
+                effective_wpm: sent.effective_wpm,
+            },
+            Err(AudioError::Cancelled) => SessionEvent::PlaybackStopped { index },
+            Err(failure) => {
+                ctx.toasts.show(failure.to_string());
+                SessionEvent::PlaybackStopped { index }
+            }
+        };
+        dispatch(ctx, &lease, event);
+    });
 }
 
-/// A generator that depends only on the session and the group, so every repeat
-/// of a group — and every retry after a stalled send — tunes back in to the
-/// same operators rather than a new set.
-fn group_rng(generation: u64, index: usize, salt: u64) -> FastrandRng {
-    FastrandRng(
-        generation
-            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
-            .wrapping_add((index as u64).wrapping_mul(0x2545_F491))
-            .wrapping_add(salt)
-            | 1,
-    )
+/// The session, taken out of the app, with the audio given back.
+fn end_session(ctx: AppCtx) -> Option<LiveSession> {
+    let live = ctx.app().session.borrow_mut().take()?;
+    live.lease.release();
+    Some(live)
 }
 
-/// What the receiver hears for this group: the station being copied, and
-/// whoever else is calling across it.
-///
-/// The others send groups of their own, drawn from the same curriculum so they
-/// sound like stations rather than noise — but from a generator of their own,
-/// off a blank slate, so a pile-up never teaches the sampler anything. Only
-/// the station you answer counts.
-fn transmission_for(
-    settings: &TrainingSettings,
-    generation: u64,
-    index: usize,
-    text: String,
-) -> Transmission {
-    let voice = station_for(settings, generation, index);
-    let most = settings.band.stations_max.max(1) as usize;
-    if most <= 1 {
-        return Transmission::alone(text, voice);
-    }
-    let mut rng = group_rng(generation, index, 0x51ED_2701);
-    let mut elsewhere = CharSamplingState::default();
-    let texts: Vec<String> = (0..most.saturating_sub(1))
-        .map(|_| generate_training_group(settings, &mut elsewhere, &mut rng))
-        .collect();
-    Transmission {
-        others: resolve_pileup(settings, &voice, &text, &texts, &mut rng),
-        text,
-        voice,
-    }
-}
-
-/// The settings a session was started with.
-///
-/// Every group in a session is built from these, not from whatever the
-/// settings screen holds now: a change made mid-session belongs to the next
-/// one, or the alphabet could shift under a session already being scored.
-/// Falls back to what the caller was handed when there is no machine yet.
-fn session_settings(
-    machine: Option<&SessionMachine<Sampler>>,
-    fallback: &TrainingSettings,
-) -> TrainingSettings {
-    machine.map_or_else(|| fallback.clone(), |m| m.session().settings().clone())
-}
-
-async fn handle_effect(
-    effect: SessionEffect,
-    settings: &TrainingSettings,
-    app: &AppState,
-    generation: u64,
-    signals: SessionSignals,
-) -> Vec<SessionEffect> {
-    let SessionSignals {
-        mut runtime,
+/// End the session without keeping it.
+fn abandon_session(ctx: AppCtx) {
+    let AppCtx {
         mut screen,
-        mut toast,
+        mut runtime,
         ..
-    } = signals;
-    match effect {
-        SessionEffect::StopAudio => {
-            app.stop_sending();
-            Vec::new()
-        }
-        SessionEffect::Play { index, text } => {
-            if app.session_gen.get() != generation {
-                return Vec::new();
-            }
-            let snapshot = session_settings(app.machine.borrow().as_ref(), settings);
-            let transmission = transmission_for(&snapshot, generation, index, text);
-            let outcome = play_text_now(app, generation, &transmission, &snapshot).await;
-            if app.session_gen.get() != generation {
-                return Vec::new();
-            }
-            let event = match outcome {
-                Ok((duration, char_wpm, effective_wpm)) => SessionEvent::PlaybackEnded {
-                    index,
-                    duration_sec: duration,
-                    char_wpm,
-                    effective_wpm,
-                },
-                Err(PlayError::Cancelled) => SessionEvent::PlaybackStopped { index },
-                Err(PlayError::Failed(message)) => {
-                    toast.set(Some(message));
-                    SessionEvent::PlaybackStopped { index }
-                }
-            };
-            dispatch_event(app, runtime, event, generation)
-        }
-        SessionEffect::StartTimer { id, ms } => {
-            if !sleep_cancelable(ms, generation, app.session_gen.clone()).await {
-                return Vec::new();
-            }
-            dispatch_event(app, runtime, SessionEvent::TimerFired { id }, generation)
-        }
-        SessionEffect::PersistAndShowResults => {
-            *app.machine.borrow_mut() = None;
-            finish_session(app.clone(), signals);
-            Vec::new()
-        }
-        SessionEffect::AbortToHome => {
-            app.bump_session();
-            app.silence_audio();
-            *app.machine.borrow_mut() = None;
-            runtime.set(None);
-            screen.set(Screen::Home);
-            Vec::new()
-        }
-    }
+    } = ctx;
+    end_session(ctx);
+    runtime.set(None);
+    screen.set(Screen::Home);
 }
 
-pub fn finish_session(app: AppState, signals: SessionSignals) {
-    let SessionSignals {
+/// Score the session, move the level if it earned it, store it, and show
+/// the results.
+fn finish_session(ctx: AppCtx) {
+    let AppCtx {
         mut screen,
         mut runtime,
         mut result,
         mut auto_message,
         mut sessions,
-        settings: mut settings_sig,
-        mut toast,
-    } = signals;
-    if matches!(screen(), Screen::Results) || runtime.read().is_none() {
-        return;
-    }
-    app.bump_session();
-    app.silence_audio();
-    // `runtime` was checked just above, so there is a session here.
-    let Some(session) = runtime.read().clone() else {
+        mut settings,
+        toasts,
+        ..
+    } = ctx;
+    let Some(live) = end_session(ctx) else {
         return;
     };
-    if !session.any_confirmed() {
-        runtime.set(None);
-        screen.set(Screen::Home);
-        return;
+    let store = ctx.app().store;
+    let session = live.machine.session();
+    let run = store.load_auto_counters(&CountersKey::of(session.settings()));
+    // The machine only finishes a session it has scored something in.
+    let done = complete_session(session, run, now_ms(), local_date_string());
+    match &done.counters {
+        CountersUpdate::Keep(key, counters) => store.save_auto_counters(key, *counters),
+        CountersUpdate::Clear(keys) => store.clear_auto_counters(keys),
     }
-    let settings = session.settings().clone();
-    // A confirmed group always has something in it, so this scores at least one.
-    let built = session.result(now_ms(), local_date_string());
-
-    let mut counters = load_auto_counters(&settings);
-    let mut next_settings = settings.clone();
-    if let Some(change) = evaluate_auto_level(&built, &settings, &mut counters) {
-        clear_auto_counters(&change.counters_cleared);
-        apply_auto_level(&mut next_settings, &change);
-        settings_sig.set(next_settings.clone());
-        save_settings(&next_settings);
-        let message = crate::ui::auto_level::change_message(&change);
-        auto_message.set(Some(message.clone()));
-        toast.set(Some(message));
-    } else {
-        save_auto_counters(&settings, counters);
-        auto_message.set(None);
+    let message = done
+        .change
+        .as_ref()
+        .map(crate::ui::auto_level::change_message);
+    if done.change.is_some() {
+        // Stored by the app's settings effect, once the results are up.
+        settings.set(done.settings);
     }
+    if let Some(message) = &message {
+        toasts.show(message.clone());
+    }
+    auto_message.set(message);
 
-    let mut history = sessions();
-    history.push(built.clone());
-    save_sessions(&history);
-    sessions.set(history);
-    result.set(Some(built));
+    // The history grows by one where it is, and is stored from there.
+    sessions.write().push(done.result.clone());
+    let saved = store.save_sessions(&sessions.peek());
+    // What the screens show is what the store has.
+    if let Some(kept) = saved.kept() {
+        let extra = sessions.peek().len().saturating_sub(kept);
+        if extra > 0 {
+            sessions.write().drain(..extra);
+        }
+    }
+    if let Some(problem) = saved.problem() {
+        toasts.show(problem);
+    }
+    result.set(Some(done.result));
     runtime.set(None);
     screen.set(Screen::Results);
 }
@@ -304,11 +298,19 @@ pub fn finish_session(app: AppState, signals: SessionSignals) {
 mod tests {
     use super::*;
     use crate::audio::fake::{Behaviour, Call};
+    use crate::persist::Store;
     use crate::testing::{Harness, run, test_settings};
     use cw_core::AutoLevelCounters;
     use cw_core::CharSetMode;
     use cw_core::SessionEffect;
     use cw_core::SessionPhase;
+
+    impl LiveSession {
+        /// The session's hold on the audio, for a test to end or to stop.
+        pub(crate) fn lease(&self) -> &Lease {
+            &self.lease
+        }
+    }
 
     /// A whole session, answered correctly, ends on the results screen with the
     /// session stored.
@@ -319,14 +321,14 @@ mod tests {
             h.start_training();
             h.play_through(60_000).await;
             assert_eq!(h.screen(), Screen::Results);
-            let result = h.result.peek().clone().expect("a result");
+            let result = h.ctx.result.peek().clone().expect("a result");
             assert_eq!(result.groups.len(), 2);
             assert!(result.groups.iter().all(|g| g.correct));
             assert_eq!(result.accuracy, 1.0);
-            assert_eq!(h.sessions.peek().len(), 1);
-            assert_eq!(crate::persist::load_sessions().len(), 1);
+            assert_eq!(h.ctx.sessions.peek().len(), 1);
+            assert_eq!(h.store.load_sessions().len(), 1);
             // The machine is torn down, and the audio with it.
-            assert!(h.app.machine.borrow().is_none());
+            assert!(h.app.session.borrow().is_none());
             assert!(h.calls().contains(&Call::Shutdown));
             // Two groups, one send each.
             assert_eq!(h.texts().len(), 2);
@@ -346,10 +348,11 @@ mod tests {
                 h.run_until(4_000, |h| h.texts().len() == 2).await,
                 "the second group should have been sent"
             );
-            let confirmed = h.runtime.peek().as_ref().map(|s| s.view().confirmed);
+            let confirmed = h.ctx.runtime.peek().as_ref().map(|s| s.view().confirmed);
             assert_eq!(confirmed, Some(vec![true, false]));
             assert_eq!(
-                h.runtime
+                h.ctx
+                    .runtime
                     .peek()
                     .as_ref()
                     .and_then(|s| s.group(0))
@@ -391,13 +394,15 @@ mod tests {
             h.type_answer(0, &first.to_lowercase());
             // Nothing is confirmed until the auto-confirm delay has passed.
             assert!(
-                h.runtime
+                h.ctx
+                    .runtime
                     .peek()
                     .as_ref()
                     .is_some_and(|s| !s.view().confirmed[0])
             );
             assert!(
                 h.run_until(1_000, |h| h
+                    .ctx
                     .runtime
                     .peek()
                     .as_ref()
@@ -406,7 +411,8 @@ mod tests {
             );
             // Typed in lower case, stored the way it was sent.
             assert_eq!(
-                h.runtime
+                h.ctx
+                    .runtime
                     .peek()
                     .as_ref()
                     .and_then(|s| s.group(0))
@@ -433,7 +439,8 @@ mod tests {
             h.type_answer(0, &sent[..1]);
             h.advance(1_000).await;
             assert!(
-                h.runtime
+                h.ctx
+                    .runtime
                     .peek()
                     .as_ref()
                     .is_some_and(|s| !s.view().confirmed[0])
@@ -451,7 +458,8 @@ mod tests {
             h.type_answer(0, &sent);
             h.advance(1_000).await;
             assert!(
-                h.runtime
+                h.ctx
+                    .runtime
                     .peek()
                     .as_ref()
                     .is_some_and(|s| !s.view().confirmed[0])
@@ -459,39 +467,35 @@ mod tests {
         });
     }
 
-    /// Starting a second session while the first one is still sending must not
-    /// leave the first session's effects running against the new one.
+    /// A session that ends mid-send leaves nothing behind to disturb the
+    /// next one: the send it cancelled must not end the session after it.
     #[test]
-    fn starting_a_new_session_mid_send_leaves_nothing_of_the_old_one() {
+    fn a_new_session_after_one_left_mid_send_keeps_nothing_of_the_old_one() {
         run(|| async {
             let mut h = Harness::new();
             h.start_training();
-            let first_gen = h.app.session_gen.get();
-            let first_group = h.sent(0);
+            let first = h.lease();
             h.advance(100).await;
+            h.send(SessionEvent::Abort);
 
             h.recorder.clear();
             h.start_training();
-            let second_gen = h.app.session_gen.get();
-            assert!(second_gen > first_gen);
-            // The old send was stopped and a new one started.
-            assert!(h.calls().contains(&Call::Stop));
+            let second = h.lease();
+            assert!(second.turn() > first.turn());
             assert_eq!(h.texts().len(), 1);
 
-            // Let the old chain's cancellation land: it must not end the new session.
+            // Let the old send's cancellation land: it must not end the new session.
             h.advance(2_000).await;
             assert_eq!(h.screen(), Screen::Training);
             assert!(!matches!(h.phase(), Some(SessionPhase::Aborted)));
             assert_eq!(
-                h.app
+                h.app.session.borrow().as_ref().map(|live| live
                     .machine
-                    .borrow()
-                    .as_ref()
-                    .map(|m| m.session().session_id().raw()),
-                Some(second_gen)
+                    .session()
+                    .session_id()
+                    .raw()),
+                Some(second.turn())
             );
-            // And the session in view is the new one.
-            let _ = first_group;
             assert!(h.run_until(6_000, |h| h.awaiting_answer() == Some(0)).await);
         });
     }
@@ -506,13 +510,13 @@ mod tests {
             h.advance(100).await;
             h.send(SessionEvent::Abort);
             assert_eq!(h.screen(), Screen::Home);
-            assert!(h.runtime.peek().is_none());
-            assert!(h.app.machine.borrow().is_none());
+            assert!(h.ctx.runtime.peek().is_none());
+            assert!(h.app.session.borrow().is_none());
 
             h.advance(5_000).await;
             assert_eq!(h.screen(), Screen::Home);
-            assert!(h.result.peek().is_none());
-            assert!(h.sessions.peek().is_empty());
+            assert!(h.ctx.result.peek().is_none());
+            assert!(h.ctx.sessions.peek().is_empty());
         });
     }
 
@@ -526,6 +530,7 @@ mod tests {
             h.type_answer(0, &sent);
             assert!(
                 h.run_until(1_000, |h| h
+                    .ctx
                     .runtime
                     .peek()
                     .as_ref()
@@ -535,9 +540,9 @@ mod tests {
             h.send(SessionEvent::FinishNow);
             h.advance(200).await;
             assert_eq!(h.screen(), Screen::Results);
-            let result = h.result.peek().clone().expect("a result");
+            let result = h.ctx.result.peek().clone().expect("a result");
             assert_eq!(result.groups.len(), 1);
-            assert_eq!(h.sessions.peek().len(), 1);
+            assert_eq!(h.ctx.sessions.peek().len(), 1);
         });
     }
 
@@ -565,7 +570,7 @@ mod tests {
             );
             assert!(h.recorder.players_built.get() > 1, "the player is rebuilt");
             assert_eq!(h.toast().as_deref(), Some("Audio playback stalled."));
-            assert!(h.sessions.peek().is_empty());
+            assert!(h.ctx.sessions.peek().is_empty());
         });
     }
 
@@ -620,7 +625,7 @@ mod tests {
             h.play_through(120_000).await;
 
             assert_eq!(h.screen(), Screen::Results);
-            let result = h.result.peek().clone().expect("a result");
+            let result = h.ctx.result.peek().clone().expect("a result");
             assert_eq!(result.groups.len(), 2);
             assert_eq!(result.accuracy, 1.0, "every call was answered correctly");
             // The calls themselves are cw-core's to get right; here, every
@@ -636,7 +641,7 @@ mod tests {
             // The tier is what this session was run at, not the Koch level.
             assert_eq!(result.level, cw_core::CALLSIGN_TIER_MAX);
             assert_eq!(result.char_set_mode, CharSetMode::Callsign);
-            assert_eq!(h.sessions.peek().len(), 1);
+            assert_eq!(h.ctx.sessions.peek().len(), 1);
             // And what was sent is what was played.
             assert_eq!(h.texts().len(), 2);
             for text in h.texts() {
@@ -655,7 +660,7 @@ mod tests {
             let mut h = Harness::with_settings(settings);
             h.start_training();
             h.play_through(120_000).await;
-            let stored = h.sessions.peek().clone();
+            let stored = h.ctx.sessions.peek().clone();
             assert_eq!(stored.len(), 1);
 
             let mut koch = test_settings();
@@ -725,6 +730,32 @@ mod tests {
         });
     }
 
+    /// Every launch tunes in its own stations. The first session of every
+    /// launch used to bring the same pitch, speed, strength and fist for each
+    /// of its groups, and the same callers across them, because the stations
+    /// were drawn from a counter that starts at zero each time the app does.
+    #[test]
+    fn two_launches_do_not_hear_the_same_stations() {
+        run(|| async {
+            let first_session = || {
+                let mut settings = test_settings();
+                settings.playback.char_wpm_min = 15.0;
+                settings.playback.char_wpm_max = 40.0;
+                settings.band.side_tone_min = 400.0;
+                settings.band.side_tone_max = 900.0;
+                settings.band.link_volume = false;
+                settings.band.volume_min = 0.2;
+                settings.band.volume_max = 1.0;
+                let mut h = Harness::with_settings(settings);
+                h.start_training();
+                h.recorder.voices()
+            };
+            let (one, other) = (first_session(), first_session());
+            assert_eq!(one.len(), 1);
+            assert_ne!(one, other, "two launches opened on the same station");
+        });
+    }
+
     /// A pile-up changes what you hear, not what you answer. The session still
     /// scores the station you were copying, and the others are only ever in the
     /// way — which is the whole point of them.
@@ -759,9 +790,9 @@ mod tests {
 
             // Every group was answered correctly, because the pile-up is not
             // part of the answer.
-            let result = h.result.peek().clone().expect("a result");
+            let result = h.ctx.result.peek().clone().expect("a result");
             assert_eq!(result.accuracy, 1.0);
-            assert_eq!(h.sessions.peek().len(), 1);
+            assert_eq!(h.ctx.sessions.peek().len(), 1);
         });
     }
 
@@ -817,6 +848,86 @@ mod tests {
         });
     }
 
+    /// A group answered while its send is being retried is not sent again.
+    ///
+    /// With the box open during the send, the answer can land while a
+    /// failed send waits for its rebuilt player. Confirming it stopped the
+    /// audio, but the retry only checked that the session was the same one,
+    /// so it went on to send the confirmed group across the gap before the
+    /// next.
+    #[test]
+    fn an_answer_given_during_a_retry_stops_the_retry() {
+        run(|| async {
+            let mut settings = test_settings();
+            settings.playback.lock_input_during_group_playback = false;
+            let mut h = Harness::with_settings(settings);
+            h.recorder.fail_next(1);
+            h.start_training();
+            // The first send breaks, and the retry rebuilds the player.
+            let mut waited = 0;
+            while h.recorder.players_built.get() < 2 {
+                assert!(waited < 5_000, "the send was never retried");
+                h.advance(4).await;
+                waited += 4;
+            }
+            let sends = h.texts().len();
+            let sent = h.sent(0);
+            h.type_answer(0, &sent);
+            h.send(SessionEvent::Confirm);
+            assert_eq!(h.phase(), Some(SessionPhase::InterGroupGap { next: 1 }));
+            h.advance(500).await;
+            assert_eq!(
+                h.texts().len(),
+                sends,
+                "the answered group was sent again: {:?}",
+                h.texts()
+            );
+        });
+    }
+
+    /// What changes nothing is not published: no copy of the session, and
+    /// no redraw of the screen showing it.
+    #[test]
+    fn an_event_that_changes_nothing_is_not_published() {
+        run(|| async {
+            use std::sync::Arc;
+            use std::sync::atomic::{AtomicUsize, Ordering};
+
+            let mut h = Harness::new();
+            h.start_training();
+            let writes = Arc::new(AtomicUsize::new(0));
+            let counted = writes.clone();
+            let runtime = h.ctx.runtime;
+            h.in_app(|| {
+                let watcher = dioxus::core::ReactiveContext::new_with_callback(
+                    move || {
+                        counted.fetch_add(1, Ordering::Relaxed);
+                    },
+                    ScopeId::ROOT,
+                    std::panic::Location::caller(),
+                );
+                watcher.run_in(|| {
+                    let _ = runtime.read();
+                });
+            });
+            // The group is still being sent, and the box is locked.
+            h.type_answer(0, "K");
+            assert_eq!(
+                writes.load(Ordering::Relaxed),
+                0,
+                "a refused key was published"
+            );
+
+            assert!(h.run_until(4_000, |h| h.awaiting_answer() == Some(0)).await);
+            let before = writes.load(Ordering::Relaxed);
+            h.type_answer(0, "K");
+            assert!(
+                writes.load(Ordering::Relaxed) > before,
+                "an answer went unpublished"
+            );
+        });
+    }
+
     /// A device that comes back mid-session must not cost the user the session.
     #[test]
     fn a_send_that_fails_once_and_then_works_carries_on() {
@@ -836,6 +947,7 @@ mod tests {
             h.type_answer(0, &sent);
             assert!(
                 h.run_until(2_000, |h| h
+                    .ctx
                     .runtime
                     .peek()
                     .as_ref()
@@ -856,6 +968,7 @@ mod tests {
             h.type_answer(0, &sent);
             assert!(
                 h.run_until(1_000, |h| h
+                    .ctx
                     .runtime
                     .peek()
                     .as_ref()
@@ -864,7 +977,7 @@ mod tests {
             );
             h.set_behaviour(Behaviour::RefuseToStart);
             assert!(h.run_until(30_000, |h| h.screen() == Screen::Results).await);
-            let result = h.result.peek().clone().expect("a result");
+            let result = h.ctx.result.peek().clone().expect("a result");
             assert_eq!(result.groups.len(), 1);
         });
     }
@@ -874,43 +987,25 @@ mod tests {
         run(|| async {
             let mut h = Harness::new();
             h.start_training();
-            let stale_gen = h.app.session_gen.get();
-            let app = h.app.clone();
-            let runtime = h.runtime;
-            // The user leaves; an old effect chain then reports its send ended.
+            let stale = h.lease();
+            let ctx = h.ctx;
+            // The user leaves; an old send then reports that it ended.
             h.send(SessionEvent::Abort);
-            let effects = h.in_app(|| {
-                dispatch_event(
-                    &app,
-                    runtime,
+            h.in_app(|| {
+                dispatch(
+                    ctx,
+                    &stale,
                     SessionEvent::PlaybackEnded {
                         index: 0,
                         duration_sec: 1.0,
                         char_wpm: 20.0,
                         effective_wpm: 20.0,
                     },
-                    stale_gen,
                 )
             });
-            assert!(effects.is_empty());
+            h.pump();
             assert_eq!(h.screen(), Screen::Home);
-        });
-    }
-
-    #[test]
-    fn booting_a_session_that_was_already_cancelled_builds_nothing() {
-        run(|| async {
-            let h = Harness::new();
-            let app = h.app.clone();
-            let generation = app.session_gen.get();
-            // Something else claimed the audio between the two calls.
-            app.bump_session();
-            let signals = h.signals();
-            let effects =
-                h.in_app(|| boot_machine_session(test_settings(), &[], &app, generation, signals));
-            assert!(effects.is_none());
-            assert!(app.machine.borrow().is_none());
-            assert_eq!(h.screen(), Screen::Home);
+            assert!(h.ctx.runtime.peek().is_none());
         });
     }
 
@@ -928,14 +1023,12 @@ mod tests {
     }
 
     #[test]
-    fn an_event_with_no_machine_behind_it_does_nothing() {
+    fn an_event_with_no_session_behind_it_does_nothing() {
         run(|| async {
-            let h = Harness::new();
-            let app = h.app.clone();
-            let generation = app.session_gen.get();
-            let effects =
-                h.in_app(|| dispatch_event(&app, h.runtime, SessionEvent::Confirm, generation));
-            assert!(effects.is_empty());
+            let mut h = Harness::new();
+            h.send(SessionEvent::Confirm);
+            assert_eq!(h.screen(), Screen::Home);
+            assert!(h.ctx.runtime.peek().is_none());
         });
     }
 
@@ -944,19 +1037,14 @@ mod tests {
         run(|| async {
             let mut h = Harness::new();
             h.start_training();
-            let app = h.app.clone();
-            // The machine belongs to the current generation; ask it to accept an
-            // event stamped with a different one.
-            let effects = h.in_app(|| {
-                dispatch_event(
-                    &app,
-                    h.runtime,
-                    SessionEvent::Abort,
-                    app.session_gen.get() + 1,
-                )
-            });
-            assert!(effects.is_empty());
+            let older = h.lease();
+            h.send(SessionEvent::Abort);
+            h.start_training();
+            let ctx = h.ctx;
+            h.in_app(|| dispatch(ctx, &older, SessionEvent::Abort));
+            h.pump();
             assert_eq!(h.screen(), Screen::Training);
+            assert_eq!(h.phase(), Some(SessionPhase::Playing { index: 0 }));
         });
     }
 
@@ -969,29 +1057,23 @@ mod tests {
             let mut h = Harness::new();
             h.start_training();
             h.advance(100).await;
-            h.app.stop_sending();
+            h.lease().stop_sending();
             assert!(h.run_until(5_000, |h| h.screen() == Screen::Home).await);
-            assert!(h.sessions.peek().is_empty());
+            assert!(h.ctx.sessions.peek().is_empty());
         });
     }
 
     #[test]
-    fn a_stale_sleep_does_not_move_the_session_on() {
+    fn a_timer_the_machine_never_started_does_not_move_the_session_on() {
         run(|| async {
             let mut h = Harness::new();
             h.start_training();
-            let app = h.app.clone();
-            let generation = app.session_gen.get();
-            let settings_now = h.settings.peek().clone();
-            let signals = h.signals();
-            // A timer the machine never started.
+            let (ctx, lease) = (h.ctx, h.lease());
             h.in_app(|| {
-                spawn_effects(
+                run_effects(
+                    ctx,
+                    &lease,
                     vec![SessionEffect::StartTimer { id: 999, ms: 20 }],
-                    settings_now,
-                    app.clone(),
-                    generation,
-                    signals,
                 )
             });
             h.pump();
@@ -1005,22 +1087,20 @@ mod tests {
         run(|| async {
             let mut h = Harness::new();
             h.start_training();
-            let app = h.app.clone();
-            let generation = app.session_gen.get();
-            let settings_now = h.settings.peek().clone();
-            let signals = h.signals();
+            let (ctx, stale) = (h.ctx, h.lease());
             h.send(SessionEvent::Abort);
             h.recorder.clear();
             h.in_app(|| {
-                spawn_effects(
-                    vec![SessionEffect::Play {
-                        index: 1,
-                        text: "KM".into(),
-                    }],
-                    settings_now,
-                    app.clone(),
-                    generation,
-                    signals,
+                run_effects(
+                    ctx,
+                    &stale,
+                    vec![
+                        SessionEffect::Play {
+                            index: 1,
+                            text: "KM".into(),
+                        },
+                        SessionEffect::StartTimer { id: 1, ms: 10 },
+                    ],
                 )
             });
             h.pump();
@@ -1037,20 +1117,14 @@ mod tests {
             settings.curriculum.num_groups = 1;
             let mut h = Harness::with_settings(settings);
             h.start_training();
+            let (ctx, stale) = (h.ctx, h.lease());
             h.play_through(30_000).await;
             assert_eq!(h.screen(), Screen::Results);
-            // The machine is gone; an effect that arrives late finds nothing.
-            let app = h.app.clone();
-            let generation = app.session_gen.get();
-            let settings_now = h.settings.peek().clone();
-            let signals = h.signals();
             h.in_app(|| {
-                spawn_effects(
+                run_effects(
+                    ctx,
+                    &stale,
                     vec![SessionEffect::StartTimer { id: 1, ms: 10 }],
-                    settings_now,
-                    app.clone(),
-                    generation,
-                    signals,
                 )
             });
             h.pump();
@@ -1070,35 +1144,42 @@ mod tests {
             assert_eq!(sent.chars().count(), 2);
             assert_eq!(h.texts(), vec![sent.clone()]);
             // The answer box stays shut until the send is over.
-            assert!(h.runtime.peek().as_ref().is_some_and(|s| s.input_locked(0)));
+            assert!(
+                h.ctx
+                    .runtime
+                    .peek()
+                    .as_ref()
+                    .is_some_and(|s| s.input_locked(0))
+            );
 
             assert!(h.run_until(4_000, |h| h.awaiting_answer() == Some(0)).await);
-            assert!(!h.runtime.peek().as_ref().is_some_and(|s| s.input_locked(0)));
+            assert!(
+                !h.ctx
+                    .runtime
+                    .peek()
+                    .as_ref()
+                    .is_some_and(|s| s.input_locked(0))
+            );
         });
     }
 
+    /// A session already running is not started over: not its audio, not
+    /// its machine, and not the settings it was started with.
     #[test]
-    fn finishing_with_nothing_answered_goes_home_without_storing_anything() {
+    fn starting_again_while_a_session_runs_changes_nothing() {
         run(|| async {
             let mut h = Harness::new();
             h.start_training();
-            let (app, signals) = (h.app.clone(), h.signals());
-            h.in_app(|| finish_session(app, signals));
-            h.pump();
-            assert_eq!(h.screen(), Screen::Home);
-            assert!(h.sessions.peek().is_empty());
-            assert!(h.result.peek().is_none());
-        });
-    }
-
-    #[test]
-    fn finishing_without_a_session_at_all_is_a_no_op() {
-        run(|| async {
-            let mut h = Harness::new();
-            let (app, signals) = (h.app.clone(), h.signals());
-            h.in_app(|| finish_session(app, signals));
-            h.pump();
-            assert_eq!(h.screen(), Screen::Home);
+            let lease = h.lease();
+            h.ctx.settings.set({
+                let mut changed = test_settings();
+                changed.curriculum.num_groups = 7;
+                changed
+            });
+            h.start_training();
+            assert!(h.lease().is(&lease) && lease.is_current());
+            assert_eq!(h.ctx.settings.peek().curriculum.num_groups, 7);
+            assert_eq!(h.texts().len(), 1);
         });
     }
 
@@ -1114,13 +1195,14 @@ mod tests {
             h.start_training();
             h.play_through(60_000).await;
             assert_eq!(h.screen(), Screen::Results);
-            assert_eq!(h.settings.peek().curriculum.level, 2);
-            let message = h.auto_message.peek().clone().expect("a message");
+            assert_eq!(h.ctx.settings.peek().curriculum.level, 2);
+            let message = h.ctx.auto_message.peek().clone().expect("a message");
             assert!(message.contains("Level increased to 2"), "{message}");
             assert_eq!(h.toast().as_deref(), Some(message.as_str()));
             // The level that was just left behind keeps no counters.
             assert_eq!(
-                crate::persist::load_auto_counters(&h.settings.peek().clone()),
+                h.store
+                    .load_auto_counters(&CountersKey::of(&h.ctx.settings.peek())),
                 AutoLevelCounters::default()
             );
         });
@@ -1136,14 +1218,68 @@ mod tests {
             let mut h = Harness::with_settings(settings.clone());
             h.start_training();
             h.play_through(60_000).await;
-            assert!(h.auto_message.peek().is_none());
+            assert!(h.ctx.auto_message.peek().is_none());
             assert_eq!(
-                crate::persist::load_auto_counters(&settings),
+                h.store.load_auto_counters(&CountersKey::of(&settings)),
                 AutoLevelCounters { above: 1, below: 0 }
             );
-            let progress = crate::persist::current_auto_progress(&settings).expect("progress");
+            let progress = crate::persist::auto_progress(&*h.store, &settings).expect("progress");
             assert_eq!(progress.above_count, 1);
             assert_eq!(progress.above_target, 5);
+        });
+    }
+
+    /// A store with room for fewer sessions than the history keeps the
+    /// newest, says so, and the screens show what it kept. A browser out of
+    /// room used to drop the oldest in silence, and the app went on showing
+    /// them until the next launch.
+    #[test]
+    fn a_history_too_big_to_store_keeps_its_newest_and_says_so() {
+        run(|| async {
+            let mut h = Harness::new();
+            h.ctx.sessions.set(vec![
+                crate::testing::stored_session("2026-09-01", &[("KM", "KM")]),
+                crate::testing::stored_session("2026-09-02", &[("KM", "KM")]),
+            ]);
+            h.store.room.set(Some(2));
+            h.start_training();
+            h.play_through(60_000).await;
+            assert_eq!(h.screen(), Screen::Results);
+            let shown: Vec<String> = h
+                .ctx
+                .sessions
+                .peek()
+                .iter()
+                .map(|s| s.date.clone())
+                .collect();
+            assert_eq!(shown.len(), 2);
+            assert_eq!(shown[0], "2026-09-02", "the oldest is the one let go");
+            assert_eq!(h.store.load_sessions().len(), 2);
+            assert!(
+                h.toast().is_some_and(|text| text.contains("newest 2")),
+                "{:?}",
+                h.toast()
+            );
+        });
+    }
+
+    /// A history the store could not read is not written over, and the user
+    /// is told the session was not kept.
+    #[test]
+    fn a_session_is_not_stored_over_a_history_that_could_not_be_read() {
+        run(|| async {
+            let mut h = Harness::new();
+            h.store.held.set(true);
+            h.start_training();
+            h.play_through(60_000).await;
+            assert_eq!(h.screen(), Screen::Results, "the results are still shown");
+            assert!(h.store.load_sessions().is_empty());
+            assert!(
+                h.toast()
+                    .is_some_and(|text| text.contains("could not be read")),
+                "{:?}",
+                h.toast()
+            );
         });
     }
 }

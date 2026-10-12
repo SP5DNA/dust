@@ -35,6 +35,34 @@ impl Transmission {
             others: Vec::new(),
         }
     }
+
+    /// `text` from `voice`, with whoever else the settings have calling
+    /// across it, each sending what `say` gives them. The callers are drawn
+    /// from `rng`, which `say` is handed as well, so one generator decides
+    /// the whole pile-up.
+    pub fn calling<R: Rng>(
+        settings: &TrainingSettings,
+        text: impl Into<String>,
+        voice: StationVoice,
+        rng: &mut R,
+        mut say: impl FnMut(&mut R) -> String,
+    ) -> Self {
+        let text = text.into();
+        let others = settings
+            .band
+            .stations_max
+            .clamp(crate::settings::STATIONS_MIN, crate::settings::STATIONS_MAX)
+            .saturating_sub(1) as usize;
+        if others == 0 {
+            return Self::alone(text, voice);
+        }
+        let texts: Vec<String> = (0..others).map(|_| say(rng)).collect();
+        Self {
+            others: resolve_pileup(settings, &voice, &text, &texts, rng),
+            text,
+            voice,
+        }
+    }
 }
 
 /// The closest another station may land to the one you want.
@@ -73,7 +101,7 @@ const PILEUP_MAX_DELAY_SEC: f64 = 0.6;
 /// Takes more texts than it may need and decides how many stations are calling
 /// this time, so the count varies from group to group like a real pile-up.
 /// Anything matching `wanted_text` is dropped: nobody else has your callsign.
-pub fn resolve_pileup(
+pub(crate) fn resolve_pileup(
     settings: &TrainingSettings,
     wanted: &StationVoice,
     wanted_text: &str,
@@ -270,6 +298,29 @@ mod tests {
         let wanted = resolve_station(&s, &mut rng);
         let others = resolve_pileup(&s, &wanted, "W1AW", &texts(max as usize), &mut rng);
         (wanted, others)
+    }
+
+    /// One station calling is sent alone; more bring a pile-up of their own
+    /// texts, every one of them drawn from the generator given.
+    #[test]
+    fn a_call_brings_the_pile_up_the_settings_ask_for() {
+        let mut rng = FastrandRng(11);
+        let voice = resolve_station(&settings(1), &mut rng);
+        let say = |_: &mut FastrandRng| "DL1ABC".to_string();
+        let alone = Transmission::calling(&settings(1), "CQ", voice, &mut rng, say);
+        assert_eq!(alone, Transmission::alone("CQ", voice));
+
+        let mut s = settings(4);
+        s.band.stations_min = 4;
+        s.band.filter_width_hz = crate::settings::FILTER_WIDTH_MAX;
+        let call = Transmission::calling(&s, "CQ", voice, &mut rng, say);
+        assert_eq!((call.text.as_str(), call.voice), ("CQ", voice));
+        assert!(
+            (1..=3).contains(&call.others.len()),
+            "{}",
+            call.others.len()
+        );
+        assert!(call.others.iter().all(|other| other.text == "DL1ABC"));
     }
 
     /// The default is one station, alone. A pile-up is something you ask for.

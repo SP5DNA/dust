@@ -137,7 +137,13 @@ which is what a portable install uses.
 Updating the app does not clear any of it. The storage keys (`dust_settings`,
 `dust_sessions`, `dust_auto_adjust_*`) and file names are not versioned, and
 settings files from older builds still load — new fields fall back to their
-defaults, and one unreadable field costs only that field.
+defaults, and one unreadable field costs only that field. A history that
+cannot be read at all is set aside beside the new one rather than written over,
+and if it cannot even be moved, nothing is saved over it.
+
+The history keeps your newest 500 sessions. A browser also gives each site only
+a few megabytes; should the history outgrow that — hundreds of sessions of
+hundreds of groups — the newest that fit are kept, and the app says so.
 
 Stats are computed across your whole history. Changing course — Koch to Mixed,
 a new sequence, a custom alphabet — does not hide what you already did:

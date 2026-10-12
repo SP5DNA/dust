@@ -1,12 +1,20 @@
+//! One component per screen, each reading the state it shows and nothing
+//! more. The shell above them redraws for its own state only, and a screen
+//! redraws for its own: a toast or a theme change does not rebuild the
+//! practice screen's history, and a key in a training answer does not
+//! rebuild the shell.
+
+use std::cell::RefCell;
 use std::rc::Rc;
 
-use cw_core::{Paddle, SessionEvent, compute_char_pool, dit_ms_for_wpm};
+use cw_core::{Paddle, SessionEvent, TrainingSettings, compute_char_pool, dit_ms_for_wpm};
 use dioxus::prelude::*;
 
-use crate::persist::current_auto_progress;
-use crate::session_runtime::send_command;
-use crate::state::{AppState, Screen, SessionSignals};
-use crate::time::local_date_string;
+use crate::persist::auto_progress;
+use crate::playback;
+use crate::session_runtime::{send_event, start_session};
+use crate::state::{AppCtx, Screen};
+use crate::time::{local_date_string, sleep_ms};
 use crate::ui::home::Home;
 use crate::ui::listen::ListenView;
 use crate::ui::results::ResultsView;
@@ -14,192 +22,204 @@ use crate::ui::settings::SettingsView;
 use crate::ui::stats::StatsView;
 use crate::ui::training::{TrainingScope, TrainingView};
 
-/// What the screens show beyond the session itself: whichever preview is
-/// running, and the sample chip that is lit.
-#[derive(Clone, PartialEq)]
-pub struct ViewState {
-    pub previewing: bool,
-    pub listen_playing: bool,
-    pub listen_streaming: bool,
-    pub stream_heard: Vec<String>,
-    pub sample_playing: Option<String>,
-    pub paddle_heard: String,
-}
+/// How often the band follows the settings while it is being previewed:
+/// often enough to sound live, seldom enough that a slider dragged across
+/// the noise does not rebuild the band, and measure its AGC, every frame.
+const BAND_FOLLOW_MS: u32 = 80;
 
-/// What a screen can ask the app to do for it.
+/// The paddle keyer the shell runs for every screen but training, as the
+/// screens that show it need it.
 #[derive(Clone, Copy)]
-pub struct AppCallbacks {
-    pub start_training: EventHandler<()>,
-    pub go_home: EventHandler<()>,
-    pub go_listen: EventHandler<()>,
-    pub start_band_preview: EventHandler<()>,
-    pub stop_preview: EventHandler<()>,
-    pub start_listen: EventHandler<String>,
-    pub start_stream: EventHandler<()>,
-    pub play_sample: EventHandler<String>,
-    pub on_paddle_down: EventHandler<Paddle>,
-    pub on_paddle_up: EventHandler<Paddle>,
+pub struct Paddles {
+    pub heard: Signal<String>,
+    pub down: EventHandler<Paddle>,
+    pub up: EventHandler<Paddle>,
 }
 
-pub fn app_routes(
-    signals: SessionSignals,
-    view: ViewState,
-    app: Rc<AppState>,
-    callbacks: AppCallbacks,
-) -> Element {
-    let SessionSignals {
-        screen,
-        runtime,
-        result,
-        auto_message,
-        sessions,
-        settings,
-        toast: _,
-    } = signals;
-    let ViewState {
-        previewing,
-        listen_playing,
-        listen_streaming,
-        stream_heard,
-        sample_playing,
-        paddle_heard,
-    } = view;
-    let AppCallbacks {
-        start_training,
-        go_home,
-        go_listen,
-        start_band_preview,
-        stop_preview,
-        start_listen,
-        start_stream,
-        play_sample,
-        on_paddle_down,
-        on_paddle_up,
-    } = callbacks;
-    match screen() {
-        Screen::Home => {
-            let pool: String = compute_char_pool(&settings()).into_iter().collect();
-            // Every session counts, whatever character set it was recorded with.
-            let history = sessions();
-            let last = history.last().map(|s| s.accuracy);
-            rsx! {
-                Home {
-                    settings: settings(),
-                    last_accuracy: last,
-                    session_count: history.len(),
-                    pool,
-                    sessions: sessions(),
-                    today: local_date_string(),
-                    auto_progress: current_auto_progress(&settings()),
-                    on_start: start_training,
-                    on_listen: move |_| go_listen.call(()),
-                }
+/// The screen `screen` names.
+#[component]
+pub fn Route(screen: Screen) -> Element {
+    match screen {
+        Screen::Home => rsx! { HomeRoute {} },
+        Screen::Settings => rsx! { SettingsRoute {} },
+        Screen::Stats => rsx! { StatsRoute {} },
+        Screen::Listen => rsx! { ListenRoute {} },
+        Screen::Training => rsx! { TrainingRoute {} },
+        Screen::Results => rsx! { ResultsRoute {} },
+    }
+}
+
+#[component]
+fn HomeRoute() -> Element {
+    let ctx = use_context::<AppCtx>();
+    let on_start = use_callback(move |()| start_session(ctx));
+    let on_listen = use_callback(move |()| ctx.go_to(Screen::Listen));
+    let settings = ctx.settings.read();
+    // Every session counts, whatever character set it was recorded with.
+    let sessions = ctx.sessions.read();
+    rsx! {
+        Home {
+            settings: settings.clone(),
+            last_accuracy: sessions.last().map(|s| s.accuracy),
+            session_count: sessions.len(),
+            pool: compute_char_pool(&settings).into_iter().collect::<String>(),
+            sessions: sessions.clone(),
+            today: local_date_string(),
+            auto_progress: auto_progress(&*ctx.app().store, &settings),
+            on_start,
+            on_listen,
+        }
+    }
+}
+
+#[component]
+fn SettingsRoute() -> Element {
+    let ctx = use_context::<AppCtx>();
+    let paddles = use_context::<Paddles>();
+    let on_preview_band = use_callback(move |()| playback::start_band_preview(ctx));
+    let on_stop_band = use_callback(move |()| ctx.stop_audio());
+    let on_play_sample = use_callback(move |text| playback::start_sample(ctx, text));
+    use_band_follow(ctx);
+    let preview = ctx.preview.read();
+    rsx! {
+        SettingsView {
+            settings: ctx.settings,
+            previewing: preview.is_band(),
+            sample_playing: preview.sample(),
+            on_preview_band,
+            on_stop_band,
+            on_play_sample,
+            paddle_heard: (paddles.heard)(),
+            on_paddle_down: paddles.down,
+            on_paddle_up: paddles.up,
+        }
+    }
+}
+
+/// While the band preview runs, the band follows the settings: the latest
+/// of them, at most every [`BAND_FOLLOW_MS`].
+fn use_band_follow(ctx: AppCtx) {
+    let latest = use_hook(|| Rc::new(RefCell::new(None::<TrainingSettings>)));
+    use_effect(move || {
+        if !ctx.preview.read().is_band() {
+            return;
+        }
+        let settings = ctx.settings.read().clone().clamp();
+        if latest.borrow_mut().replace(settings).is_some() {
+            // A follow is already on its way, and will take these.
+            return;
+        }
+        let latest = latest.clone();
+        spawn(async move {
+            sleep_ms(BAND_FOLLOW_MS).await;
+            let settings = latest.borrow_mut().take();
+            // A preview stopped meanwhile stays silent.
+            if let Some(settings) = settings
+                && ctx.preview.peek().is_band()
+            {
+                ctx.app().player.follow_band(&settings);
+            }
+        });
+    });
+}
+
+#[component]
+fn StatsRoute() -> Element {
+    let ctx = use_context::<AppCtx>();
+    rsx! {
+        StatsView { settings: ctx.settings.read().clone(), sessions: ctx.sessions.read().clone() }
+    }
+}
+
+#[component]
+fn ListenRoute() -> Element {
+    let ctx = use_context::<AppCtx>();
+    let on_play = use_callback(move |chars| playback::start_letters(ctx, chars));
+    let on_stream = use_callback(move |()| playback::start_stream(ctx));
+    let on_stop = use_callback(move |()| ctx.stop_audio());
+    let on_back = use_callback(move |()| ctx.go_to(Screen::Home));
+    let preview = ctx.preview.read();
+    rsx! {
+        ListenView {
+            settings: ctx.settings.read().clone(),
+            playing: preview.is_letters(),
+            streaming: preview.is_stream(),
+            heard: ctx.stream_heard.read().clone(),
+            on_play,
+            on_stream,
+            on_stop,
+            on_back,
+        }
+    }
+}
+
+#[component]
+fn TrainingRoute() -> Element {
+    let ctx = use_context::<AppCtx>();
+    let on_change = use_callback(move |(index, text): (usize, String)| {
+        send_event(ctx, SessionEvent::Input { index, text });
+    });
+    let on_confirm = use_callback(move |_: usize| send_event(ctx, SessionEvent::Confirm));
+    let on_submit = use_callback(move |()| send_event(ctx, SessionEvent::FinishNow));
+    let on_stop = use_callback(move |()| send_event(ctx, SessionEvent::Abort));
+    // The sidetone follows the settings the session was started with.
+    let on_tone = use_callback(move |on: bool| {
+        if let Some(session) = ctx.runtime.peek().as_ref() {
+            ctx.app().set_live_tone(on, session.settings());
+        }
+    });
+    let runtime = ctx.runtime.read();
+    let Some(session) = runtime.as_ref() else {
+        return rsx! { p { class: "muted", "Starting…" } };
+    };
+    let view = session.view();
+    let playback = &session.settings().playback;
+    rsx! {
+        div { class: "stack",
+            TrainingScope {
+                focused: view.focused,
+                total: view.sent.len(),
+                playing: view.playing,
+                repeat_total: view.repeat_total,
+                repeat_done: view.repeat_done,
+            }
+            TrainingView {
+                current: view.current,
+                groups: view.sent,
+                inputs: view.inputs,
+                confirmed: view.confirmed,
+                focused: view.focused,
+                playing: view.playing,
+                locked: view.locked,
+                repeat_total: view.repeat_total,
+                repeat_done: view.repeat_done,
+                paddle_swap: playback.paddle_swap,
+                keyer_mode: playback.keyer_mode,
+                dit_ms: dit_ms_for_wpm(playback.keyer_wpm),
+                on_tone,
+                on_change,
+                on_confirm,
+                on_submit,
+                on_stop,
             }
         }
-        Screen::Settings => rsx! {
-            SettingsView {
-                settings,
-                previewing,
-                sample_playing,
-                on_preview_band: start_band_preview,
-                on_stop_band: stop_preview,
-                on_play_sample: play_sample,
-                paddle_heard,
-                on_paddle_down,
-                on_paddle_up,
-            }
-        },
-        Screen::Stats => rsx! {
-            StatsView { settings: settings(), sessions: sessions() }
-        },
-        Screen::Listen => rsx! {
-            ListenView {
-                settings: settings(),
-                playing: listen_playing,
-                streaming: listen_streaming,
-                heard: stream_heard,
-                on_play: start_listen,
-                on_stream: start_stream,
-                on_stop: stop_preview,
-                on_back: move |_| go_home.call(()),
-            }
-        },
-        Screen::Training => {
-            let session = runtime();
-            if let Some(session) = session {
-                let view = session.view();
-                let playing = view.playing;
-                let app_change = app.clone();
-                let app_confirm = app.clone();
-                let app_focus = app.clone();
-                let app_submit = app.clone();
-                let app_stop = app.clone();
-                let app_tone = app;
-                let settings = session.settings();
-                let dit_ms = dit_ms_for_wpm(settings.playback.keyer_wpm);
-                let paddle_swap = settings.playback.paddle_swap;
-                let keyer_mode = settings.playback.keyer_mode;
-                let tone_settings = settings.clone();
-                rsx! {
-                    div { class: "stack",
-                        TrainingScope {
-                            focused: view.focused,
-                            total: view.sent.len(),
-                            playing,
-                            repeat_total: view.repeat_total,
-                            repeat_done: view.repeat_done,
-                        }
-                        TrainingView {
-                            current: view.current,
-                            groups: view.sent,
-                            inputs: view.inputs,
-                            confirmed: view.confirmed,
-                            focused: view.focused,
-                            playing,
-                            locked: view.locked,
-                            repeat_total: view.repeat_total,
-                            repeat_done: view.repeat_done,
-                            paddle_swap,
-                            keyer_mode,
-                            dit_ms,
-                            on_tone: move |on| {
-                                app_tone.set_live_tone(on, &tone_settings);
-                            },
-                            on_change: move |(idx, value): (usize, String)| {
-                                send_command((*app_change).clone(), signals, SessionEvent::Input { index: idx, text: value });
-                            },
-                            on_confirm: move |_idx| {
-                                send_command((*app_confirm).clone(), signals, SessionEvent::Confirm);
-                            },
-                            on_focus: move |idx| {
-                                send_command((*app_focus).clone(), signals, SessionEvent::Focus { index: idx });
-                            },
-                            on_submit: move |_| {
-                                send_command((*app_submit).clone(), signals, SessionEvent::FinishNow);
-                            },
-                            on_stop: move |_| {
-                                send_command((*app_stop).clone(), signals, SessionEvent::Abort);
-                            },
-                        }
-                    }
-                }
-            } else {
-                rsx! { p { class: "muted", "Starting…" } }
-            }
-        }
-        Screen::Results => {
-            if let Some(res) = result() {
-                rsx! {
-                    ResultsView {
-                        result: res,
-                        auto_message: auto_message(),
-                        on_again: start_training,
-                        on_home: go_home,
-                    }
-                }
-            } else {
-                rsx! { p { class: "muted", "No result." } }
-            }
+    }
+}
+
+#[component]
+fn ResultsRoute() -> Element {
+    let ctx = use_context::<AppCtx>();
+    let on_again = use_callback(move |()| start_session(ctx));
+    let on_home = use_callback(move |()| ctx.go_to(Screen::Home));
+    let Some(result) = ctx.result.read().clone() else {
+        return rsx! { p { class: "muted", "No result." } };
+    };
+    rsx! {
+        ResultsView {
+            result,
+            auto_message: ctx.auto_message.read().clone(),
+            on_again,
+            on_home,
         }
     }
 }
@@ -207,50 +227,20 @@ pub fn app_routes(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::AppState;
     use crate::testing::{Ui, run, test_settings};
 
-    /// The screens the router draws when the state behind them is not there
-    /// yet: the moment between starting a session and its first group, and a
-    /// results screen with nothing to show.
+    /// A screen with nothing behind it yet: the moment between starting a
+    /// session and its first group, or a results screen with nothing to show.
     #[component]
     fn EmptyRoute(screen: Screen) -> Element {
-        let signals = SessionSignals {
-            screen: use_signal(|| screen),
-            runtime: use_signal(|| None),
-            result: use_signal(|| None),
-            auto_message: use_signal(|| None),
-            sessions: use_signal(Vec::new),
-            settings: use_signal(test_settings),
-            toast: use_signal(|| None),
-        };
-        let app = use_hook(|| Rc::new(AppState::new()));
-        let noop = EventHandler::new(move |_| {});
-        let noop_text = EventHandler::new(move |_: String| {});
-        let noop_paddle = EventHandler::new(move |_: Paddle| {});
-        app_routes(
-            signals,
-            ViewState {
-                previewing: false,
-                listen_playing: false,
-                listen_streaming: false,
-                stream_heard: Vec::new(),
-                sample_playing: None,
-                paddle_heard: String::new(),
-            },
-            app,
-            AppCallbacks {
-                start_training: noop,
-                go_home: noop,
-                go_listen: noop,
-                start_band_preview: noop,
-                stop_preview: noop,
-                start_listen: noop_text,
-                start_stream: noop,
-                play_sample: noop_text,
-                on_paddle_down: noop_paddle,
-                on_paddle_up: noop_paddle,
-            },
-        )
+        use_context_provider(|| AppCtx::new(AppState::new(), test_settings(), Vec::new()));
+        use_context_provider(|| Paddles {
+            heard: Signal::new(String::new()),
+            down: EventHandler::default(),
+            up: EventHandler::default(),
+        });
+        rsx! { Route { screen } }
     }
 
     #[test]
@@ -269,16 +259,12 @@ mod tests {
     #[test]
     fn the_practice_screen_is_reachable_without_any_state() {
         run(|| async {
-            let mut ui = Ui::new(
+            let ui = Ui::new(
                 EmptyRoute,
                 EmptyRouteProps {
                     screen: Screen::Home,
                 },
             );
-            assert!(ui.has("Start training"));
-            // Both hero buttons report upwards without anything behind them.
-            ui.click("btn-start-training");
-            ui.click("btn-listen-to-letters");
             assert!(ui.has("Start training"));
         });
     }

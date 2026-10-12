@@ -48,9 +48,6 @@ pub enum SessionEvent {
     },
     FinishNow,
     Abort,
-    Focus {
-        index: usize,
-    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -182,10 +179,6 @@ impl<S: GroupSource> SessionMachine<S> {
             SessionEvent::Confirm => self.confirm_current(now),
             SessionEvent::TimerFired { id } => self.timer_fired(id, now),
             SessionEvent::FinishNow => self.finish_now(now),
-            SessionEvent::Focus { index } => {
-                self.session.set_focused_group(index);
-                Vec::new()
-            }
         }
     }
 
@@ -832,7 +825,6 @@ mod tests {
             SessionEvent::TimerFired { id: 1 },
             SessionEvent::FinishNow,
             SessionEvent::Abort,
-            SessionEvent::Focus { index: 0 },
             SessionEvent::PlaybackStopped { index: 0 },
             ended(0),
         ] {
@@ -853,18 +845,6 @@ mod tests {
             ]
         );
         assert_eq!(m.phase(), SessionPhase::Finished);
-    }
-
-    #[test]
-    fn the_focus_event_only_moves_onto_the_current_group() {
-        let mut m = machine();
-        assert!(
-            m.apply(SessionEvent::Focus { index: 1 }, MonoMs(10))
-                .is_empty()
-        );
-        assert_eq!(m.session().view().focused, 0);
-        let _ = m.apply(SessionEvent::Focus { index: 0 }, MonoMs(10));
-        assert_eq!(m.session().view().focused, 0);
     }
 
     #[test]

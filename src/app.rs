@@ -1,13 +1,15 @@
+//! The shell every screen sits in: the header, the navigation, the toasts,
+//! and the state they all share.
+
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use cw_core::{GroupSession, SessionEvent};
+use cw_core::SessionEvent;
 use dioxus::prelude::*;
 
-use crate::persist::{load_sessions, load_settings, load_theme, save_settings, save_theme};
-use crate::playback::{loop_preview_text, loop_stream_groups, play_chars, play_sample_text};
-use crate::routes::{AppCallbacks, ViewState, app_routes};
-use crate::session_runtime::{boot_machine_session, send_command, spawn_effects};
-use crate::state::{AppState, Screen, SessionSignals};
+use crate::routes::{Paddles, Route};
+use crate::session_runtime::send_event;
+use crate::state::{AppCtx, AppState, Screen, TOAST_MS};
 use crate::theme::Theme;
 use crate::time::sleep_ms;
 use crate::ui::paddle::use_paddle_keys;
@@ -19,55 +21,12 @@ use crate::ui::widgets::{Icon, control_id};
 #[cfg(not(feature = "web"))]
 pub(crate) const STYLESHEET: &str = include_str!("../assets/styles.css");
 
-/// What the app is playing when no session is running.
-///
-/// These are the four things that can be true of the audio outside training,
-/// and exactly one of them is: the band preview, the letter player and an
-/// envelope sample all want the same hardware, so a second one starting means
-/// the first has stopped.
-///
-/// They used to be three signals — a `bool`, a `bool` and an `Option<String>`
-/// — which said none of that. "Nothing is playing" was three writes in a row,
-/// spelled out eight times across the callbacks and already not spelled the
-/// same way twice; "two previews at once" was a state the types allowed and
-/// only care kept from happening. One value cannot be in two of these at once,
-/// so neither can the app.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub enum Preview {
-    /// Nothing is playing, or a session has the audio.
-    #[default]
-    Idle,
-    /// The band-conditions preview, looping until stopped.
-    Band,
-    /// The Listen screen playing a character or the whole pool.
-    Letters,
-    /// Groups looping with no answers and no score — copy while you do something else.
-    Stream,
-    /// One short envelope sample, named so the chip that sent it can show it.
-    Sample(String),
-}
+/// How long the settings have to sit still on their screen before they are
+/// stored: a slider being dragged changes them every frame.
+pub(crate) const SETTINGS_SAVE_DELAY_MS: u32 = 250;
 
-impl Preview {
-    pub fn is_band(&self) -> bool {
-        matches!(self, Self::Band)
-    }
-
-    pub fn is_letters(&self) -> bool {
-        matches!(self, Self::Letters)
-    }
-
-    pub fn is_stream(&self) -> bool {
-        matches!(self, Self::Stream)
-    }
-
-    /// The sample now sounding, for the chip that is waiting to light up.
-    pub fn sample(&self) -> Option<String> {
-        match self {
-            Self::Sample(text) => Some(text.clone()),
-            _ => None,
-        }
-    }
-}
+/// The type faces, from Google Fonts. Every build links the same sheet.
+pub(crate) const FONT_CSS_URL: &str = "https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;700&family=Figtree:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;700&display=optional";
 
 // The web stylesheet, written into the page's `<head>` by `dx bundle`.
 //
@@ -108,10 +67,7 @@ fn font_link() -> Element {
     #[cfg(not(feature = "desktop"))]
     {
         rsx! {
-            document::Link {
-                rel: "stylesheet",
-                href: "https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;700&family=Figtree:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;700&display=optional",
-            }
+            document::Link { rel: "stylesheet", href: FONT_CSS_URL }
         }
     }
 }
@@ -139,268 +95,41 @@ fn AppHead() -> Element {
 
 #[component]
 pub fn App() -> Element {
-    let mut settings = use_signal(load_settings);
-    let sessions = use_signal(load_sessions);
-    let mut screen = use_signal(|| Screen::Home);
-    let mut runtime = use_signal(|| None::<GroupSession>);
-    let result = use_signal(|| None::<cw_core::SessionResult>);
-    let auto_message = use_signal(|| None::<String>);
-    let mut toast = use_signal(|| None::<String>);
-    let mut preview = use_signal(Preview::default);
-    let mut stream_heard = use_signal(Vec::<String>::new);
-    let mut theme = use_signal(|| Theme::from_key(&load_theme()));
     // The audio backend is injectable through context so a test can drive the
     // whole app with a player that records instead of one that needs a device.
-    let app = use_hook(|| try_consume_context::<AppState>().unwrap_or_else(AppState::new));
-    let app = Rc::new(app);
-    let paddle = use_paddle_keys(settings, screen, app.clone());
-    let signals = SessionSignals {
+    let ctx = use_context_provider(|| {
+        let app = try_consume_context::<AppState>().unwrap_or_else(AppState::new);
+        let (settings, sessions) = (app.store.load_settings(), app.store.load_sessions());
+        AppCtx::new(app, settings, sessions)
+    });
+    let AppCtx {
         screen,
-        runtime,
-        result,
-        auto_message,
-        sessions,
         settings,
-        toast,
-    };
+        toasts,
+        ..
+    } = ctx;
+    let mut theme = use_signal(|| Theme::from_key(&ctx.app().store.load_theme()));
+    let paddle = use_paddle_keys(settings, screen, Rc::new(ctx.app()));
+    use_context_provider(|| Paddles {
+        heard: paddle.heard,
+        down: paddle.down,
+        up: paddle.up,
+    });
+    use_stored_settings(ctx);
 
     use_effect(move || {
-        let key = theme().key();
-        save_theme(key);
-        // Theme is a data-theme attribute on the app root, not a JS write to
-        // <html>. Both the desktop webview and the web build key CSS off that.
-    });
-
-    use_effect(move || {
-        if matches!(screen(), Screen::Training) {
-            return;
-        }
-        // On the settings screen the live values are left as typed, so a
-        // field part-way through a number is not snapped under the cursor;
-        // what is stored is always clamped.
-        let persist = settings().clamp();
-        if !matches!(screen(), Screen::Settings) && persist != settings() {
-            settings.set(persist.clone());
-        }
-        save_settings(&persist);
-    });
-
-    use_effect(move || {
-        if let Some(message) = toast() {
-            let mut toast = toast;
+        if let Some(shown) = toasts.current() {
             spawn(async move {
-                sleep_ms(4000).await;
-                if toast.peek().as_deref() == Some(message.as_str()) {
-                    toast.set(None);
-                }
+                sleep_ms(TOAST_MS).await;
+                toasts.dismiss(&shown);
             });
         }
     });
 
-    let go_home = use_callback({
-        let app = app.clone();
-        move |(): ()| {
-            app.bump_session();
-            app.silence_audio();
-            preview.set(Preview::Idle);
-            stream_heard.set(Vec::new());
-            runtime.set(None);
-            screen.set(Screen::Home);
-        }
-    });
-
-    // Claiming the audio is the same move for everything that is not a
-    // session: hold if one is running, settle the settings, take the device
-    // over. It hands back the generation the caller has to stamp its work
-    // with, so a send that outlives its epoch can tell and stand down.
-    // Spelling it out at each call site was three chances to drop the guard,
-    // the clamp or the toast.
-    let claim_audio = use_callback({
-        let app = app.clone();
-        move |(): ()| -> Option<(u64, cw_core::TrainingSettings)> {
-            if session_running(screen, runtime) {
-                return None;
-            }
-            let settings_now = settings().clamp();
-            match app.takeover_audio(&settings_now) {
-                Ok(generation) => Some((generation, settings_now)),
-                Err(err) => {
-                    toast.set(Some(err));
-                    None
-                }
-            }
-        }
-    });
-
-    let start_training = use_callback({
-        let app = app.clone();
-        move |(): ()| {
-            // Held before anything is written, not just before the audio is
-            // taken: a session already running must leave the stored settings
-            // exactly as they are.
-            if session_running(screen, runtime) {
-                return;
-            }
-            // Starting a session first settles the alphabet, and stores the
-            // result, so the session and the screen agree on what is being
-            // practised before anything sounds.
-            let fitted = settings().clamp();
-            if settings.peek().clone() != fitted {
-                settings.set(fitted);
-            }
-            preview.set(Preview::Idle);
-            let Some((generation, settings_now)) = claim_audio.call(()) else {
-                return;
-            };
-            let history = sessions();
-            let Some(effects) =
-                boot_machine_session(settings_now.clone(), &history, &app, generation, signals)
-            else {
-                return;
-            };
-            spawn_effects(effects, settings_now, (*app).clone(), generation, signals);
-        }
-    });
-
-    let start_listen = use_callback({
-        let app = app.clone();
-        move |chars: String| {
-            let Some((generation, settings_now)) = claim_audio.call(()) else {
-                return;
-            };
-            preview.set(Preview::Letters);
-            let app_loop = (*app).clone();
-            spawn(async move {
-                play_chars(
-                    app_loop.clone(),
-                    generation,
-                    settings_now,
-                    chars,
-                    420,
-                    toast,
-                )
-                .await;
-                if app_loop.session_gen.get() == generation {
-                    preview.set(Preview::Idle);
-                    app_loop.silence_audio();
-                }
-            });
-        }
-    });
-
-    let start_stream = use_callback({
-        let app = app.clone();
-        move |(): ()| {
-            let Some((generation, _settings_now)) = claim_audio.call(()) else {
-                return;
-            };
-            stream_heard.set(Vec::new());
-            preview.set(Preview::Stream);
-            let app_loop = (*app).clone();
-            spawn(async move {
-                loop_stream_groups(app_loop.clone(), generation, settings, stream_heard, toast)
-                    .await;
-                if app_loop.session_gen.get() == generation {
-                    preview.set(Preview::Idle);
-                    app_loop.silence_audio();
-                }
-            });
-        }
-    });
-
-    // Envelope test chips: send one short sample with the current keying settings.
-    let play_sample = use_callback({
-        let app = app.clone();
-        move |text: String| {
-            let Some((generation, settings_now)) = claim_audio.call(()) else {
-                return;
-            };
-            preview.set(Preview::Sample(text.clone()));
-            let app_loop = (*app).clone();
-            spawn(async move {
-                play_sample_text(app_loop.clone(), generation, settings_now, text, toast).await;
-                if app_loop.session_gen.get() == generation {
-                    preview.set(Preview::Idle);
-                    app_loop.silence_audio();
-                }
-            });
-        }
-    });
-
-    let start_band_preview = use_callback({
-        let app = app.clone();
-        move |(): ()| {
-            let Some((generation, _settings_now)) = claim_audio.call(()) else {
-                return;
-            };
-            preview.set(Preview::Band);
-            let app_loop = (*app).clone();
-            spawn(async move {
-                loop_preview_text(app_loop.clone(), generation, settings, "CQ", 280, toast).await;
-                if app_loop.session_gen.get() == generation {
-                    preview.set(Preview::Idle);
-                }
-            });
-        }
-    });
-
-    let stop_preview = use_callback({
-        let app = app.clone();
-        move |(): ()| {
-            if session_running(screen, runtime) {
-                return;
-            }
-            app.bump_session();
-            app.silence_audio();
-            preview.set(Preview::Idle);
-        }
-    });
-
-    use_effect({
-        let app = (*app).clone();
-        move || {
-            if !preview().is_band() {
-                return;
-            }
-            let settings_now = settings().clamp();
-            app.apply_band_live(&settings_now);
-        }
-    });
-
-    // Leaving for another screen is the same move wherever you are going:
-    // a session in progress holds you, and otherwise whatever was sounding
-    // stops before the screen changes. Three copies of it was three chances
-    // to forget a line.
-    let go_to = use_callback({
-        let app = app.clone();
-        move |to: Screen| {
-            if session_running(screen, runtime) {
-                return;
-            }
-            app.bump_session();
-            app.silence_audio();
-            preview.set(Preview::Idle);
-            stream_heard.set(Vec::new());
-            screen.set(to);
-        }
-    });
-    let exit_training = use_callback({
-        let app = app.clone();
-        move |(): ()| {
-            let event = match runtime.peek().as_ref() {
-                Some(session) if session.any_confirmed() => SessionEvent::FinishNow,
-                Some(_) => SessionEvent::Abort,
-                None => {
-                    go_home.call(());
-                    return;
-                }
-            };
-            send_command((*app).clone(), signals, event);
-        }
-    });
-    let show_nav = !matches!(screen(), Screen::Training);
+    let screen_now = screen();
+    let show_nav = screen_now != Screen::Training;
     let shell_class = if show_nav { "shell has-nav" } else { "shell" };
-    let screen_key = screen_key(screen());
+    let screen_key = screen_now.key();
     let theme_attr = theme().key();
 
     rsx! {
@@ -432,47 +161,31 @@ pub fn App() -> Element {
                             class: "icon-btn",
                             title: "{theme().label()}",
                             aria_label: "{theme().label()}",
+                            // Theme is a data-theme attribute on the app root,
+                            // not a JS write to <html>. Both the desktop
+                            // webview and the web build key CSS off that.
                             onclick: move |_| {
                                 let next = theme().next();
                                 theme.set(next);
+                                ctx.app().store.save_theme(next.key());
                             },
                             Icon { name: theme().icon() }
                         }
-                        if screen() == Screen::Training {
+                        if screen_now == Screen::Training {
                             button {
                                 id: control_id("btn", "exit"),
                                 class: "btn btn-secondary btn-sm",
-                                onclick: move |_| exit_training.call(()),
+                                // End session, from the header: the session
+                                // decides what is worth keeping, the same way
+                                // whichever button asked.
+                                onclick: move |_| send_event(ctx, SessionEvent::FinishNow),
                                 "Exit"
                             }
                         }
                     }
                 }
                 div { class: "screen", id: "screen-{screen_key}", key: "{screen_key}",
-                    { app_routes(
-                        signals,
-                        ViewState {
-                            previewing: preview().is_band(),
-                            listen_playing: preview().is_letters(),
-                            listen_streaming: preview().is_stream(),
-                            stream_heard: stream_heard(),
-                            sample_playing: preview().sample(),
-                            paddle_heard: (paddle.heard)(),
-                        },
-                        app,
-                        AppCallbacks {
-                            start_training,
-                            go_home,
-                            go_listen: EventHandler::new(move |()| go_to.call(Screen::Listen)),
-                            start_band_preview,
-                            stop_preview,
-                            start_listen,
-                            start_stream,
-                            play_sample,
-                            on_paddle_down: paddle.down,
-                            on_paddle_up: paddle.up,
-                        },
-                    ) }
+                    Route { screen: screen_now }
                 }
             }
             if show_nav {
@@ -480,50 +193,87 @@ pub fn App() -> Element {
                     nav { class: "bottom-nav",
                         button {
                             id: control_id("nav", "practice"),
-                            class: if matches!(screen(), Screen::Home | Screen::Listen | Screen::Results) { "nav-item active" } else { "nav-item" },
-                            onclick: move |_| go_home.call(()),
+                            class: if matches!(screen_now, Screen::Home | Screen::Listen | Screen::Results) { "nav-item active" } else { "nav-item" },
+                            onclick: move |_| ctx.go_to(Screen::Home),
                             Icon { name: "signal" }
                             span { "Practice" }
                         }
                         button {
                             id: control_id("nav", "stats"),
-                            class: if screen() == Screen::Stats { "nav-item active" } else { "nav-item" },
-                            onclick: move |_| go_to.call(Screen::Stats),
+                            class: if screen_now == Screen::Stats { "nav-item active" } else { "nav-item" },
+                            onclick: move |_| ctx.go_to(Screen::Stats),
                             Icon { name: "chart" }
                             span { "Stats" }
                         }
                         button {
                             id: control_id("nav", "settings"),
-                            class: if screen() == Screen::Settings { "nav-item active" } else { "nav-item" },
-                            onclick: move |_| go_to.call(Screen::Settings),
+                            class: if screen_now == Screen::Settings { "nav-item active" } else { "nav-item" },
+                            onclick: move |_| ctx.go_to(Screen::Settings),
                             Icon { name: "sliders" }
                             span { "Settings" }
                         }
                     }
                 }
             }
-            if let Some(message) = toast() {
+            if let Some(toast) = toasts.current() {
                 div { class: if show_nav { "toast-dock has-nav" } else { "toast-dock" },
-                    div { class: "toast", "{message}" }
+                    div { class: "toast", "{toast.text}" }
                 }
             }
         }
     }
 }
 
-fn screen_key(screen: Screen) -> &'static str {
-    match screen {
-        Screen::Home => "home",
-        Screen::Settings => "settings",
-        Screen::Training => "training",
-        Screen::Results => "results",
-        Screen::Stats => "stats",
-        Screen::Listen => "listen",
-    }
-}
-
-fn session_running(screen: Signal<Screen>, runtime: Signal<Option<GroupSession>>) -> bool {
-    matches!(screen(), Screen::Training) || runtime.peek().is_some()
+/// Keep the stored settings in step with the live ones.
+///
+/// What is stored is always clamped. On the settings screen the live values
+/// are left as typed, so a field part-way through a number is not snapped
+/// under the cursor, and they are stored once they have been still for a
+/// moment. Anywhere else they are clamped in place and stored at once, which
+/// is also what stores an edit the moment its screen is left. Settings that
+/// are stored already are not stored again: moving between screens writes
+/// nothing.
+fn use_stored_settings(ctx: AppCtx) {
+    let stored = use_hook(|| Rc::new(RefCell::new(ctx.settings.peek().clone().clamp())));
+    let edits = use_hook(|| Rc::new(Cell::new(0u64)));
+    use_effect(move || {
+        let AppCtx {
+            screen,
+            mut settings,
+            ..
+        } = ctx;
+        let screen = screen();
+        if screen == Screen::Training {
+            return;
+        }
+        let persist = settings.read().clone().clamp();
+        if screen != Screen::Settings && persist != *settings.peek() {
+            settings.set(persist.clone());
+        }
+        // Whatever edit was still waiting, this one replaces it.
+        let edit = edits.get() + 1;
+        edits.set(edit);
+        let store = {
+            let stored = stored.clone();
+            move || {
+                if *stored.borrow() != persist {
+                    ctx.app().store.save_settings(&persist);
+                    *stored.borrow_mut() = persist;
+                }
+            }
+        };
+        if screen == Screen::Settings {
+            let edits = edits.clone();
+            spawn(async move {
+                sleep_ms(SETTINGS_SAVE_DELAY_MS).await;
+                if edits.get() == edit {
+                    store();
+                }
+            });
+        } else {
+            store();
+        }
+    });
 }
 
 fn toggle_fullscreen() {
@@ -552,33 +302,8 @@ fn toggle_fullscreen() {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::screen_key;
-    use crate::state::Screen;
-
-    #[test]
-    fn every_screen_has_its_own_key() {
-        let keys: Vec<&str> = [
-            Screen::Home,
-            Screen::Settings,
-            Screen::Training,
-            Screen::Results,
-            Screen::Stats,
-            Screen::Listen,
-        ]
-        .into_iter()
-        .map(screen_key)
-        .collect();
-        // The key remounts the screen wrapper, so it has to differ per screen.
-        let mut unique = keys.clone();
-        unique.sort_unstable();
-        unique.dedup();
-        assert_eq!(unique.len(), keys.len());
-    }
-}
-
-#[cfg(test)]
 mod ui_tests {
+    use crate::persist::Store;
     use crate::testing::{Ui, run, stored_session, test_settings};
     use cw_core::{CharSetMode, PracticeWindow, TrainingSettings};
 
@@ -636,8 +361,42 @@ mod ui_tests {
             ] {
                 ui.click("btn-theme");
                 assert!(ui.has(shown));
-                assert_eq!(crate::persist::load_theme(), key);
+                assert_eq!(ui.store.load_theme(), key);
             }
+        });
+    }
+
+    /// Settings are written when they change, and no more often than that:
+    /// they used to be rewritten on every move between screens, and on
+    /// every frame of a slider being dragged.
+    #[test]
+    fn settings_are_stored_once_per_change() {
+        run(|| async {
+            let (mut ui, _recorder) = Ui::app_with_settings(test_settings());
+            let saves = |ui: &Ui| ui.store.settings_saves.get();
+            for nav in ["nav-stats", "nav-settings", "nav-practice", "nav-settings"] {
+                ui.click(nav);
+            }
+            ui.open_disclosures();
+            ui.advance(1_000).await;
+            assert_eq!(saves(&ui), 0, "nothing changed, and something was written");
+
+            // A drag across a slider is one change, stored once it stops.
+            for step in 1..=20 {
+                ui.type_into("slider-rise-time", &format!("{}", 10 + step));
+                ui.advance(16).await;
+            }
+            assert_eq!(saves(&ui), 0, "stored while still moving");
+            assert_eq!(ui.stored_settings().await.band.steepness, 30.0);
+            assert_eq!(saves(&ui), 1);
+
+            // Leaving the screen stores an edit at once.
+            ui.type_into("slider-rise-time", "12");
+            ui.click("nav-practice");
+            assert_eq!(saves(&ui), 2);
+            assert_eq!(ui.store.load_settings().band.steepness, 12.0);
+            ui.advance(1_000).await;
+            assert_eq!(saves(&ui), 2, "the waiting edit was stored twice");
         });
     }
 
@@ -657,7 +416,7 @@ mod ui_tests {
             assert!(ui.run_until(5_000, |ui| ui.screen() == "results").await);
             assert!(ui.has("Session complete"));
             assert!(ui.has("Clean copy"));
-            assert_eq!(crate::persist::load_sessions().len(), 1);
+            assert_eq!(ui.store.load_sessions().len(), 1);
         });
     }
 
@@ -753,7 +512,7 @@ mod ui_tests {
                     ui.run_until(2_000, |ui| ui.screen() == "home").await,
                     "{button} should have left the session"
                 );
-                assert!(crate::persist::load_sessions().is_empty());
+                assert!(ui.store.load_sessions().is_empty());
             }
         });
     }
@@ -769,8 +528,31 @@ mod ui_tests {
             assert!(ui.run_until(5_000, |ui| ui.has("group done")).await);
             ui.click("btn-end-session");
             assert!(ui.run_until(2_000, |ui| ui.screen() == "results").await);
-            assert_eq!(crate::persist::load_sessions().len(), 1);
+            assert_eq!(ui.store.load_sessions().len(), 1);
             assert!(ui.has("Group by group"));
+        });
+    }
+
+    /// Exit and End session leave a session the same way. Exit used to
+    /// decide for itself, from whether anything was confirmed yet, and threw
+    /// away an answer End session would have kept.
+    #[test]
+    fn exit_keeps_a_typed_answer_just_as_end_session_does() {
+        run(|| async {
+            for button in ["btn-exit", "btn-end-session"] {
+                let mut settings = test_settings();
+                settings.curriculum.num_groups = 3;
+                let (mut ui, recorder) = awaiting_answer(settings).await;
+                let sent = recorder.texts().first().cloned().expect("a group was sent");
+                ui.type_into("group-input-0", &sent[..1]);
+                ui.advance(200).await;
+                ui.click(button);
+                assert!(
+                    ui.run_until(2_000, |ui| ui.screen() == "results").await,
+                    "{button} threw the answer away"
+                );
+                assert_eq!(ui.store.load_sessions().len(), 1, "{button}");
+            }
         });
     }
 
@@ -788,18 +570,6 @@ mod ui_tests {
                     "{button} should have reached {expected}"
                 );
             }
-        });
-    }
-
-    #[test]
-    fn focusing_a_group_is_reported_to_the_session() {
-        run(|| async {
-            let mut settings = test_settings();
-            settings.curriculum.num_groups = 2;
-            let (mut ui, _recorder) = awaiting_answer(settings).await;
-            ui.focus("group-input-0");
-            assert!(ui.has("group focused"));
-            assert_eq!(ui.screen(), "training");
         });
     }
 
@@ -871,7 +641,7 @@ mod ui_tests {
             assert!(ui.has("Play all"));
             assert!(ui.has("Stream groups"));
             assert_eq!(ui.screen(), "listen");
-            assert!(crate::persist::load_sessions().is_empty());
+            assert!(ui.store.load_sessions().is_empty());
         });
     }
 
@@ -909,10 +679,7 @@ mod ui_tests {
             ] {
                 ui.click(button);
                 assert!(ui.has(note), "{button} should say {note}");
-                assert_eq!(
-                    crate::persist::load_settings().curriculum.char_set_mode,
-                    mode
-                );
+                assert_eq!(ui.stored_settings().await.curriculum.char_set_mode, mode);
             }
             assert!(ui.has("Share of letters"));
         });
@@ -924,7 +691,7 @@ mod ui_tests {
             let (mut ui, _recorder) = Ui::app();
             ui.click("nav-settings");
             ui.click("pill-cw-academy");
-            let stored = crate::persist::load_settings();
+            let stored = ui.stored_settings().await;
             assert_eq!(
                 stored.sequence_choice(),
                 cw_core::SequenceChoice::Preset(cw_core::PresetId::CwAcademy)
@@ -933,7 +700,8 @@ mod ui_tests {
             assert!(stored.progress_alphabet().starts_with(&['E', 'T', 'A']));
             ui.click("pill-lcwo");
             assert!(
-                crate::persist::load_settings()
+                ui.stored_settings()
+                    .await
                     .curriculum
                     .custom_sequence
                     .is_empty()
@@ -954,7 +722,7 @@ mod ui_tests {
                 ("pill-everything", PracticeWindow::All, 10),
             ] {
                 ui.click(button);
-                let stored = crate::persist::load_settings();
+                let stored = ui.stored_settings().await;
                 assert_eq!(stored.curriculum.practice_window, window);
                 assert_eq!(cw_core::compute_char_pool(&stored).len(), pool);
             }
@@ -973,7 +741,7 @@ mod ui_tests {
             ui.click("nav-settings");
             ui.type_into("field-sequence-order", "KM");
             ui.advance(50).await;
-            let stored = crate::persist::load_settings();
+            let stored = ui.stored_settings().await;
             assert_eq!(stored.curriculum.custom_sequence, vec!['K', 'M']);
             // Two characters can only carry level 1.
             assert_eq!(stored.active_level(), 1);
@@ -981,7 +749,7 @@ mod ui_tests {
 
             ui.type_into("field-sequence-order", "KMURESNAPTL");
             ui.advance(50).await;
-            assert_eq!(crate::persist::load_settings().active_level(), 9);
+            assert_eq!(ui.stored_settings().await.active_level(), 9);
         });
     }
 
@@ -1064,6 +832,52 @@ mod ui_tests {
         });
     }
 
+    /// Dragging a band slider during the preview moves the band a few times
+    /// a second, not on every frame: each move rebuilds the band and
+    /// measures its AGC, on the thread the slider is drawn on.
+    #[test]
+    fn the_band_follows_a_dragged_slider_without_rebuilding_every_frame() {
+        run(|| async {
+            let (mut ui, recorder) = Ui::app_with_settings(with_receiver());
+            ui.click("nav-settings");
+            ui.click("btn-band-preview");
+            assert!(ui.run_until(20_000, |_| !recorder.texts().is_empty()).await);
+            let rebuilds = || {
+                recorder
+                    .calls()
+                    .iter()
+                    .filter(|call| matches!(call, crate::audio::fake::Call::Band(_)))
+                    .count()
+            };
+            let before = rebuilds();
+            for step in 0..20 {
+                ui.type_into("slider-filter-width", &format!("{}", 300 + 10 * step));
+                ui.advance(16).await;
+            }
+            ui.advance(200).await;
+            let followed = rebuilds() - before;
+            assert!(
+                (1..=6).contains(&followed),
+                "{followed} rebuilds for one drag"
+            );
+            // And it ends on where the slider was left.
+            let last = recorder
+                .calls()
+                .into_iter()
+                .rev()
+                .find_map(|call| match call {
+                    crate::audio::fake::Call::Band(key) => Some(key),
+                    _ => None,
+                });
+            let mut expected = with_receiver();
+            expected.band.filter_width_hz = 490.0;
+            assert_eq!(
+                last,
+                Some(cw_core::band::BandKey::of(&expected.clamp().band))
+            );
+        });
+    }
+
     #[test]
     fn the_band_preview_can_be_stopped_where_it_was_started() {
         run(|| async {
@@ -1101,7 +915,7 @@ mod ui_tests {
             ui.type_into("slider-rise-time", "23");
             ui.advance(50).await;
 
-            let changed = crate::persist::load_settings();
+            let changed = ui.stored_settings().await;
             assert_eq!(changed.band.stations_max, 4);
             assert_eq!(changed.band.filter_shape, cw_core::FilterShape::Soft);
             assert!((changed.band.steepness - 23.0).abs() < 0.5);
@@ -1109,7 +923,7 @@ mod ui_tests {
             // Reset the keying envelope only.
             ui.click("reset-keying-envelope");
             ui.advance(50).await;
-            let after = crate::persist::load_settings();
+            let after = ui.stored_settings().await;
             let fresh = cw_core::TrainingSettings::default();
             assert!(
                 (after.band.steepness - fresh.band.steepness).abs() < 0.001,
@@ -1124,7 +938,7 @@ mod ui_tests {
             // And now the band conditions, which owns the stations.
             ui.click("reset-band-conditions");
             ui.advance(50).await;
-            let after = crate::persist::load_settings();
+            let after = ui.stored_settings().await;
             assert_eq!(after.band.stations_max, fresh.band.stations_max);
             assert!((after.band.qrn_level - fresh.band.qrn_level).abs() < 0.001);
         });
@@ -1141,7 +955,7 @@ mod ui_tests {
             assert!(ui.has("Fixed"));
             ui.commit("fixed-stations-calling", "4");
             ui.advance(50).await;
-            let stored = crate::persist::load_settings();
+            let stored = ui.stored_settings().await;
             assert_eq!((stored.band.stations_min, stored.band.stations_max), (4, 4));
             assert!(
                 ui.has("Pile-up spread"),
@@ -1155,7 +969,7 @@ mod ui_tests {
             ui.advance(50).await;
             ui.commit("to-stations-calling", "5");
             ui.advance(50).await;
-            let stored = crate::persist::load_settings();
+            let stored = ui.stored_settings().await;
             assert_eq!((stored.band.stations_min, stored.band.stations_max), (2, 5));
             assert!(ui.has("2–5 at once"), "the range should read back");
 
@@ -1170,7 +984,7 @@ mod ui_tests {
                     "{slider} should read {reads}"
                 );
             }
-            let stored = crate::persist::load_settings();
+            let stored = ui.stored_settings().await;
             assert_eq!(stored.band.pileup_spread_hz, 260.0);
             assert_eq!(stored.band.pileup_level_db, 20.0);
             assert_eq!(stored.clone().clamp(), stored);
@@ -1180,7 +994,7 @@ mod ui_tests {
             ui.advance(50).await;
             ui.commit("fixed-stations-calling", "1");
             ui.advance(50).await;
-            let stored = crate::persist::load_settings();
+            let stored = ui.stored_settings().await;
             assert_eq!((stored.band.stations_min, stored.band.stations_max), (1, 1));
             assert_eq!(stored.band.filter_shape, test_settings().band.filter_shape);
             assert!(!ui.has("Pile-up spread"));
@@ -1251,6 +1065,85 @@ mod ui_tests {
             recorder.set(crate::audio::fake::Behaviour::RefuseToStart);
             assert!(ui.run_until(30_000, |ui| ui.has("class=\"toast\"")).await);
             assert!(ui.run_until(5_000, |ui| ui.has("Live preview")).await);
+        });
+    }
+
+    /// A band preview that gives up on a failing device has to take the
+    /// receiver down with it. Its retries rebuild the player, which brings
+    /// the band back up on the new one; stopping only the loop left that
+    /// hissing with the Stop button already gone.
+    #[test]
+    fn a_preview_that_gives_up_silences_the_receiver() {
+        run(|| async {
+            let (mut ui, recorder) = Ui::app_with_settings(with_receiver());
+            ui.click("nav-settings");
+            ui.click("btn-band-preview");
+            assert!(ui.run_until(20_000, |_| !recorder.texts().is_empty()).await);
+            recorder.set(crate::audio::fake::Behaviour::RefuseToStart);
+            assert!(ui.run_until(30_000, |ui| ui.has("class=\"toast\"")).await);
+            assert!(ui.run_until(5_000, |ui| ui.has("Live preview")).await);
+            assert!(
+                !recorder.band_running.get(),
+                "the receiver was left running with nothing to stop it"
+            );
+        });
+    }
+
+    /// Taking the audio stops whatever had it, whether or not the new owner
+    /// then gets a player. A claim that failed used to leave the screen
+    /// showing a band preview whose loop it had already stopped.
+    #[test]
+    fn a_claim_that_fails_leaves_no_preview_showing() {
+        run(|| async {
+            let (mut ui, recorder) = Ui::app_with_settings(test_settings());
+            ui.click("nav-settings");
+            ui.click("btn-band-preview");
+            assert!(ui.run_until(20_000, |_| !recorder.texts().is_empty()).await);
+
+            // The device goes away mid-send, and with it any new player.
+            recorder.build_error.set(true);
+            recorder.fail_next(1);
+            let mut waited = 0;
+            while !recorder
+                .calls()
+                .contains(&crate::audio::fake::Call::Shutdown)
+            {
+                assert!(waited < 5_000, "the send was never retried");
+                ui.advance(4).await;
+                waited += 4;
+            }
+            // The retry has no player left; a sample asks for the audio now.
+            ui.click("chip-dit");
+            ui.advance(50).await;
+            assert!(ui.has("No audio output device found"));
+            assert!(
+                ui.has("Live preview"),
+                "the band preview still shows as running: {}",
+                ui.html()
+            );
+        });
+    }
+
+    /// The same message twice is shown for its full time the second time
+    /// too. The first one's timer used to clear the second a second in.
+    #[test]
+    fn a_toast_raised_again_stays_for_its_full_time() {
+        run(|| async {
+            let (mut ui, recorder) = Ui::app_with_settings(test_settings());
+            recorder.set(crate::audio::fake::Behaviour::RefuseToStart);
+            ui.click("nav-settings");
+            ui.click("chip-dit");
+            assert!(ui.run_until(5_000, |ui| ui.has("class=\"toast\"")).await);
+            ui.advance(3_000).await;
+            ui.click("chip-dit");
+            assert!(ui.run_until(5_000, |ui| !ui.has("test-chip playing")).await);
+            assert!(ui.has("class=\"toast\""));
+            ui.advance(1_500).await;
+            assert!(
+                ui.has("class=\"toast\""),
+                "the second toast was cleared by the first one's timer"
+            );
+            assert!(ui.run_until(4_000, |ui| !ui.has("class=\"toast\"")).await);
         });
     }
 
@@ -1339,7 +1232,7 @@ mod ui_tests {
                     ui.commit(&control, value);
                 }
                 ui.advance(50).await;
-                let stored = crate::persist::load_settings();
+                let stored = ui.stored_settings().await;
                 assert_eq!(stored.clone().clamp(), stored, "{value:?} into {control}");
                 assert!(!ui.html().is_empty());
                 ui.character_boxes_hold_single_characters();
@@ -1402,7 +1295,7 @@ mod ui_tests {
             ui.commit("field-level", "6");
             ui.advance(50).await;
             assert_ne!(before, ui.html(), "the preview should follow the tier");
-            assert_eq!(crate::persist::load_settings().curriculum.callsign_level, 6);
+            assert_eq!(ui.stored_settings().await.curriculum.callsign_level, 6);
         });
     }
 
@@ -1418,13 +1311,13 @@ mod ui_tests {
             ui.click("seg-callsigns");
             ui.commit("field-level", "5");
             ui.advance(50).await;
-            let stored = crate::persist::load_settings();
+            let stored = ui.stored_settings().await;
             assert_eq!(stored.curriculum.callsign_level, 5);
             assert_eq!(stored.curriculum.level, 9, "the Koch level is untouched");
 
             ui.click("seg-koch");
             ui.advance(50).await;
-            let stored = crate::persist::load_settings();
+            let stored = ui.stored_settings().await;
             assert_eq!(stored.curriculum.level, 9);
             assert_eq!(stored.curriculum.callsign_level, 5);
         });

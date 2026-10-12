@@ -11,15 +11,19 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use cw_core::{
-    GroupSession, GroupSource, MonoMs, SessionEffect, SessionEvent, SessionId, SessionMachine,
-    SessionResult, TrainingSettings,
+    GroupSource, MonoMs, SessionEffect, SessionEvent, SessionId, SessionMachine, SessionResult,
+    TrainingSettings,
 };
 use dioxus::core::{ElementId, NoOpMutations};
 use dioxus::prelude::*;
 
+use crate::app::SETTINGS_SAVE_DELAY_MS;
 use crate::audio::fake::{Behaviour, Call, Recorder};
-use crate::session_runtime::{boot_machine_session, send_command, spawn_effects};
-use crate::state::{AppState, Screen, SessionSignals};
+use crate::persist::Store;
+use crate::persist::memory::MemoryStore;
+use crate::player::Lease;
+use crate::session_runtime::{send_event, start_session};
+use crate::state::{AppCtx, AppState, Screen};
 use crate::time::POLL_MS;
 use crate::ui::widgets::DISCLOSURE;
 
@@ -30,17 +34,19 @@ const STEP_MS: u64 = 4;
 /// How deep a disclosure may nest before the harness calls it a mistake.
 const NESTED_DISCLOSURES: usize = 8;
 
+/// How many rounds of rendering one event may set off before the page is
+/// said never to settle. Real chains are a handful deep.
+const SETTLE_PASSES: usize = 32;
+
 pub struct Harness {
     dom: VirtualDom,
+    /// The app's state, as every screen sees it.
+    pub ctx: AppCtx,
+    /// What the app holds outside it: the player and the session.
     pub app: AppState,
     pub recorder: Rc<Recorder>,
-    pub settings: Signal<TrainingSettings>,
-    pub sessions: Signal<Vec<SessionResult>>,
-    pub screen: Signal<Screen>,
-    pub runtime: Signal<Option<GroupSession>>,
-    pub result: Signal<Option<SessionResult>>,
-    pub auto_message: Signal<Option<String>>,
-    pub toast: Signal<Option<String>>,
+    /// What the app has stored.
+    pub store: Rc<MemoryStore>,
 }
 
 /// Hands a session the groups it is given, in order.
@@ -119,46 +125,19 @@ impl Harness {
     }
 
     pub fn with_settings(settings: TrainingSettings) -> Self {
-        crate::persist::memory::reset();
         let dom = VirtualDom::new(|| rsx! {});
         let recorder = Recorder::new();
-        let app = AppState::with_backend(recorder.factory());
-        let (settings, sessions, screen, runtime, result, auto_message, toast) =
-            dom.in_scope(ScopeId::ROOT, || {
-                (
-                    Signal::new(settings),
-                    Signal::new(Vec::new()),
-                    Signal::new(Screen::Home),
-                    Signal::new(None),
-                    Signal::new(None),
-                    Signal::new(None),
-                    Signal::new(None),
-                )
-            });
+        let store = Rc::new(MemoryStore::default());
+        let app = AppState::with(recorder.factory(), store.clone());
+        let ctx = dom.in_scope(ScopeId::ROOT, || {
+            AppCtx::new(app.clone(), settings, Vec::new())
+        });
         Self {
             dom,
+            ctx,
             app,
             recorder,
-            settings,
-            sessions,
-            screen,
-            runtime,
-            result,
-            auto_message,
-            toast,
-        }
-    }
-
-    /// The signals a session writes into, as the app assembles them.
-    pub fn signals(&self) -> SessionSignals {
-        SessionSignals {
-            screen: self.screen,
-            runtime: self.runtime,
-            result: self.result,
-            auto_message: self.auto_message,
-            sessions: self.sessions,
-            settings: self.settings,
-            toast: self.toast,
+            store,
         }
     }
 
@@ -184,27 +163,28 @@ impl Harness {
         }
     }
 
-    /// Start a session the way the Practice screen's button does.
+    /// Start a session the way the Practice screen's button does: through
+    /// the same call.
     pub fn start_training(&mut self) {
-        let settings_now = self.settings.peek().clone().clamp();
-        let history = self.sessions.peek().clone();
-        let (app, signals) = (self.app.clone(), self.signals());
-        let generation = self
-            .in_app(|| app.takeover_audio(&settings_now))
-            .expect("the fake player always opens");
-        let effects = self
-            .in_app(|| {
-                boot_machine_session(settings_now.clone(), &history, &app, generation, signals)
-            })
-            .expect("a fresh session always boots");
-        self.in_app(|| spawn_effects(effects, settings_now, app.clone(), generation, signals));
+        let ctx = self.ctx;
+        self.in_app(|| start_session(ctx));
         self.pump();
+    }
+
+    /// The running session's hold on the audio.
+    pub fn lease(&self) -> Lease {
+        self.app
+            .session
+            .borrow()
+            .as_ref()
+            .map(|live| live.lease().clone())
+            .expect("a session is running")
     }
 
     /// Send one event the way a component callback does.
     pub fn send(&mut self, event: SessionEvent) {
-        let (app, signals) = (self.app.clone(), self.signals());
-        self.in_app(|| send_command(app, signals, event));
+        let ctx = self.ctx;
+        self.in_app(|| send_event(ctx, event));
         self.pump();
     }
 
@@ -217,7 +197,8 @@ impl Harness {
 
     /// What the trainer sent for `index`, as the user would have heard it.
     pub fn sent(&self, index: usize) -> String {
-        self.runtime
+        self.ctx
+            .runtime
             .peek()
             .as_ref()
             .and_then(|session| session.group(index).map(|g| g.sent().to_string()))
@@ -225,15 +206,19 @@ impl Harness {
     }
 
     pub fn phase(&self) -> Option<cw_core::SessionPhase> {
-        self.app.machine.borrow().as_ref().map(|m| m.phase())
+        self.ctx
+            .runtime
+            .peek()
+            .as_ref()
+            .map(|session| session.phase())
     }
 
     pub fn screen(&self) -> Screen {
-        *self.screen.peek()
+        *self.ctx.screen.peek()
     }
 
     pub fn toast(&self) -> Option<String> {
-        self.toast.peek().clone()
+        self.ctx.toasts.current().map(|toast| toast.text)
     }
 
     pub fn calls(&self) -> Vec<Call> {
@@ -285,7 +270,8 @@ impl Harness {
     }
 
     fn sent_count(&self) -> usize {
-        self.runtime
+        self.ctx
+            .runtime
             .peek()
             .as_ref()
             .map(|session| session.group_count())
@@ -327,6 +313,8 @@ pub struct Ui {
     ids: Vec<(String, ElementId)>,
     /// Mutations since the last time anybody asked.
     work: usize,
+    /// What the app on the page has stored.
+    pub store: Rc<MemoryStore>,
 }
 
 /// Ids and removals, as the renderer reports them.
@@ -391,7 +379,7 @@ impl Ui {
         component: impl dioxus::core::ComponentFunction<P, M>,
         props: P,
     ) -> Self {
-        Self::from_dom(VirtualDom::new_with_props(component, props))
+        Self::from_dom(VirtualDom::new_with_props(component, props), Rc::default())
     }
 
     /// The whole app, with a player that records instead of one that needs a
@@ -408,22 +396,27 @@ impl Ui {
         settings: TrainingSettings,
         sessions: &[SessionResult],
     ) -> (Self, Rc<Recorder>) {
-        crate::persist::memory::reset();
-        crate::persist::save_settings(&settings);
-        crate::persist::save_sessions(sessions);
+        let store = Rc::new(MemoryStore::default());
+        store.save_settings(&settings);
+        store.save_sessions(sessions);
+        store.settings_saves.set(0);
         let recorder = Recorder::new();
-        let state = AppState::with_backend(recorder.factory());
+        let state = AppState::with(recorder.factory(), store.clone());
         (
-            Self::from_dom(VirtualDom::new(crate::app::App).with_root_context(state)),
+            Self::from_dom(
+                VirtualDom::new(crate::app::App).with_root_context(state),
+                store,
+            ),
             recorder,
         )
     }
 
-    fn from_dom(dom: VirtualDom) -> Self {
+    fn from_dom(dom: VirtualDom, store: Rc<MemoryStore>) -> Self {
         let mut ui = Self {
             dom,
             ids: Vec::new(),
             work: 0,
+            store,
         };
         let mut log = IdLog::default();
         ui.dom.rebuild(&mut log);
@@ -447,14 +440,38 @@ impl Ui {
     }
 
     /// Settle everything the last event set off: the render it dirtied, the
-    /// effects that render queues, and whatever those effects dirty in turn.
+    /// effects that render queues, and whatever those effects dirty in turn,
+    /// until nothing is left that could run.
+    ///
+    /// A page that never gets there — an effect that keeps waking itself —
+    /// fails here, rather than passing every test that happened to look at
+    /// it between two of its passes.
     pub fn settle(&mut self) {
-        for _ in 0..6 {
-            self.dom.process_events();
+        for _ in 0..SETTLE_PASSES {
+            if !self.has_work() {
+                return;
+            }
             let mut log = IdLog::default();
             self.dom.render_immediate(&mut log);
             self.apply(log);
         }
+        panic!("the page never settled: something keeps waking itself");
+    }
+
+    /// Whether anything is ready to run: a task woken, an effect queued, a
+    /// component marked for redrawing. Runs the tasks and effects it finds,
+    /// as the renderer would before drawing.
+    fn has_work(&mut self) -> bool {
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        let work = std::pin::pin!(self.dom.wait_for_work());
+        work.poll(&mut cx).is_ready()
+    }
+
+    /// The settings as stored, once an edit has had time to be.
+    pub async fn stored_settings(&mut self) -> TrainingSettings {
+        self.advance(u64::from(SETTINGS_SAVE_DELAY_MS) + STEP_MS)
+            .await;
+        self.store.load_settings()
     }
 
     /// Move the clock forward, settling the page as it goes.
@@ -672,14 +689,6 @@ impl Ui {
         self.fire("change", id, Self::form(value));
     }
 
-    pub fn focus(&mut self, id: &str) {
-        self.fire(
-            "focus",
-            id,
-            Box::new(dioxus::html::SerializedFocusData::default()),
-        );
-    }
-
     pub fn press_enter(&mut self, id: &str) {
         self.press_key(id, Key::Enter, dioxus::prelude::Code::Enter);
     }
@@ -793,6 +802,23 @@ mod harness_tests {
         );
         ui.click("btn-bump");
         assert!(ui.has("count 10"));
+    }
+
+    /// An effect that wakes itself every time it runs.
+    #[component]
+    fn Restless() -> Element {
+        let mut count = use_signal(|| 0u32);
+        use_effect(move || {
+            let seen = count();
+            count.set(seen + 1);
+        });
+        rsx! { p { "{count}" } }
+    }
+
+    #[test]
+    #[should_panic(expected = "never settled")]
+    fn a_page_that_never_settles_fails_the_test() {
+        let _ui = Ui::new(Restless, ());
     }
 
     #[test]

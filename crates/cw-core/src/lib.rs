@@ -30,8 +30,8 @@ mod timing;
 
 pub use alignment::{AlignmentPair, CopyTally, LetterAccuracy, align_group};
 pub use auto_level::{
-    AutoLevelChange, AutoLevelCounters, AutoLevelProgress, CountersKey, apply_auto_level,
-    auto_level_progress, evaluate_auto_level,
+    AutoLevelChange, AutoLevelCounters, AutoLevelProgress, Completion, CountersKey, CountersUpdate,
+    auto_level_progress, complete_session, evaluate_auto_level,
 };
 pub use callsign::{CALLSIGN_TIER_MAX, generate_callsign, tier_examples};
 pub use heatmap::{HEATMAP_WEEKS, HeatmapCell, HeatmapColorMode, HeatmapGrid, build_heatmap};
@@ -70,5 +70,5 @@ pub use streak::{StreakState, StreakStatus, compute_streak_status};
 pub use timing::{
     EnvelopePoint, EnvelopeShape, Interferer, PlannedTransmission, PlaybackPlan, StationVoice,
     ToneEvent, Transmission, compute_after_group_gap_ms, envelope_shape, plan_morse_playback_for,
-    plan_transmission, resolve_pileup, resolve_station,
+    plan_transmission, resolve_station,
 };

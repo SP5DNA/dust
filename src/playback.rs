@@ -1,332 +1,348 @@
-use std::cell::Cell;
-use std::rc::Rc;
+//! Everything the app plays outside a training session: the band preview,
+//! the letter player, the group stream and the envelope samples.
 
 use cw_core::{
-    CALLSIGN_TIER_MAX, CharSamplingState, FastrandRng, TrainingSettings, Transmission,
-    compute_after_group_gap_ms, generate_callsign, generate_training_group,
+    CALLSIGN_TIER_MAX, CharSamplingState, FastrandRng, GroupSource, Sampler, TrainingSettings,
+    Transmission, compute_after_group_gap_ms, generate_callsign, generate_training_group,
+    resolve_station,
 };
+use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
 
-use crate::audio::PlaybackOutcome;
-use crate::state::AppState;
-use crate::time::{POLL_MS, seed_rng, sleep_ms};
+use crate::player::{AudioError, Lease};
+use crate::state::AppCtx;
+use crate::time::seed_rng;
 
 /// How many sent groups the stream keeps on screen for a glance-back.
 const STREAM_HEARD_KEEP: usize = 12;
 
-/// How many times one group is re-armed before the session is told the audio
-/// is gone. Each retry rebuilds the player, which is what picks up a device
-/// that was swapped, unplugged or suspended mid-session.
-const PLAY_ATTEMPTS: u32 = 3;
+/// The pause between letters on the Listen screen.
+const LETTER_GAP_MS: u32 = 420;
 
-#[derive(Debug)]
-pub(crate) enum PlayError {
-    Cancelled,
-    Failed(String),
+/// What the band preview calls, and the pause between calls.
+const BAND_PREVIEW_CALL: &str = "CQ";
+const BAND_PREVIEW_GAP_MS: u32 = 280;
+
+/// What the app is playing when no session is running.
+///
+/// These are the four things that can be true of the audio outside training,
+/// and exactly one of them is: the band preview, the letter player and an
+/// envelope sample all want the same hardware, so a second one starting means
+/// the first has stopped.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum Preview {
+    /// Nothing is playing, or a session has the audio.
+    #[default]
+    Idle,
+    /// The band-conditions preview, looping until stopped.
+    Band,
+    /// The Listen screen playing a character or the whole pool.
+    Letters,
+    /// Groups looping with no answers and no score — copy while you do something else.
+    Stream,
+    /// One short envelope sample, named so the chip that sent it can show it.
+    Sample(String),
 }
 
-pub(crate) async fn play_text_now(
-    app: &AppState,
-    generation: u64,
-    transmission: &Transmission,
-    settings: &TrainingSettings,
-) -> Result<(f64, f64, f64), PlayError> {
-    let mut last_err = None;
-    for attempt in 0..PLAY_ATTEMPTS {
-        if app.session_gen.get() != generation {
-            return Err(PlayError::Cancelled);
-        }
-        if attempt > 0 {
-            let rebuilt = app.rebuild_player(settings);
-            sleep_ms(POLL_MS).await;
-            if app.session_gen.get() != generation {
-                return Err(PlayError::Cancelled);
-            }
-            if let Err(err) = rebuilt {
-                // There is no player to send through, and the reason it could
-                // not be opened is the one worth showing — not "unavailable".
-                last_err = Some(err);
-                continue;
-            }
-        }
-        match schedule_text(app, generation, transmission, settings).await {
-            Ok(wait) => {
-                let duration = wait.duration_sec;
-                let char_wpm = wait.char_wpm;
-                let effective_wpm = wait.effective_wpm;
-                match wait.wait().await {
-                    PlaybackOutcome::Completed => {
-                        if app.session_gen.get() != generation {
-                            return Err(PlayError::Cancelled);
-                        }
-                        return Ok((duration, char_wpm, effective_wpm));
-                    }
-                    PlaybackOutcome::Cancelled => return Err(PlayError::Cancelled),
-                    // The send never reached its end: a device that went away,
-                    // or a browser audio clock that stopped moving. Rebuilding
-                    // the player on the next attempt is what recovers it.
-                    PlaybackOutcome::Failed => {
-                        last_err = Some("Audio playback stalled.".to_string());
-                    }
-                }
-            }
-            Err(err) => {
-                if app.session_gen.get() != generation {
-                    return Err(PlayError::Cancelled);
-                }
-                last_err = Some(err);
-            }
+impl Preview {
+    pub fn is_band(&self) -> bool {
+        matches!(self, Self::Band)
+    }
+
+    pub fn is_letters(&self) -> bool {
+        matches!(self, Self::Letters)
+    }
+
+    pub fn is_stream(&self) -> bool {
+        matches!(self, Self::Stream)
+    }
+
+    /// The sample now sounding, for the chip that is waiting to light up.
+    pub fn sample(&self) -> Option<String> {
+        match self {
+            Self::Sample(text) => Some(text.clone()),
+            _ => None,
         }
     }
-    Err(PlayError::Failed(
-        last_err.unwrap_or_else(|| "Audio playback failed.".into()),
-    ))
 }
 
-async fn schedule_text(
-    app: &AppState,
-    generation: u64,
-    transmission: &Transmission,
-    settings: &TrainingSettings,
-) -> Result<crate::audio::PlaybackWait, String> {
-    if app.session_gen.get() != generation {
-        return Err("Cancelled.".into());
+/// Play `kind`: take the audio for it, run `play` under the lease, and once
+/// that ends — finished, failed or taken over — leave nothing behind.
+///
+/// Every preview starts and ends here, so none of them can forget a step:
+/// the preview shown is the one playing, a failure is said once, and an end
+/// that is still this preview's own gives the audio back, receiver and all.
+fn start_preview<F>(ctx: AppCtx, kind: Preview, play: impl FnOnce(Lease, TrainingSettings) -> F)
+where
+    F: Future<Output = Result<(), AudioError>> + 'static,
+{
+    // A session in progress keeps the audio.
+    if ctx.session_running() {
+        return;
     }
-    for _ in 0..8 {
-        if app.session_gen.get() != generation {
-            return Err("Cancelled.".into());
+    let AppCtx {
+        mut preview,
+        toasts,
+        settings,
+        ..
+    } = ctx;
+    let settings = settings.peek().clone().clamp();
+    let lease = match ctx.app().player.claim(&settings) {
+        Ok(lease) => lease,
+        Err(err) => {
+            // The claim ended whatever was playing, whether or not it could
+            // open the player for this.
+            preview.set(Preview::Idle);
+            toasts.show(err.to_string());
+            return;
         }
-        match app.player.try_borrow_mut() {
-            Ok(mut slot) => {
-                let Some(player) = slot.as_mut() else {
-                    return Err("Audio is unavailable.".into());
-                };
-                return crate::audio::start_send(player.as_mut(), transmission, settings);
-            }
-            Err(_) => sleep_ms(POLL_MS).await,
+    };
+    preview.set(kind);
+    let playing = play(lease.clone(), settings);
+    // The app's, not the screen's: the lease decides when it ends.
+    spawn_forever(async move {
+        if let Err(err) = playing.await
+            && err != AudioError::Cancelled
+        {
+            toasts.show(err.to_string());
         }
-    }
-    Err("Audio is busy.".into())
+        if lease.release() {
+            preview.set(Preview::Idle);
+        }
+    });
 }
 
-pub async fn sleep_cancelable(ms: u32, generation: u64, session_gen: Rc<Cell<u64>>) -> bool {
-    let mut left = ms.max(1);
-    while left > 0 {
-        if session_gen.get() != generation {
-            return false;
-        }
-        let chunk = left.min(POLL_MS);
-        sleep_ms(chunk).await;
-        left = left.saturating_sub(chunk);
-    }
-    session_gen.get() == generation
+/// The Listen screen: `chars`, one at a time.
+pub fn start_letters(ctx: AppCtx, chars: String) {
+    start_preview(ctx, Preview::Letters, |lease, settings| {
+        play_chars(lease, settings, chars, LETTER_GAP_MS)
+    });
 }
 
-pub async fn play_chars(
-    app: AppState,
-    generation: u64,
+/// The Listen screen's stream of groups, nothing scored.
+pub fn start_stream(ctx: AppCtx) {
+    let AppCtx {
+        settings,
+        sessions,
+        mut stream_heard,
+        ..
+    } = ctx;
+    start_preview(ctx, Preview::Stream, |lease, first| {
+        stream_heard.set(Vec::new());
+        // Leaning on the same weak characters a session would.
+        let sampler = Sampler::new(&sessions.peek(), &first, seed_rng());
+        loop_stream(lease, settings, sampler, stream_heard)
+    });
+}
+
+/// An envelope test chip: one short sample with the current keying settings.
+pub fn start_sample(ctx: AppCtx, text: String) {
+    start_preview(ctx, Preview::Sample(text.clone()), |lease, settings| {
+        play_sample(lease, settings, text)
+    });
+}
+
+/// The band-conditions preview, calling until it is stopped.
+pub fn start_band_preview(ctx: AppCtx) {
+    start_preview(ctx, Preview::Band, |lease, _| {
+        loop_band_preview(lease, ctx.settings, BAND_PREVIEW_CALL, BAND_PREVIEW_GAP_MS)
+    });
+}
+
+/// One operator for a whole preview, drawn afresh each time one starts.
+fn new_station(settings: &TrainingSettings) -> (cw_core::StationVoice, FastrandRng) {
+    let mut rng = FastrandRng(seed_rng());
+    (resolve_station(settings, &mut rng), rng)
+}
+
+/// Play `chars` one at a time, `gap_ms` apart.
+async fn play_chars(
+    lease: Lease,
     settings: TrainingSettings,
     chars: String,
     gap_ms: u32,
-    mut toast: Signal<Option<String>>,
-) {
-    let chars: Vec<char> = chars.chars().collect();
+) -> Result<(), AudioError> {
     // One operator for the whole run: a different pitch per letter would make
     // the screen harder to learn from, not more realistic.
-    let voice = app.station(&settings);
-    for (i, ch) in chars.iter().enumerate() {
-        if app.session_gen.get() != generation {
-            return;
+    let (voice, _) = new_station(&settings);
+    for (i, ch) in chars.chars().enumerate() {
+        if i > 0 {
+            lease.sleep(gap_ms).await?;
         }
-        let alone = Transmission::alone(ch.to_string(), voice);
-        let play = play_text_now(&app, generation, &alone, &settings).await;
-        if app.session_gen.get() != generation {
-            return;
-        }
-        match play {
-            Ok(_) => {}
-            Err(PlayError::Cancelled) => return,
-            Err(PlayError::Failed(message)) => {
-                toast.set(Some(message));
-                return;
-            }
-        }
-        if i + 1 < chars.len()
-            && !sleep_cancelable(gap_ms, generation, app.session_gen.clone()).await
-        {
-            return;
-        }
+        lease
+            .send(&Transmission::alone(ch.to_string(), voice), &settings)
+            .await?;
     }
+    Ok(())
 }
 
-/// Send one short sample once — used by the keying-envelope test chips.
-pub async fn play_sample_text(
-    app: AppState,
-    generation: u64,
+/// Send one short sample once — the keying-envelope test chips.
+async fn play_sample(
+    lease: Lease,
     settings: TrainingSettings,
     text: String,
-    mut toast: Signal<Option<String>>,
-) {
-    let alone = Transmission::alone(text, app.station(&settings));
-    match play_text_now(&app, generation, &alone, &settings).await {
-        Ok(_) | Err(PlayError::Cancelled) => {}
-        Err(PlayError::Failed(message)) => toast.set(Some(message)),
-    }
+) -> Result<(), AudioError> {
+    let (voice, _) = new_station(&settings);
+    lease
+        .send(&Transmission::alone(text, voice), &settings)
+        .await
+        .map(|_| ())
 }
 
-pub async fn loop_preview_text(
-    app: AppState,
-    generation: u64,
+/// Call `text` over and over, `gap_ms` apart, under the settings as they are
+/// at each call. Ends only when the lease does, or the audio fails.
+async fn loop_band_preview(
+    lease: Lease,
     settings: Signal<TrainingSettings>,
     text: &'static str,
     gap_ms: u32,
-    mut toast: Signal<Option<String>>,
-) {
+) -> Result<(), AudioError> {
     // One station, kept, so moving a band slider changes the band and not
     // the signal you are judging it against. Whoever calls across it is drawn
     // afresh each time, from the settings as they are now, so the pile-up is
     // heard here just as a session would send it.
-    let voice = app.station(&settings().clamp());
+    let (voice, mut rng) = new_station(&settings.peek().clone().clamp());
     loop {
-        if app.session_gen.get() != generation {
-            return;
-        }
-        let settings_now = settings().clamp();
+        let settings_now = settings.peek().clone().clamp();
         // A CQ is answered by callsigns.
-        let call = app.pileup_for(&settings_now, text, voice, |rng| {
+        let call = Transmission::calling(&settings_now, text, voice, &mut rng, |rng| {
             generate_callsign(CALLSIGN_TIER_MAX, rng)
         });
-        if let Err(err) = play_text_now(&app, generation, &call, &settings_now).await {
-            match err {
-                PlayError::Cancelled => return,
-                PlayError::Failed(message) => {
-                    toast.set(Some(message));
-                    return;
-                }
-            }
-        }
-        if !sleep_cancelable(gap_ms, generation, app.session_gen.clone()).await {
-            return;
-        }
+        lease.send(&call, &settings_now).await?;
+        lease.sleep(gap_ms).await?;
     }
 }
 
-fn next_stream_group(
-    app: &AppState,
-    settings: &TrainingSettings,
-    sampling: &mut CharSamplingState,
-) -> String {
-    match app.rng.try_borrow_mut() {
-        Ok(mut rng) => generate_training_group(settings, sampling, &mut *rng),
-        Err(_) => generate_training_group(settings, sampling, &mut FastrandRng(seed_rng())),
-    }
-}
-
-/// Send groups from the current alphabet until the generation moves on.
+/// Send groups from the current alphabet until the lease ends, showing each
+/// in `heard` once it has played.
 ///
-/// This is not a training session: it draws with a sampler of its own, so
-/// the stream cannot change what a scored session draws, and nothing is
-/// stored.
-pub async fn loop_stream_groups(
-    app: AppState,
-    generation: u64,
+/// This is not a training session. Its sampler is one of its own — built
+/// from the history as a session's is, so it leans on the same weak
+/// characters — and nothing it sends is answered, so nothing is learned and
+/// nothing is stored.
+async fn loop_stream(
+    lease: Lease,
     settings: Signal<TrainingSettings>,
+    mut sampler: Sampler,
     mut heard: Signal<Vec<String>>,
-    mut toast: Signal<Option<String>>,
-) {
-    let mut sampling = CharSamplingState::default();
-    let voice = app.station(&settings().clamp());
+) -> Result<(), AudioError> {
+    let (voice, mut rng) = new_station(&settings.peek().clone().clamp());
     loop {
-        if app.session_gen.get() != generation {
-            return;
-        }
-        let settings_now = settings().clamp();
-        let group = next_stream_group(&app, &settings_now, &mut sampling);
-        if group.is_empty() {
-            if !sleep_cancelable(POLL_MS, generation, app.session_gen.clone()).await {
-                return;
-            }
-            continue;
-        }
+        let settings_now = settings.peek().clone().clamp();
+        let (group, _) = sampler.next_group(&settings_now);
         // Across it, whoever else the settings have calling, sending groups
         // of their own as a session's callers do: from the same curriculum,
         // off a blank slate, so they never teach the sampler anything.
-        let call = app.pileup_for(&settings_now, &group, voice, |rng| {
+        let call = Transmission::calling(&settings_now, group.clone(), voice, &mut rng, |rng| {
             generate_training_group(&settings_now, &mut CharSamplingState::default(), rng)
         });
-        let played = play_text_now(&app, generation, &call, &settings_now).await;
-        if app.session_gen.get() != generation {
-            return;
-        }
-        let (char_wpm, effective_wpm) = match played {
-            Ok((_, char_wpm, effective_wpm)) => (char_wpm, effective_wpm),
-            Err(PlayError::Cancelled) => return,
-            Err(PlayError::Failed(message)) => {
-                toast.set(Some(message));
-                return;
-            }
-        };
-        let mut list = heard();
-        list.push(group);
-        let extra = list.len().saturating_sub(STREAM_HEARD_KEEP);
-        if extra > 0 {
+        let sent = lease.send(&call, &settings_now).await?;
+        heard.with_mut(|list| {
+            list.push(group);
+            let extra = list.len().saturating_sub(STREAM_HEARD_KEEP);
             list.drain(..extra);
-        }
-        heard.set(list);
+        });
         let gap = compute_after_group_gap_ms(
-            char_wpm,
-            effective_wpm,
+            sent.char_wpm,
+            sent.effective_wpm,
             settings_now.playback.extra_word_space_multiplier,
             settings_now.playback.group_pause_sec,
         );
-        if !sleep_cancelable(gap, generation, app.session_gen.clone()).await {
-            return;
-        }
+        lease.sleep(gap).await?;
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::cell::{Cell, RefCell};
+    use std::rc::Rc;
+
     use super::*;
     use crate::audio::fake::Behaviour;
     use crate::testing::{Harness, run, test_settings};
+    use cw_core::SessionResult;
 
+    /// What a spawned preview came back with, once it has.
+    type Outcome = Rc<RefCell<Option<Result<(), AudioError>>>>;
+
+    fn spawn_into<F>(h: &Harness, play: F) -> Outcome
+    where
+        F: Future<Output = Result<(), AudioError>> + 'static,
+    {
+        let outcome: Outcome = Rc::default();
+        let sink = outcome.clone();
+        h.in_app(|| {
+            spawn(async move {
+                let result = play.await;
+                *sink.borrow_mut() = Some(result);
+            })
+        });
+        outcome
+    }
+
+    fn sampler(h: &Harness, history: &[SessionResult]) -> Sampler {
+        // A fixed seed, so what the stream draws is the same every run.
+        Sampler::new(history, &h.ctx.settings.peek(), 7)
+    }
+
+    fn claim(h: &Harness) -> Lease {
+        h.app
+            .player
+            .claim(&test_settings())
+            .expect("the fake always opens")
+    }
+
+    /// A wait is one timer, not a run of short ones.
+    ///
+    /// Counting down in poll-sized steps woke sixty times a second for as
+    /// long as the wait ran — an answer window superseded early kept doing
+    /// so to its end — and charged each step what it asked for rather than
+    /// what it took, so every gap ran long.
     #[test]
-    fn a_cancelable_sleep_stops_the_moment_the_session_moves_on() {
+    fn a_long_wait_wakes_once() {
         run(|| async {
             let h = Harness::new();
-            let generation = h.app.session_gen.get();
-            let slept = sleep_cancelable(0, generation, h.app.session_gen.clone()).await;
-            assert!(slept, "a zero wait still completes");
-
-            h.app.bump_session();
-            let slept = sleep_cancelable(500, generation, h.app.session_gen.clone()).await;
-            assert!(!slept, "a stale generation must not keep waiting");
+            let lease = claim(&h);
+            let polls = Rc::new(Cell::new(0u32));
+            let wait = Polls {
+                inner: Box::pin(lease.sleep(10_000)),
+                polls: polls.clone(),
+            };
+            let started = tokio::time::Instant::now();
+            assert_eq!(wait.await, Ok(()), "nothing cancelled it");
+            assert_eq!(started.elapsed().as_millis(), 10_000);
+            assert!(polls.get() <= 2, "the wait woke {} times", polls.get());
         });
+    }
+
+    /// Counts how often the future inside is polled.
+    struct Polls<F> {
+        inner: std::pin::Pin<Box<F>>,
+        polls: Rc<Cell<u32>>,
+    }
+
+    impl<F: Future> Future for Polls<F> {
+        type Output = F::Output;
+
+        fn poll(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<F::Output> {
+            self.polls.set(self.polls.get() + 1);
+            self.inner.as_mut().poll(cx)
+        }
     }
 
     #[test]
     fn listening_plays_one_character_at_a_time() {
         run(|| async {
             let mut h = Harness::new();
-            let settings = test_settings();
-            let generation = h.app.takeover_audio(&settings).expect("player");
-            let app = h.app.clone();
-            let toast = h.toast;
-            h.in_app(|| {
-                spawn(play_chars(
-                    app,
-                    generation,
-                    settings,
-                    "KM".into(),
-                    200,
-                    toast,
-                ));
-            });
+            let lease = claim(&h);
+            let outcome = spawn_into(&h, play_chars(lease, test_settings(), "KM".into(), 200));
             h.pump();
-            assert!(h.run_until(10_000, |h| h.texts().len() == 2).await);
+            assert!(h.run_until(10_000, |_| outcome.borrow().is_some()).await);
+            assert_eq!(*outcome.borrow(), Some(Ok(())));
             assert_eq!(h.texts(), vec!["K".to_string(), "M".to_string()]);
-            assert!(h.toast().is_none());
         });
     }
 
@@ -334,93 +350,47 @@ mod tests {
     fn listening_stops_when_the_user_leaves() {
         run(|| async {
             let mut h = Harness::new();
-            let settings = test_settings();
-            let generation = h.app.takeover_audio(&settings).expect("player");
-            let app = h.app.clone();
-            let toast = h.toast;
-            h.in_app(|| {
-                spawn(play_chars(
-                    app,
-                    generation,
-                    settings,
-                    "KMU".into(),
-                    400,
-                    toast,
-                ));
-            });
+            let lease = claim(&h);
+            let outcome = spawn_into(&h, play_chars(lease, test_settings(), "KMU".into(), 400));
             h.pump();
             assert!(h.run_until(5_000, |h| h.texts().len() == 1).await);
-            h.app.bump_session();
+            h.app.player.release();
             h.advance(5_000).await;
             assert_eq!(h.texts().len(), 1, "nothing is played after leaving");
+            assert_eq!(*outcome.borrow(), Some(Err(AudioError::Cancelled)));
         });
     }
 
     #[test]
-    fn listening_reports_an_audio_failure_once() {
+    fn listening_gives_up_on_the_first_character_the_audio_fails() {
         run(|| async {
             let mut h = Harness::new();
-            let settings = test_settings();
-            let generation = h.app.takeover_audio(&settings).expect("player");
+            let lease = claim(&h);
             h.set_behaviour(Behaviour::RefuseToStart);
-            let app = h.app.clone();
-            let toast = h.toast;
-            h.in_app(|| {
-                spawn(play_chars(
-                    app,
-                    generation,
-                    settings,
-                    "KM".into(),
-                    200,
-                    toast,
-                ));
-            });
+            let outcome = spawn_into(&h, play_chars(lease, test_settings(), "KM".into(), 200));
             h.pump();
-            assert!(h.run_until(20_000, |h| h.toast().is_some()).await);
-            assert_eq!(h.toast().as_deref(), Some("Audio stream: device is gone"));
+            assert!(h.run_until(20_000, |_| outcome.borrow().is_some()).await);
+            assert_eq!(
+                *outcome.borrow(),
+                Some(Err(AudioError::Device(
+                    "Audio stream: device is gone".into()
+                )))
+            );
             // It gave up on the first character rather than grinding through both.
             assert!(h.texts().iter().all(|text| text == "K"));
         });
     }
 
     #[test]
-    fn a_test_sample_plays_once_and_reports_a_failure() {
+    fn a_test_sample_plays_once() {
         run(|| async {
             let mut h = Harness::new();
-            let settings = test_settings();
-            let generation = h.app.takeover_audio(&settings).expect("player");
-            let app = h.app.clone();
-            let toast = h.toast;
-            h.in_app(|| {
-                spawn(play_sample_text(
-                    app,
-                    generation,
-                    settings.clone(),
-                    "CQ".into(),
-                    toast,
-                ));
-            });
+            let lease = claim(&h);
+            let outcome = spawn_into(&h, play_sample(lease, test_settings(), "CQ".into()));
             h.pump();
-            assert!(
-                h.run_until(10_000, |h| h.texts() == vec!["CQ".to_string()])
-                    .await
-            );
-            assert!(h.toast().is_none());
-
-            h.set_behaviour(Behaviour::RefuseToStart);
-            let generation = h.app.takeover_audio(&settings).expect("player");
-            let app = h.app.clone();
-            h.in_app(|| {
-                spawn(play_sample_text(
-                    app,
-                    generation,
-                    settings,
-                    "E".into(),
-                    toast,
-                ));
-            });
-            h.pump();
-            assert!(h.run_until(20_000, |h| h.toast().is_some()).await);
+            assert!(h.run_until(10_000, |_| outcome.borrow().is_some()).await);
+            assert_eq!(*outcome.borrow(), Some(Ok(())));
+            assert_eq!(h.texts(), vec!["CQ".to_string()]);
         });
     }
 
@@ -428,27 +398,16 @@ mod tests {
     fn the_band_preview_loops_until_it_is_stopped() {
         run(|| async {
             let mut h = Harness::new();
-            let settings = test_settings();
-            let generation = h.app.takeover_audio(&settings).expect("player");
-            let app = h.app.clone();
-            let (settings_sig, toast) = (h.settings, h.toast);
-            h.in_app(|| {
-                spawn(loop_preview_text(
-                    app,
-                    generation,
-                    settings_sig,
-                    "CQ",
-                    100,
-                    toast,
-                ));
-            });
+            let lease = claim(&h);
+            let outcome = spawn_into(&h, loop_band_preview(lease, h.ctx.settings, "CQ", 100));
             h.pump();
             assert!(h.run_until(20_000, |h| h.texts().len() >= 3).await);
             assert!(h.texts().iter().all(|text| text == "CQ"));
-            h.app.bump_session();
+            h.app.player.release();
             let played = h.texts().len();
             h.advance(5_000).await;
             assert_eq!(h.texts().len(), played);
+            assert_eq!(*outcome.borrow(), Some(Err(AudioError::Cancelled)));
         });
     }
 
@@ -467,24 +426,13 @@ mod tests {
             settings.band.stations_min = 3;
             settings.band.stations_max = 3;
             settings.band.filter_width_hz = cw_core::FILTER_WIDTH_MAX;
-            let mut h = Harness::with_settings(settings.clone());
-            let generation = h.app.takeover_audio(&settings).expect("player");
-            let app = h.app.clone();
-            let (settings_sig, toast) = (h.settings, h.toast);
-            h.in_app(|| {
-                spawn(loop_preview_text(
-                    app,
-                    generation,
-                    settings_sig,
-                    "CQ",
-                    100,
-                    toast,
-                ));
-            });
+            let mut h = Harness::with_settings(settings);
+            let lease = claim(&h);
+            let _outcome = spawn_into(&h, loop_band_preview(lease, h.ctx.settings, "CQ", 100));
             h.pump();
             assert!(h.run_until(20_000, |h| h.texts().len() >= 3).await);
-            h.app.bump_session();
-            let sent = h.recorder.sent.borrow().clone();
+            h.app.player.release();
+            let sent = h.recorder.sent();
             assert!(sent.iter().all(|t| t.text == "CQ" && t.others.len() <= 2));
             assert!(sent.iter().any(|t| t.others.len() == 2), "no pile-up");
             assert!(
@@ -501,83 +449,18 @@ mod tests {
     fn the_band_preview_gives_up_when_the_audio_fails() {
         run(|| async {
             let mut h = Harness::new();
-            let settings = test_settings();
-            let generation = h.app.takeover_audio(&settings).expect("player");
+            let lease = claim(&h);
             h.set_behaviour(Behaviour::RefuseToStart);
-            let app = h.app.clone();
-            let (settings_sig, toast) = (h.settings, h.toast);
-            h.in_app(|| {
-                spawn(loop_preview_text(
-                    app,
-                    generation,
-                    settings_sig,
-                    "CQ",
-                    100,
-                    toast,
-                ));
-            });
+            let outcome = spawn_into(&h, loop_band_preview(lease, h.ctx.settings, "CQ", 100));
             h.pump();
-            assert!(h.run_until(20_000, |h| h.toast().is_some()).await);
+            assert!(h.run_until(20_000, |_| outcome.borrow().is_some()).await);
+            assert!(matches!(
+                *outcome.borrow(),
+                Some(Err(AudioError::Device(_)))
+            ));
             let played = h.texts().len();
             h.advance(5_000).await;
             assert_eq!(h.texts().len(), played, "the loop stopped");
-        });
-    }
-
-    /// Holding the player borrow across the await is the point of the test:
-    /// it is how a second caller sees the player while it is in use.
-    #[allow(clippy::await_holding_refcell_ref)]
-    #[test]
-    fn a_send_while_the_player_is_busy_is_reported_rather_than_wedged() {
-        run(|| async {
-            let mut h = Harness::new();
-            let settings = test_settings();
-            let generation = h.app.takeover_audio(&settings).expect("player");
-            // Something else is holding the player: every attempt to schedule a
-            // send has to give up instead of blocking the session.
-            let player = h.app.player.clone();
-            let held = player.borrow_mut();
-            let app = h.app.clone();
-            let toast = h.toast;
-            h.in_app(|| {
-                spawn(play_sample_text(
-                    app,
-                    generation,
-                    settings,
-                    "E".into(),
-                    toast,
-                ));
-            });
-            h.pump();
-            assert!(h.run_until(30_000, |h| h.toast().is_some()).await);
-            assert_eq!(h.toast().as_deref(), Some("Audio is busy."));
-            drop(held);
-        });
-    }
-
-    #[test]
-    fn a_send_with_no_player_left_rebuilds_one() {
-        run(|| async {
-            let mut h = Harness::new();
-            let settings = test_settings();
-            let generation = h.app.takeover_audio(&settings).expect("player");
-            // The player is gone, the way a shutdown leaves it.
-            *h.app.player.borrow_mut() = None;
-            let app = h.app.clone();
-            let toast = h.toast;
-            h.in_app(|| {
-                spawn(play_sample_text(
-                    app,
-                    generation,
-                    settings,
-                    "E".into(),
-                    toast,
-                ));
-            });
-            h.pump();
-            assert!(h.run_until(20_000, |h| !h.texts().is_empty()).await);
-            assert!(h.toast().is_none());
-            assert_eq!(h.recorder.players_built.get(), 2);
         });
     }
 
@@ -585,57 +468,15 @@ mod tests {
     fn a_send_that_is_taken_over_mid_flight_is_cancelled() {
         run(|| async {
             let mut h = Harness::new();
-            let settings = test_settings();
-            let generation = h.app.takeover_audio(&settings).expect("player");
-            let app = h.app.clone();
-            let outcome = std::rc::Rc::new(std::cell::RefCell::new(None));
-            let sink = std::rc::Rc::clone(&outcome);
-            h.in_app(|| {
-                spawn(async move {
-                    let alone = Transmission::alone("CQ", app.station(&settings));
-                    let result = play_text_now(&app, generation, &alone, &settings).await;
-                    *sink.borrow_mut() = Some(result);
-                });
-            });
+            let lease = claim(&h);
+            let outcome = spawn_into(&h, play_sample(lease, test_settings(), "CQ".into()));
             h.pump();
             h.advance(100).await;
             assert!(outcome.borrow().is_none(), "still sending");
             // Another screen claims the audio.
-            h.app.bump_session();
+            let _other = claim(&h);
             assert!(h.run_until(5_000, |_| outcome.borrow().is_some()).await);
-            assert!(matches!(
-                outcome.borrow().as_ref(),
-                Some(Err(PlayError::Cancelled))
-            ));
-        });
-    }
-
-    #[test]
-    fn a_send_asked_for_after_the_session_moved_on_never_starts() {
-        run(|| async {
-            let mut h = Harness::new();
-            let settings = test_settings();
-            let generation = h.app.takeover_audio(&settings).expect("player");
-            // The audio was claimed by something else before the send began.
-            h.app.bump_session();
-            h.recorder.clear();
-            let app = h.app.clone();
-            let outcome = std::rc::Rc::new(std::cell::RefCell::new(None));
-            let sink = std::rc::Rc::clone(&outcome);
-            h.in_app(|| {
-                spawn(async move {
-                    let alone = Transmission::alone("CQ", app.station(&settings));
-                    *sink.borrow_mut() =
-                        Some(play_text_now(&app, generation, &alone, &settings).await);
-                });
-            });
-            h.pump();
-            assert!(h.run_until(1_000, |_| outcome.borrow().is_some()).await);
-            assert!(matches!(
-                outcome.borrow().as_ref(),
-                Some(Err(PlayError::Cancelled))
-            ));
-            assert!(h.texts().is_empty(), "nothing should have been sent");
+            assert_eq!(*outcome.borrow(), Some(Err(AudioError::Cancelled)));
         });
     }
 
@@ -643,20 +484,12 @@ mod tests {
     fn a_group_stream_keeps_sending_until_it_is_stopped() {
         run(|| async {
             let mut h = Harness::new();
-            let settings = test_settings();
-            let generation = h.app.takeover_audio(&settings).expect("player");
-            let app = h.app.clone();
-            let (settings_sig, toast) = (h.settings, h.toast);
+            let lease = claim(&h);
             let heard = h.in_app(|| Signal::new(Vec::<String>::new()));
-            h.in_app(|| {
-                spawn(loop_stream_groups(
-                    app,
-                    generation,
-                    settings_sig,
-                    heard,
-                    toast,
-                ));
-            });
+            let _outcome = spawn_into(
+                &h,
+                loop_stream(lease, h.ctx.settings, sampler(&h, &[]), heard),
+            );
             h.pump();
             assert!(h.run_until(20_000, |h| h.texts().len() >= 3).await);
             assert!(
@@ -667,10 +500,48 @@ mod tests {
                 heard.peek().len() >= 2,
                 "finished groups show up after they play"
             );
-            h.app.bump_session();
+            h.app.player.release();
             let played = h.texts().len();
             h.advance(5_000).await;
             assert_eq!(h.texts().len(), played, "the stream stopped");
+        });
+    }
+
+    /// The stream leans on what the history says is hard, as a session does.
+    /// It used to draw from a blank slate before the first session of a
+    /// launch, and from whatever that session had learned after it.
+    #[test]
+    fn a_group_stream_leans_on_the_characters_the_history_misses() {
+        run(|| async {
+            let mut settings = test_settings();
+            settings.curriculum.level = 2;
+            settings.curriculum.num_groups = 40;
+            settings.curriculum.min_group_size = 1;
+            settings.curriculum.max_group_size = 1;
+            let mut h = Harness::with_settings(settings);
+            // Every K copied, every M and U missed, over and over.
+            let sessions: Vec<SessionResult> = (0..20)
+                .map(|_| {
+                    crate::testing::stored_session(
+                        "2026-09-01",
+                        &[("K", "K"), ("M", "E"), ("U", "E"), ("K", "K")],
+                    )
+                })
+                .collect();
+            assert!(sessions[0].usable_for_sampling(&h.ctx.settings.peek()));
+            let lease = claim(&h);
+            let heard = h.in_app(|| Signal::new(Vec::<String>::new()));
+            let _outcome = spawn_into(
+                &h,
+                loop_stream(lease, h.ctx.settings, sampler(&h, &sessions), heard),
+            );
+            h.pump();
+            assert!(h.run_until(240_000, |h| h.texts().len() >= 60).await);
+            h.app.player.release();
+            let ks = h.texts().iter().filter(|text| *text == "K").count();
+            // Drawn evenly, a third of them would be; from a blank slate this
+            // seed draws eighteen.
+            assert!(ks < 14, "{ks} of 60 were the character always copied");
         });
     }
 
@@ -678,23 +549,15 @@ mod tests {
     fn a_group_stream_gives_up_when_the_audio_fails() {
         run(|| async {
             let mut h = Harness::new();
-            let settings = test_settings();
-            let generation = h.app.takeover_audio(&settings).expect("player");
+            let lease = claim(&h);
             h.set_behaviour(Behaviour::RefuseToStart);
-            let app = h.app.clone();
-            let (settings_sig, toast) = (h.settings, h.toast);
             let heard = h.in_app(|| Signal::new(Vec::<String>::new()));
-            h.in_app(|| {
-                spawn(loop_stream_groups(
-                    app,
-                    generation,
-                    settings_sig,
-                    heard,
-                    toast,
-                ));
-            });
+            let outcome = spawn_into(
+                &h,
+                loop_stream(lease, h.ctx.settings, sampler(&h, &[]), heard),
+            );
             h.pump();
-            assert!(h.run_until(20_000, |h| h.toast().is_some()).await);
+            assert!(h.run_until(20_000, |_| outcome.borrow().is_some()).await);
             let played = h.texts().len();
             h.advance(5_000).await;
             assert_eq!(h.texts().len(), played, "the stream stopped");

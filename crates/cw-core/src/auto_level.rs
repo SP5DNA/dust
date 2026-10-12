@@ -1,6 +1,6 @@
 //! Automatic level adjustment after a session.
 
-use crate::session::SessionResult;
+use crate::session::{GroupSession, SessionResult};
 use crate::settings::{CharSetMode, LevelAxis, MixedAutoLevelAxis, TrainingSettings};
 
 /// Where one run of auto-level counters is kept.
@@ -241,6 +241,58 @@ pub fn auto_level_progress(
         alternating_mixed: mixed,
         next_mixed_axis,
     })
+}
+
+/// A session as it ends: scored, and what it does to the level.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Completion {
+    pub result: SessionResult,
+    /// The level the session moved, if its run earned a move.
+    pub change: Option<AutoLevelChange>,
+    /// The settings to go on with: the session's own, the change made.
+    pub settings: TrainingSettings,
+    /// What becomes of the auto-level counters.
+    pub counters: CountersUpdate,
+}
+
+/// What finishing a session does to the stored auto-level counters.
+#[derive(Clone, Debug, PartialEq)]
+pub enum CountersUpdate {
+    /// The run goes on: these are its counters now.
+    Keep(CountersKey, AutoLevelCounters),
+    /// The level moved: the runs it left and arrived at start afresh.
+    Clear([CountersKey; 2]),
+}
+
+/// Finish `session`: score it, count it towards its level's run, and move
+/// the level if the run has earned it.
+///
+/// `counters` are the run so far, for the level the session was at.
+/// `finished_at` is the wall time it ended at, and `date` the local day it
+/// counts towards.
+pub fn complete_session(
+    session: &GroupSession,
+    mut counters: AutoLevelCounters,
+    finished_at: u64,
+    date: String,
+) -> Completion {
+    let settings = session.settings();
+    let result = session.result(finished_at, date);
+    let change = evaluate_auto_level(&result, settings, &mut counters);
+    let mut next = settings.clone();
+    let counters = match &change {
+        Some(change) => {
+            apply_auto_level(&mut next, change);
+            CountersUpdate::Clear(change.counters_cleared.clone())
+        }
+        None => CountersUpdate::Keep(CountersKey::of(settings), counters),
+    };
+    Completion {
+        result,
+        change,
+        settings: next,
+        counters,
+    }
 }
 
 /// Move a level by `delta`, staying within `min..=max`. In unsigned
@@ -645,5 +697,98 @@ mod tests {
         let mut other = koch.clone();
         other.curriculum.custom_sequence = vec!['A', 'B', 'C'];
         assert_ne!(CountersKey::of(&koch), CountersKey::of(&other));
+    }
+
+    /// A session of `settings.curriculum.num_groups` groups, every one sent
+    /// as KM and answered `answer`.
+    fn played(settings: TrainingSettings, answer: &str) -> GroupSession {
+        use crate::machine::{GroupSource, SessionEffect, SessionEvent, SessionMachine};
+        use crate::session::{MonoMs, SessionId};
+
+        struct Km;
+        impl GroupSource for Km {
+            fn next_group(&mut self, _: &TrainingSettings) -> (String, u32) {
+                ("KM".into(), 1)
+            }
+            fn learn(&mut self, _: &CopyTally) {}
+        }
+
+        let groups = settings.curriculum.num_groups as usize;
+        let (mut machine, _) = SessionMachine::start(SessionId::new(1), MonoMs(0), settings, Km);
+        let mut now = MonoMs(0);
+        for index in 0..groups {
+            now = now.plus(1_000);
+            let ended = SessionEvent::PlaybackEnded {
+                index,
+                duration_sec: 0.5,
+                char_wpm: 20.0,
+                effective_wpm: 20.0,
+            };
+            let _ = machine.apply(ended, now);
+            let text = answer.to_string();
+            let _ = machine.apply(SessionEvent::Input { index, text }, now);
+            for effect in machine.apply(SessionEvent::Confirm, now) {
+                if let SessionEffect::StartTimer { id, .. } = effect {
+                    let _ = machine.apply(SessionEvent::TimerFired { id }, now);
+                }
+            }
+        }
+        machine.session().clone()
+    }
+
+    fn levelling(above_target: u32) -> TrainingSettings {
+        let mut settings = TrainingSettings::default();
+        settings.curriculum.char_set_mode = CharSetMode::Koch;
+        settings.curriculum.level = 1;
+        settings.curriculum.num_groups = 4;
+        settings.auto_level.auto_adjust_level = true;
+        settings.auto_level.auto_adjust_threshold = 50.0;
+        settings.auto_level.auto_adjust_above_threshold_count = above_target;
+        settings
+    }
+
+    #[test]
+    fn a_session_that_moves_nothing_adds_to_its_run() {
+        let settings = levelling(3);
+        let done = complete_session(
+            &played(settings.clone(), "KM"),
+            AutoLevelCounters { above: 1, below: 0 },
+            7,
+            "2026-09-01".into(),
+        );
+        assert_eq!(done.result.groups.len(), 4);
+        assert_eq!(
+            (done.result.timestamp, done.result.date.as_str()),
+            (7, "2026-09-01")
+        );
+        assert_eq!(done.change, None);
+        assert_eq!(done.settings, settings);
+        assert_eq!(
+            done.counters,
+            CountersUpdate::Keep(
+                CountersKey::of(&settings),
+                AutoLevelCounters { above: 2, below: 0 }
+            )
+        );
+    }
+
+    #[test]
+    fn a_run_that_earns_a_rise_moves_the_level_and_starts_afresh() {
+        let settings = levelling(2);
+        let done = complete_session(
+            &played(settings.clone(), "KM"),
+            AutoLevelCounters { above: 1, below: 0 },
+            7,
+            "2026-09-01".into(),
+        );
+        let change = done.change.expect("a rise");
+        assert_eq!((change.from, change.to), (1, 2));
+        assert_eq!(done.settings.curriculum.level, 2);
+        let mut after = settings.clone();
+        after.curriculum.level = 2;
+        assert_eq!(
+            done.counters,
+            CountersUpdate::Clear([CountersKey::of(&settings), CountersKey::of(&after)])
+        );
     }
 }

@@ -15,7 +15,9 @@ mod plan;
 mod station;
 
 pub use envelope::{EnvelopePoint, EnvelopeShape, envelope_shape};
-pub use pileup::{Interferer, Transmission, resolve_pileup};
+#[cfg(test)]
+pub(crate) use pileup::resolve_pileup;
+pub use pileup::{Interferer, Transmission};
 pub use plan::{
     DEFAULT_TARGET_GAIN, PlannedTransmission, PlaybackPlan, ToneEvent, plan_morse_playback_for,
     plan_transmission,
