@@ -7,6 +7,10 @@ use super::dsp::db_to_gain;
 /// What a receiver does with a loud crash: catches it, rather than letting it
 /// square off. Linear up to the knee, asymptotic to full scale above it — so
 /// the biggest static is loud without turning into a buzz.
+///
+/// The last thing before the speaker, once, on everything played together:
+/// the band, the Morse over it and the paddle's sidetone. Limited apart and
+/// then added, any two of them could still square off.
 pub fn soft_limit(x: f64) -> f64 {
     const KNEE: f64 = 0.7;
     let magnitude = x.abs();

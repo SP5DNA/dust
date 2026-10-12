@@ -1,55 +1,33 @@
 //! The player's bookkeeping, with no device attached.
 //!
-//! One stop flag and one epoch are shared by every send the player has ever
-//! made. The epoch is what keeps an old waiter from claiming a new send's
-//! ending: a send is only current while the epoch it was armed with is the
-//! player's own.
+//! The epoch keeps an old waiter from claiming a new send's ending; stopping
+//! the sound itself is the mixer's business, send by send.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use cw_core::TrainingSettings;
 use cw_core::band::BandKey;
 
+use crate::audio::epoch::{Epoch, Ticket};
 use crate::audio::{PlaybackSignal, WaitFlags};
 
 pub struct PlayerState {
-    stop: Arc<AtomicBool>,
-    epoch: Arc<AtomicU64>,
+    epoch: Epoch,
     /// What the band playing now was built from.
     band: Option<BandKey>,
-}
-
-/// A send that has been given the current epoch.
-#[derive(Clone)]
-pub struct ArmedSend {
-    stop: Arc<AtomicBool>,
-    epoch: Arc<AtomicU64>,
-    mine: u64,
-}
-
-impl ArmedSend {
-    pub fn stop_flag(&self) -> &Arc<AtomicBool> {
-        &self.stop
-    }
-
-    /// True once this send is no longer the player's current one.
-    pub fn superseded(&self) -> bool {
-        self.stop.load(Ordering::SeqCst) || self.epoch.load(Ordering::SeqCst) != self.mine
-    }
 }
 
 impl PlayerState {
     pub fn new() -> Self {
         Self {
-            stop: Arc::new(AtomicBool::new(false)),
-            epoch: Arc::new(AtomicU64::new(0)),
+            epoch: Epoch::default(),
             band: None,
         }
     }
 
     /// Whether the band has to be rebuilt for these settings. The fading is
-    /// not part of it: it is applied to the Morse as it plays.
+    /// not part of it: it is applied to the Morse, a send at a time.
     pub fn band_needs_rebuild(&self, settings: &TrainingSettings) -> bool {
         self.band != Some(BandKey::of(&settings.band))
     }
@@ -63,44 +41,31 @@ impl PlayerState {
     }
 
     /// Claim the audio for a new send.
-    pub fn arm(&mut self) -> ArmedSend {
-        let mine = self.epoch.fetch_add(1, Ordering::SeqCst) + 1;
-        self.stop.store(false, Ordering::SeqCst);
-        ArmedSend {
-            stop: Arc::clone(&self.stop),
-            epoch: Arc::clone(&self.epoch),
-            mine,
-        }
+    pub fn arm(&mut self) -> Ticket {
+        self.epoch.arm()
     }
 
-    /// A send that never got off the ground: retire its epoch so nothing can
+    /// Retire the current send, stopped or never started, so nothing can
     /// mistake it for the current one.
-    pub fn note_start_failed(&mut self) {
-        self.epoch.fetch_add(1, Ordering::SeqCst);
-    }
-
-    pub fn stop(&mut self) {
-        self.epoch.fetch_add(1, Ordering::SeqCst);
-        self.stop.store(true, Ordering::SeqCst);
+    pub fn retire(&mut self) {
+        self.epoch.bump();
     }
 }
 
-/// What the tone stream tells a waiter.
+/// What the stream tells a waiter.
 pub struct ToneSignal {
-    armed: ArmedSend,
+    ticket: Ticket,
     finished: Arc<AtomicBool>,
-    /// The device's word that the stream itself broke.
+    /// The word of the stream the send was started on that it broke. A send
+    /// is never moved to another stream: one that replaces a broken stream
+    /// may run at another rate.
     stream_failed: Arc<AtomicBool>,
 }
 
 impl ToneSignal {
-    pub fn new(
-        armed: ArmedSend,
-        finished: Arc<AtomicBool>,
-        stream_failed: Arc<AtomicBool>,
-    ) -> Self {
+    pub fn new(ticket: Ticket, finished: Arc<AtomicBool>, stream_failed: Arc<AtomicBool>) -> Self {
         Self {
-            armed,
+            ticket,
             finished,
             stream_failed,
         }
@@ -110,16 +75,16 @@ impl ToneSignal {
 impl PlaybackSignal for ToneSignal {
     fn poll(&self) -> WaitFlags {
         WaitFlags {
-            cancelled: self.armed.superseded(),
-            finished: self.finished.load(Ordering::SeqCst),
+            cancelled: self.ticket.is_cancelled(),
+            finished: self.finished.load(Ordering::Acquire),
             // A broken stream never calls back again, so the send would never
             // finish; saying so lets the session rebuild the player.
-            failed: self.stream_failed.load(Ordering::SeqCst),
+            failed: self.stream_failed.load(Ordering::Acquire),
             // The stream either calls back or it does not; there is nothing
             // here that parks it the way a browser parks a hidden tab.
             suspended: false,
-            // cpal gives no clock of its own: the callback running out of
-            // samples is the only word on when a send is over.
+            // cpal gives no clock of its own: the send having been heard to
+            // its end is the only word on when it is over.
             played_ms: None,
         }
     }
@@ -128,45 +93,6 @@ impl PlaybackSignal for ToneSignal {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_send_is_current_until_something_else_claims_the_audio() {
-        let mut state = PlayerState::new();
-        let first = state.arm();
-        assert!(!first.superseded());
-
-        let second = state.arm();
-        assert!(
-            first.superseded(),
-            "the first send should have been retired"
-        );
-        assert!(!second.superseded());
-
-        state.stop();
-        assert!(second.superseded());
-    }
-
-    #[test]
-    fn arming_clears_the_stop_flag_the_last_stop_left_behind() {
-        let mut state = PlayerState::new();
-        let first = state.arm();
-        state.stop();
-        assert!(first.stop_flag().load(Ordering::SeqCst));
-
-        let second = state.arm();
-        assert!(!second.stop_flag().load(Ordering::SeqCst));
-        // The stopped send stays retired even though the flag was cleared.
-        assert!(first.superseded());
-        assert!(!second.superseded());
-    }
-
-    #[test]
-    fn a_send_that_never_starts_is_retired_too() {
-        let mut state = PlayerState::new();
-        let armed = state.arm();
-        state.note_start_failed();
-        assert!(armed.superseded());
-    }
 
     #[test]
     fn the_background_is_rebuilt_only_when_its_settings_change() {
@@ -185,8 +111,9 @@ mod tests {
         faster.playback.char_wpm_min = 40.0;
         assert!(!state.band_needs_rebuild(&faster));
 
-        // Nor is the fading: it plays on the Morse, live, and a new band
-        // would only be a new draw of stations and static for nothing.
+        // Nor is the fading: it plays on the Morse, a send at a time, and a
+        // new band would only be a new draw of stations and static for
+        // nothing.
         let mut fading = settings.clone();
         fading.band.qsb_depth = 0.9;
         fading.band.qsb_rate_hz = 0.5;
@@ -216,16 +143,16 @@ mod tests {
             }
         );
 
-        finished.store(true, Ordering::SeqCst);
+        finished.store(true, Ordering::Release);
         assert!(signal.poll().finished);
 
-        broken.store(true, Ordering::SeqCst);
+        broken.store(true, Ordering::Release);
         assert!(
             signal.poll().failed,
             "a broken device has to reach the waiter"
         );
 
-        state.stop();
+        state.retire();
         assert!(signal.poll().cancelled);
     }
 }

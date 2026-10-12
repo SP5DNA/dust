@@ -242,10 +242,11 @@ fn amplitude_to_db(amplitude: f64) -> f64 {
 /// [`AGC_LOOKAHEAD_SEC`] late ([`Agc::process`]) so the ceiling is already
 /// down when the crest it saw coming is played.
 ///
-/// The detector is the power of whatever is loudest — a sample of the band,
-/// or the send's level — smoothed over a few milliseconds and read as the
-/// amplitude of a steady tone of the same power. A station keyed at amplitude
-/// `a` reads `a` whichever way it arrives. Whether it has *stayed* above the
+/// The detector is the power of everything reaching it — the band and the
+/// send playing over it, sample by sample, as a real receiver's AGC hears
+/// them — smoothed over a few milliseconds and read as the amplitude of a
+/// steady tone of the same power. A station keyed at amplitude `a` reads `a`,
+/// whether it is the one being copied or one of the band's own. Whether it has *stayed* above the
 /// knee is judged on the peaks of the last few milliseconds as well, which
 /// fall away as soon as a sound has gone however loud it was: the smoothed
 /// level takes longer to forget a loud stroke than a stroke lasts, and would
@@ -327,36 +328,37 @@ impl Agc {
         !self.knee.is_finite()
     }
 
-    /// Feed one sample of the band as the receiver hears it, and the peak of
-    /// the send playing over it; get back the band to play, at the gain the
-    /// receiver is riding at and [`AGC_LOOKAHEAD_SEC`] late. Switched off, the
-    /// band goes straight through.
+    /// Feed one sample of the band as the receiver hears it, and one of the
+    /// send playing over it, through the same filter; get back the band to
+    /// play, at the gain the receiver is riding at and [`AGC_LOOKAHEAD_SEC`]
+    /// late. The send is played at [`Agc::gain`]. Switched off, the band goes
+    /// straight through.
     ///
     /// Only the ceiling gets the benefit of the look-ahead. The law's gain
     /// waits in the delay with the sample it was worked out on, so a crash's
     /// first crest still gets through before the AGC catches it — the crack a
     /// receiver's AGC is too slow for, and most of what makes static sound
     /// like static.
-    pub fn process(&mut self, heard: f64, send_peak: f64) -> f64 {
+    pub fn process(&mut self, heard: f64, send: f64) -> f64 {
         if self.is_off() {
             return heard;
         }
-        self.next_gain(heard, send_peak);
+        self.next_gain(heard + send);
         let ridden = heard * self.limited.min(self.held);
         let due = std::mem::replace(&mut self.delay[self.delay_at], ridden);
         self.delay_at = (self.delay_at + 1) % self.delay.len();
         due * self.ceiling
     }
 
-    /// Feed one sample of the band as the receiver hears it, and the peak of
-    /// the send playing over it; get back the gain both should ride at.
-    pub fn next_gain(&mut self, heard: f64, send_peak: f64) -> f64 {
+    /// Feed one sample of everything reaching the AGC — the band and the send
+    /// over it, together; get back the gain both should ride at.
+    pub fn next_gain(&mut self, sample: f64) -> f64 {
         if self.is_off() {
             return 1.0;
         }
         // A sample of a tone of amplitude a carries a²/2 of power on average,
-        // so the band's samples count double; the send arrives as its peak.
-        let input = (2.0 * heard * heard).max(send_peak * send_peak);
+        // so samples count double: a steady tone reads as its amplitude.
+        let input = 2.0 * sample * sample;
         let input = if input.is_finite() { input } else { 0.0 };
         self.power = input + (self.power - input) * self.smoothing;
         // In silence the average dies away towards zero for ever; brought to
@@ -379,7 +381,9 @@ impl Agc {
 
         // The peaks of the last few milliseconds, for judging whether
         // anything is still there.
-        self.peak = self.peak.max(heard.abs()).max(send_peak);
+        if sample.is_finite() {
+            self.peak = self.peak.max(sample.abs());
+        }
         self.peak_left -= 1;
         let recent = self.peak.max(self.last_peak);
         if self.peak_left == 0 {
@@ -433,6 +437,26 @@ impl Agc {
         self.gain
     }
 
+    /// Pick up where `previous` left off: the same detector reading, the
+    /// same hang, the same gain. A band rebuilt under a station would
+    /// otherwise open its gain wide and duck the station afresh — a swell on
+    /// every rebuild, and a flutter while a slider moves. From here it rides
+    /// to its own knee at its own attack and release.
+    pub fn carry_on_from(&mut self, previous: &Agc) {
+        if self.is_off() || previous.is_off() {
+            return;
+        }
+        self.power = previous.power;
+        self.peak = previous.peak;
+        self.last_peak = previous.last_peak;
+        self.above = previous.above;
+        self.hang_left = previous.hang_left.min(self.hang);
+        self.held = previous.held;
+        self.limited = previous.limited;
+        self.ceiling = previous.ceiling;
+        self.gain = previous.gain;
+    }
+
     /// The static law as a gain, for a detector reading of `level`: nothing
     /// at or below the knee, [`AGC_SLOPE`] decibels down for every decibel
     /// above it, never more than [`AGC_MAX_DUCK_DB`].
@@ -472,9 +496,6 @@ mod tests {
     use crate::timing::{StationVoice, plan_morse_playback_for};
 
     const SR: u32 = 48_000;
-    /// The native player hands the send's level to the band a callback at a
-    /// time; this is a typical callback.
-    const BUFFER: usize = 512;
     const WPM: f64 = 22.0;
 
     fn db(gain: f64) -> f64 {
@@ -560,26 +581,17 @@ mod tests {
         Keyed { samples, downs }
     }
 
-    /// Play the band under a send the way the native player's callback does:
-    /// the send's loudest sample of each buffer reaches the AGC for the next
-    /// one. Returns the background and the gain, sample by sample.
+    /// Play the band under a send the way the native player does: the AGC
+    /// hears the two together, sample by sample. Returns the background and
+    /// the gain, sample by sample.
     fn ride(settings: &TrainingSettings, send: &[f32], seconds: f64) -> (Vec<f32>, Vec<f64>) {
         let n = (seconds * f64::from(SR)) as usize;
         let mut mixer = BandMixer::new(SR, settings, 0xA11CE);
         let (mut band, mut gain) = (vec![0.0f32; n], vec![0.0f64; n]);
-        let mut loudest = 0.0f32;
-        for start in (0..n).step_by(BUFFER) {
-            let end = (start + BUFFER).min(n);
-            mixer.note_send_level(f64::from(loudest));
-            for i in start..end {
-                band[i] = mixer.next_background();
-                gain[i] = mixer.agc_gain();
-            }
-            loudest = send
-                .get(start.min(send.len())..end.min(send.len()))
-                .unwrap_or(&[])
-                .iter()
-                .fold(0.0, |a, s| a.max(s.abs()));
+        for i in 0..n {
+            let received = mixer.next(send.get(i).copied().map_or(0.0, f64::from));
+            band[i] = received.band as f32;
+            gain[i] = received.gain;
         }
         (band, gain)
     }
@@ -622,13 +634,12 @@ mod tests {
         for over_db in [3.0, 10.0, 20.0, 30.0] {
             let amplitude = knee * 10f64.powf(over_db / 20.0);
             let (mut heard, mut sent) = (Agc::new(SR, knee), Agc::new(SR, knee));
-            let (mut in_band, mut as_send) = (1.0, 1.0);
             for i in 0..SR / 2 {
-                let phase = TAU * 600.0 * f64::from(i) / f64::from(SR);
-                in_band = heard.next_gain(amplitude * phase.sin(), 0.0);
-                as_send = sent.next_gain(0.0, amplitude);
+                let tone = amplitude * (TAU * 600.0 * f64::from(i) / f64::from(SR)).sin();
+                heard.process(tone, 0.0);
+                sent.process(0.0, tone);
             }
-            for gain in [in_band, as_send] {
+            for gain in [heard.gain(), sent.gain()] {
                 assert!(
                     (db(gain) - agc_law_db(over_db)).abs() < 0.3,
                     "{over_db} dB over the knee: {:.2} dB, law {:.2}",
@@ -784,7 +795,7 @@ mod tests {
             for i in 0..ms(1_500.0) {
                 let kick = if hits.contains(&i) { 10.0 * unit } else { 0.0 };
                 let heard = receiver.process(floor.next_sample() + kick);
-                gains.push(agc.next_gain(heard, 0.0));
+                gains.push(agc.next_gain(heard));
             }
             assert!(
                 gains[..ms(1_000.0)].iter().all(|g| *g == 1.0),
@@ -904,8 +915,7 @@ mod tests {
                 .map(|_| {
                     let mut sum = 0.0;
                     for _ in 0..frame {
-                        mixer.next_background();
-                        sum += mixer.agc_gain();
+                        sum += mixer.next(0.0).gain;
                     }
                     sum / frame as f64
                 })
@@ -995,7 +1005,7 @@ mod tests {
         assert!(gain.iter().all(|g| *g == 1.0));
         let mut agc = Agc::off();
         assert!(agc.is_off());
-        assert_eq!(agc.next_gain(10.0, 10.0), 1.0);
+        assert_eq!(agc.next_gain(10.0), 1.0);
     }
 
     /// A crash has to duck the band — the AGC catching it within a couple of
@@ -1010,7 +1020,7 @@ mod tests {
             |amplitude: f64, i: u32| amplitude * (TAU * 600.0 * f64::from(i) / f64::from(SR)).sin();
         let mut steady = 1.0;
         for i in 0..SR {
-            steady = agc.next_gain(tone(0.05, i), 0.0);
+            steady = agc.next_gain(tone(0.05, i));
         }
         assert!(
             steady == 1.0,
@@ -1019,7 +1029,7 @@ mod tests {
 
         let mut ducked = 1.0_f64;
         for i in 0..SR / 100 {
-            ducked = ducked.min(agc.next_gain(tone(1.0, i), 0.0));
+            ducked = ducked.min(agc.next_gain(tone(1.0, i)));
         }
         assert!(
             ducked < 0.5,
@@ -1028,7 +1038,7 @@ mod tests {
 
         let mut back = 0.0;
         for i in 0..SR / 10 {
-            back = agc.next_gain(tone(0.05, i), 0.0);
+            back = agc.next_gain(tone(0.05, i));
         }
         assert!(
             back > 0.9,
@@ -1045,10 +1055,10 @@ mod tests {
         let mut agc = Agc::new(SR, 0.1);
         for i in 0..SR / 10 {
             let phase = TAU * 600.0 * f64::from(i) / f64::from(SR);
-            agc.next_gain(0.5 * phase.sin(), 0.0);
+            agc.next_gain(0.5 * phase.sin());
         }
         for n in 0..SR * 10 {
-            agc.next_gain(0.0, 0.0);
+            agc.next_gain(0.0);
             assert!(
                 !agc.power.is_subnormal(),
                 "the detector went subnormal {n} samples into the silence"

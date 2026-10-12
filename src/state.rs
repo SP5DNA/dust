@@ -79,7 +79,7 @@ impl AppState {
         }
         if let Some(player) = slot.as_mut() {
             player.resume_from_gesture();
-            player.apply_band(settings)?;
+            player.apply_band(settings);
             player.set_live_tone(
                 false,
                 settings.side_tone_center(),
@@ -156,7 +156,7 @@ impl AppState {
         {
             // A slider move has no one to tell. A band that cannot open
             // is reported by the next send, which rebuilds the player.
-            let _ = player.apply_band(settings);
+            player.apply_band(settings);
         }
     }
 

@@ -1,12 +1,11 @@
-//! What a player has to rebuild when the settings move, as values it can
+//! What a player has to rebuild when the settings move, as a value it can
 //! compare.
 //!
-//! The band and the fading are separate things to a player. The band — its
-//! noise, its static, its stations, the receiver they are heard through and
-//! the AGC riding them — is a running generator, built at random: building it
-//! again is a new band, and costs the knee's measurement. The fading is
-//! applied to the Morse alone, and a player can change it as it plays. So
-//! each has its own key, and moving the fading never touches the band.
+//! The band — its noise, its static, its stations, the receiver they are
+//! heard through and the AGC riding them — is a running generator, built at
+//! random: building it again is a new band, and costs the knee's measurement.
+//! The fading is not part of it: it is applied to the Morse alone, a send at a
+//! time ([`super::Qsb`]), so moving the fading never touches the band.
 
 use super::calibration::{noise_level, qrn_level};
 use super::memo::Exact;
@@ -50,23 +49,10 @@ impl BandKey {
     }
 }
 
-/// The fading on the Morse, as heard: none at all when it is switched off or
-/// has no depth, whatever its other controls say.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct QsbKey(Option<(Exact, Exact)>);
-
-impl QsbKey {
-    pub fn of(band: &BandSettings) -> Self {
-        Self(
-            (band.qsb_enabled && band.qsb_depth > 0.0)
-                .then_some((Exact(band.qsb_depth), Exact(band.qsb_rate_hz))),
-        )
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::band::Qsb;
     use crate::settings::TrainingSettings;
 
     /// Every setting the band is built from moves its key, and nothing else
@@ -77,7 +63,7 @@ mod tests {
         let key = |edit: fn(&mut TrainingSettings)| {
             let mut changed = base.clone();
             edit(&mut changed);
-            (BandKey::of(&changed.band), QsbKey::of(&changed.band))
+            (BandKey::of(&changed.band), Qsb::of(&changed.band))
         };
         let (band, qsb) = key(|_| {});
         let mut seen = vec![band];
@@ -139,15 +125,15 @@ mod tests {
             qsb_enabled: false,
             ..BandSettings::default()
         };
-        let (band, qsb) = (BandKey::of(&quiet), QsbKey::of(&quiet));
+        let (band, qsb) = (BandKey::of(&quiet), Qsb::of(&quiet));
         quiet.noise_level = 0.9;
         quiet.qrn_level = 0.9;
         quiet.volume_min = 0.2;
         quiet.qsb_depth = 0.9;
         quiet.qsb_rate_hz = 1.0;
-        assert_eq!((BandKey::of(&quiet), QsbKey::of(&quiet)), (band, qsb));
+        assert_eq!((BandKey::of(&quiet), Qsb::of(&quiet)), (band, qsb));
         quiet.qsb_enabled = true;
         quiet.qsb_depth = 0.0;
-        assert_eq!(QsbKey::of(&quiet), qsb);
+        assert_eq!(Qsb::of(&quiet), qsb);
     }
 }
