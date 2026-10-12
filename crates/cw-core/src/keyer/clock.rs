@@ -132,6 +132,26 @@ impl Keyer {
         self.output(was_sounding, letter)
     }
 
+    /// End the letter now, without waiting out its letter space: a letter
+    /// keyed in full is decoded at once. One still being keyed — an element
+    /// sounding, a paddle down, or an element owed — is left as it is.
+    ///
+    /// For a deadline. The answer window closing is the end of the letter,
+    /// however recently its last element ended.
+    pub fn finish_letter(&mut self) -> KeyerOutput {
+        let keyed_in_full = match self.phase {
+            Phase::Gap { .. } => true,
+            Phase::Space { .. } => !self.paddles.any_held() && !self.paddles.any_remembered(),
+            Phase::Idle | Phase::Contact | Phase::Element { .. } => false,
+        };
+        if !keyed_in_full {
+            return self.output(self.sounding(), None);
+        }
+        self.phase = Phase::Idle;
+        let letter = self.decoder.take_letter();
+        self.output(false, letter)
+    }
+
     /// Drop everything — the element sounding, the paddles held, the letter
     /// half keyed — and fall silent.
     pub fn stop(&mut self) -> KeyerOutput {
@@ -293,6 +313,67 @@ mod tests {
         assert_eq!(
             host.heard(),
             ["0 on", "50 off", "100 on", "300 off", "420 A"]
+        );
+    }
+
+    /// A deadline ends a letter keyed in full at once, letter space or not,
+    /// and the letter is not heard a second time when the space runs out.
+    #[test]
+    fn a_letter_keyed_in_full_can_be_finished_early() {
+        // In the letter space: the dah ended at 180, its space at 240.
+        let mut host = Host::new(KeyerMode::IambicA);
+        host.press(Dah, 0);
+        host.release(Dah, 100);
+        host.run_to(250);
+        let out = host.keyer.finish_letter();
+        assert_eq!(out.letter, Some('T'));
+        assert_eq!(out.wake_at, None);
+        host.act(250, out);
+        assert_eq!(host.heard(), ["0 on", "180 off", "250 T"]);
+
+        // In the space after its last element, with nothing more to send.
+        let mut host = Host::new(KeyerMode::IambicA);
+        host.press(Dit, 0);
+        host.release(Dit, 30);
+        host.run_to(90);
+        assert_eq!(host.keyer.finish_letter().letter, Some('E'));
+    }
+
+    /// A letter still being keyed is not cut short: what it would have been
+    /// is still to come.
+    #[test]
+    fn a_letter_still_being_keyed_is_not_finished() {
+        // An element sounding.
+        let mut host = Host::new(KeyerMode::IambicA);
+        host.press(Dah, 0);
+        host.run_to(100);
+        assert_eq!(host.keyer.finish_letter().letter, None);
+        host.release(Dah, 100);
+        assert_eq!(host.heard(), ["0 on", "180 off", "360 T"]);
+
+        // A paddle still down, between elements.
+        let mut host = Host::new(KeyerMode::IambicA);
+        host.press(Dit, 0);
+        host.run_to(90);
+        assert_eq!(host.keyer.finish_letter().letter, None);
+
+        // An element owed: the other paddle tapped while the dah sounded.
+        let mut host = Host::new(KeyerMode::IambicA);
+        host.press(Dah, 0);
+        host.press(Dit, 50);
+        host.release(Dit, 60);
+        host.release(Dah, 100);
+        host.run_to(200);
+        assert_eq!(host.keyer.finish_letter().letter, None);
+        assert_eq!(host.heard().last().map(String::as_str), Some("480 N"));
+
+        // A straight key's contact still closed, and nothing keyed at all.
+        let mut host = Host::new(KeyerMode::Straight);
+        host.press(Dit, 0);
+        assert_eq!(host.keyer.finish_letter().letter, None);
+        assert_eq!(
+            Keyer::new(KeyerMode::IambicA, WPM).finish_letter(),
+            KeyerOutput::default()
         );
     }
 

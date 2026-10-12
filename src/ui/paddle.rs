@@ -264,6 +264,13 @@ impl PaddleKeys {
         self.act(out);
     }
 
+    /// End the letter keyed into the answer box now, if it is keyed in full,
+    /// rather than once its letter space has run out.
+    pub fn finish_letter(mut self) {
+        let out = self.keyer.write().finish_letter();
+        self.act(out);
+    }
+
     /// Drop whatever is half keyed and fall silent: a new group, a new screen.
     pub fn stop(mut self) {
         let out = self.keyer.write().stop();

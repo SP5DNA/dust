@@ -13,7 +13,7 @@ use crate::ui::widgets::{
 /// Incomplete answers wait this long before the session sees them. Short
 /// enough that a pause still lands well before auto-confirm would have cared,
 /// long enough that a burst of keys is one Input, not one per character.
-const INPUT_COMMIT_DEBOUNCE_MS: u32 = 48;
+pub(crate) const INPUT_COMMIT_DEBOUNCE_MS: u32 = 48;
 
 const _: () = assert!(INPUT_COMMIT_DEBOUNCE_MS < cw_core::AUTO_CONFIRM_DELAY_MS);
 
@@ -88,21 +88,16 @@ impl AnswerDraft {
     }
 
     /// The box for `idx` now holds `text`. The session is handed it at once
-    /// when its length matches the group's, or matched what it was handed
-    /// last — a box backed off a full answer must stop auto-confirm straight
-    /// away — and otherwise once typing has paused.
+    /// when its length matches the group's — auto-confirm starts from there
+    /// — and otherwise once typing has paused, or sooner if anything happens
+    /// to the session first.
     fn edit(mut self, idx: usize, text: String, sent: &str) {
-        let full_before = self
-            .outbox
-            .handed_for(idx, |handed| answer_length_matches(sent, handed));
-        let full_now = answer_length_matches(sent, &text);
+        let full = answer_length_matches(sent, &text);
         self.at.set(Some(idx));
         self.text.set(text.clone());
+        self.outbox.hold(idx, text);
         let epoch = self.cancel_pending();
-        if !self.outbox.hold(idx, text) {
-            return;
-        }
-        if full_before || full_now {
+        if full {
             self.hand_over();
             return;
         }
@@ -130,8 +125,10 @@ impl AnswerDraft {
         }
     }
 
-    /// A new group is up, or this one is over: nothing waiting goes out, and
-    /// a finished group's draft is gone.
+    /// A new group is up, or this one is over: the pause has nothing left to
+    /// wait for, and a finished group's draft is gone. Whatever was typed is
+    /// with the session already — only the session moves a group on, and it
+    /// takes what is waiting first.
     fn settle(mut self, finished: bool) {
         self.cancel_pending();
         if finished {
@@ -320,6 +317,9 @@ pub fn TrainingView(
     keys.use_answer_box(can_paddle, move |letter: char| {
         draft.push(current, letter, &sent_now);
     });
+    // A letter keyed in full is in the answer when it closes, even with its
+    // letter space still running out.
+    answer.use_finish(move || keys.finish_letter());
     use_effect(use_reactive!(|current, current_done| {
         let _ = current;
         draft.settle(current_done);

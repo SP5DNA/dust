@@ -70,9 +70,9 @@ impl LiveSession {
 /// nothing that moves the session on can overtake a keystroke, however close
 /// the two land.
 ///
-/// It also remembers what the session was last handed, which is what tells
-/// the box whether a change is news, and whether the answer had already
-/// reached full length.
+/// Before anything closes the answer, the box is also asked to finish what
+/// is entered in full but not in it yet: a letter the paddles have keyed,
+/// still waiting out its letter space.
 #[derive(Clone, Copy, PartialEq)]
 pub struct AnswerOutbox(CopyValue<Outbox>);
 
@@ -80,8 +80,8 @@ pub struct AnswerOutbox(CopyValue<Outbox>);
 struct Outbox {
     /// Typed into the box for this group, and not handed over yet.
     waiting: Option<(usize, String)>,
-    /// What the session was handed last, and for which group.
-    handed: Option<(usize, String)>,
+    /// Puts into the box whatever is entered in full but not there yet.
+    finish: Option<Callback>,
 }
 
 impl AnswerOutbox {
@@ -89,47 +89,46 @@ impl AnswerOutbox {
         Self(CopyValue::new(Outbox::default()))
     }
 
-    /// Group `index`'s box now holds `text`. Says whether that is news to
-    /// the session: the text it was handed last is not, and nothing waits.
-    pub fn hold(mut self, index: usize, text: String) -> bool {
-        let mut outbox = self.0.write();
-        let news = !matches!(&outbox.handed, Some((at, handed)) if *at == index && *handed == text);
-        outbox.waiting = news.then_some((index, text));
-        news
+    /// Group `index`'s box now holds `text`, not handed over yet.
+    pub fn hold(mut self, index: usize, text: String) {
+        self.0.write().waiting = Some((index, text));
     }
 
     /// Whatever is waiting, now handed over.
     pub fn take(mut self) -> Option<(usize, String)> {
-        let mut outbox = self.0.write();
-        let waiting = outbox.waiting.take()?;
-        outbox.handed = Some(waiting.clone());
-        Some(waiting)
+        self.0.write().waiting.take()
     }
 
-    /// Whether what the session was last handed for group `index` passes
-    /// `test`.
-    pub fn handed_for(self, index: usize, test: impl FnOnce(&str) -> bool) -> bool {
-        self.0
-            .peek()
-            .handed
-            .as_ref()
-            .is_some_and(|(at, text)| *at == index && test(text))
+    /// While the calling component is mounted, `finish` is what puts into
+    /// the box whatever is entered in full but not there yet.
+    pub fn use_finish(self, finish: impl FnMut() + 'static) {
+        let mut finish = finish;
+        let finish = use_callback(move |()| finish());
+        use_hook(move || self.set_finish(Some(finish)));
+        use_drop(move || {
+            // Only its own: a box that has already taken over stays.
+            if self.0.peek().finish == Some(finish) {
+                self.set_finish(None);
+            }
+        });
     }
 
-    /// What has to reach the machine ahead of `event`: whatever is waiting,
-    /// unless `event` is that box's own newer word on what it holds.
-    fn take_before(mut self, event: &SessionEvent) -> Option<(usize, String)> {
-        let mut waiting = self.take();
-        if let SessionEvent::Input { index, text } = event {
-            waiting = waiting.filter(|(at, _)| at != index);
-            self.0.write().handed = Some((*index, text.clone()));
+    fn set_finish(mut self, finish: Option<Callback>) {
+        self.0.write().finish = finish;
+    }
+
+    /// Have the box finish what is entered in full. It may hand the session
+    /// an answer of its own on the way.
+    fn finish(self) {
+        let finish = self.0.peek().finish;
+        if let Some(finish) = finish {
+            finish.call(());
         }
-        waiting
     }
 
     /// A new session: nothing typed for the last one carries over.
     fn clear(mut self) {
-        *self.0.write() = Outbox::default();
+        self.0.write().waiting = None;
     }
 }
 
@@ -220,6 +219,15 @@ pub fn send_event(ctx: AppCtx, event: SessionEvent) {
 fn dispatch(ctx: AppCtx, lease: &Lease, event: SessionEvent) {
     let mut runtime = ctx.runtime;
     let app = ctx.app();
+    // What is entered in full by the time the answer closes is part of it,
+    // whatever is still settling. Finishing it can hand the session an answer
+    // of its own, so it comes before the session is borrowed.
+    let closes = app.session.borrow().as_ref().is_some_and(|live| {
+        live.lease.is(lease) && lease.is_current() && live.machine.closes_answer(&event)
+    });
+    if closes {
+        ctx.answer.finish();
+    }
     let effects = {
         let mut slot = app.session.borrow_mut();
         let Some(live) = slot
@@ -231,12 +239,9 @@ fn dispatch(ctx: AppCtx, lease: &Lease, event: SessionEvent) {
         let now = MonoMs(mono_ms());
         // Typing still waiting out the box's pause came before this event,
         // so the machine hears it first.
-        let mut effects = ctx
-            .answer
-            .take_before(&event)
-            .map_or_else(Vec::new, |(index, text)| {
-                live.machine.apply(SessionEvent::Input { index, text }, now)
-            });
+        let mut effects = ctx.answer.take().map_or_else(Vec::new, |(index, text)| {
+            live.machine.apply(SessionEvent::Input { index, text }, now)
+        });
         effects.extend(live.machine.apply(event, now));
         // Much of what arrives changes nothing — a key while the box is
         // locked, a timer the machine has forgotten — and publishing it
@@ -386,6 +391,8 @@ mod tests {
     use cw_core::CharSetMode;
     use cw_core::SessionEffect;
     use cw_core::SessionPhase;
+    use std::cell::Cell;
+    use std::rc::Rc;
 
     impl LiveSession {
         /// The session's hold on the audio, for a test to end or to stop.
@@ -466,7 +473,7 @@ mod tests {
             assert!(h.run_until(4_000, |h| h.awaiting_answer() == Some(0)).await);
             // Typed, and not yet handed over — nothing will hand it over but
             // the runtime.
-            assert!(h.ctx.answer.hold(0, "K".into()));
+            h.ctx.answer.hold(0, "K".into());
             assert!(h.run_until(4_000, |h| h.texts().len() == 2).await);
             assert_eq!(input_of(&h, 0).as_deref(), Some("K"));
             let confirmed = h.ctx.runtime.peek().as_ref().map(|s| s.view().confirmed);
@@ -483,7 +490,7 @@ mod tests {
                 let mut h = Harness::new();
                 h.start_training();
                 assert!(h.run_until(4_000, |h| h.awaiting_answer() == Some(0)).await);
-                assert!(h.ctx.answer.hold(0, "K".into()));
+                h.ctx.answer.hold(0, "K".into());
                 h.send(event.clone());
                 if event == SessionEvent::FinishNow {
                     let result = h.ctx.result.peek().clone().expect("{event:?} kept it");
@@ -492,23 +499,6 @@ mod tests {
                     assert_eq!(input_of(&h, 0).as_deref(), Some("K"), "{event:?}");
                 }
             }
-        });
-    }
-
-    /// The box's own word on what it holds is newer than what was waiting.
-    #[test]
-    fn an_input_stands_for_what_was_waiting_for_its_box() {
-        run(|| async {
-            let mut h = Harness::new();
-            h.start_training();
-            assert!(h.run_until(4_000, |h| h.awaiting_answer() == Some(0)).await);
-            assert!(h.ctx.answer.hold(0, "K".into()));
-            h.type_answer(0, "Q");
-            assert_eq!(input_of(&h, 0).as_deref(), Some("Q"));
-            // And the session has been handed "Q": holding it again is no news.
-            assert!(!h.ctx.answer.hold(0, "Q".into()));
-            h.send(SessionEvent::Confirm);
-            assert_eq!(input_of(&h, 0).as_deref(), Some("Q"));
         });
     }
 
@@ -525,12 +515,41 @@ mod tests {
             h.send(SessionEvent::Abort);
             assert_eq!(h.screen(), Screen::Home);
             // The closing box takes one more key.
-            assert!(h.ctx.answer.hold(0, "K".into()));
+            h.ctx.answer.hold(0, "K".into());
             h.start_training();
             assert!(h.run_until(4_000, |h| h.awaiting_answer() == Some(0)).await);
             assert_eq!(input_of(&h, 0).as_deref(), Some(""));
-            // Nor does what the last session was handed decide what is news.
-            assert!(h.ctx.answer.hold(0, "K".into()));
+        });
+    }
+
+    /// Before the answer closes — and only then — the box is asked to finish
+    /// what is entered in full, and what it finishes is in the answer. A
+    /// send ending, or the gap between two sends, leaves the answer open:
+    /// finishing a paddle letter there would cut one being keyed in two.
+    #[test]
+    fn the_box_finishes_its_entry_only_as_the_answer_closes() {
+        run(|| async {
+            let mut settings = test_settings();
+            settings.playback.group_timeout = 1.0;
+            settings.playback.group_repeat_min = 2;
+            settings.playback.group_repeat_max = 2;
+            let mut h = Harness::with_settings(settings);
+            let asked = Rc::new(Cell::new(0));
+            let answer = h.ctx.answer;
+            let finish = h.in_app(|| {
+                let asked = Rc::clone(&asked);
+                Callback::new(move |()| {
+                    asked.set(asked.get() + 1);
+                    answer.hold(0, "T".into());
+                })
+            });
+            answer.set_finish(Some(finish));
+            h.start_training();
+            assert!(h.run_until(8_000, |h| h.awaiting_answer() == Some(0)).await);
+            assert_eq!(asked.get(), 0, "two sends and a gap closed nothing");
+            assert!(h.run_until(4_000, |h| h.texts().len() == 3).await);
+            assert_eq!(asked.get(), 1);
+            assert_eq!(input_of(&h, 0).as_deref(), Some("T"));
         });
     }
 

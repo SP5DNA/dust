@@ -198,6 +198,12 @@ impl PaddleKeyer {
         self.dit_held || self.dah_held
     }
 
+    /// Whether an element is owed: a paddle tapped while another was
+    /// sounding, which the keyer sends next.
+    pub fn any_remembered(&self) -> bool {
+        self.dit_mem || self.dah_mem
+    }
+
     fn held(&self, paddle: Paddle) -> bool {
         match paddle {
             Paddle::Dit => self.dit_held,

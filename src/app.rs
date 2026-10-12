@@ -300,7 +300,9 @@ fn toggle_fullscreen() {
 mod ui_tests {
     use crate::persist::Store;
     use crate::testing::{Ui, run, stored_session, test_settings};
+    use crate::ui::training::INPUT_COMMIT_DEBOUNCE_MS;
     use cw_core::{CharSetMode, PracticeWindow, TrainingSettings};
+    use dioxus::prelude::{Code, Key};
 
     fn short_session() -> TrainingSettings {
         let mut settings = test_settings();
@@ -565,13 +567,44 @@ mod ui_tests {
             ui.advance(970).await;
             assert_eq!(ui.screen(), "training");
             ui.type_into("group-input-0", &sent[..1]);
-            assert!(
-                ui.run_until(2_000, |ui| ui.screen() == "results").await,
-                "the answer window never closed"
-            );
+            // Closed before the box's pause was over: only the runtime can
+            // have handed the key over.
+            ui.advance(u64::from(INPUT_COMMIT_DEBOUNCE_MS) - 8).await;
+            assert_eq!(ui.screen(), "results", "the window outlived the pause");
             let stored = ui.store.load_sessions();
             assert_eq!(stored.len(), 1);
             assert_eq!(stored[0].groups[0].received, sent[..1]);
+        });
+    }
+
+    /// A letter keyed on the paddles is in the answer when the window closes,
+    /// even with its letter space still running out.
+    #[test]
+    fn a_paddle_letter_keyed_before_the_window_closes_is_kept() {
+        run(|| async {
+            let mut settings = short_session();
+            settings.playback.group_timeout = 1.0;
+            settings.playback.keyer_mode = cw_core::KeyerMode::IambicA;
+            settings.playback.keyer_wpm = 20.0;
+            let (mut ui, _recorder) = awaiting_answer(settings).await;
+            // The window opened at most one poll ago, and closes a second
+            // after. A dah, 180 ms at 20 WPM, keyed to end 100 ms or so
+            // before it does.
+            ui.advance(700).await;
+            let dah = Key::Character("]".into());
+            ui.press_key("group-input-0", dah.clone(), Code::BracketRight);
+            ui.advance(100).await;
+            ui.release_key("group-input-0", dah, Code::BracketRight);
+            ui.advance(150).await;
+            assert_eq!(ui.screen(), "training");
+            // The window closes here. The keyer alone would end the letter a
+            // dit of space and a letter space after the dah, 60 ms or more
+            // from now.
+            ui.advance(60).await;
+            assert_eq!(ui.screen(), "results", "the window outlived the dah");
+            let stored = ui.store.load_sessions();
+            assert_eq!(stored.len(), 1);
+            assert_eq!(stored[0].groups[0].received, "T");
         });
     }
 

@@ -155,6 +155,36 @@ impl<S: GroupSource> SessionMachine<S> {
         self.auto_confirm = None;
     }
 
+    /// Whether `event` would close the answer to the group being copied:
+    /// confirm it, run its answer window out, or end the session on it.
+    ///
+    /// Whatever the user has finished entering by then is part of the
+    /// answer, so the runtime asks before it applies the event — and only
+    /// then, as anything else (a send ending, a gap) leaves the answer open
+    /// for more.
+    pub fn closes_answer(&self, event: &SessionEvent) -> bool {
+        if self.is_terminal() {
+            return false;
+        }
+        match event {
+            SessionEvent::Confirm | SessionEvent::FinishNow => true,
+            SessionEvent::TimerFired { id } => {
+                self.auto_confirm
+                    .as_ref()
+                    .is_some_and(|pending| pending.id == *id)
+                    || matches!(
+                        (self.phase_timer, self.phase()),
+                        (Some((timer, PhaseTimer::AnswerWindow)), SessionPhase::AwaitingAnswer { .. })
+                            if timer == *id
+                    )
+            }
+            SessionEvent::PlaybackEnded { .. }
+            | SessionEvent::PlaybackStopped { .. }
+            | SessionEvent::Input { .. }
+            | SessionEvent::Abort => false,
+        }
+    }
+
     #[must_use = "the effects are the session's instructions to the runtime"]
     pub fn apply(&mut self, event: SessionEvent, now: MonoMs) -> Vec<SessionEffect> {
         if self.is_terminal() {
@@ -504,6 +534,35 @@ mod tests {
         assert_eq!(m.phase(), SessionPhase::Playing { index: 0 });
         assert_eq!(m.session().session_id().raw(), 7);
         assert!(m.session().input_locked(0));
+    }
+
+    /// Confirming, finishing, and the answer window or auto-confirm running
+    /// out close the answer. A send ending, or the gap between sends running
+    /// out, leaves it open for more.
+    #[test]
+    fn only_what_closes_the_answer_says_so() {
+        let mut m = start_with(settings(2, false, 10.0), script(&["KM"], 2));
+        assert!(!m.closes_answer(&ended(0)));
+        let gap = m.apply(ended(0), MonoMs(500));
+        let (gap_id, _) = timer(&gap);
+        assert!(!m.closes_answer(&SessionEvent::TimerFired { id: gap_id }));
+        let _ = m.apply(SessionEvent::TimerFired { id: gap_id }, MonoMs(900));
+        let window = m.apply(ended(0), MonoMs(1_400));
+        let (window_id, _) = timer(&window);
+        assert!(m.closes_answer(&SessionEvent::TimerFired { id: window_id }));
+        assert!(m.closes_answer(&SessionEvent::Confirm));
+        assert!(m.closes_answer(&SessionEvent::FinishNow));
+        assert!(!m.closes_answer(&typed(0, "K")));
+        assert!(!m.closes_answer(&SessionEvent::Abort));
+        // A full answer starts auto-confirm, and its timer closes it too.
+        let auto = m.apply(typed(0, "KM"), MonoMs(1_500));
+        let (auto_id, _) = timer(&auto);
+        assert!(m.closes_answer(&SessionEvent::TimerFired { id: auto_id }));
+        // A timer the machine has forgotten closes nothing, and nothing does
+        // once the session is over.
+        assert!(!m.closes_answer(&SessionEvent::TimerFired { id: 999 }));
+        let _ = m.apply(SessionEvent::Abort, MonoMs(1_600));
+        assert!(!m.closes_answer(&SessionEvent::Confirm));
     }
 
     #[test]
