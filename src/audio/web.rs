@@ -7,7 +7,7 @@ use cw_core::band::{
     BandSource, FilterDesign, MAX_RECEIVER_SECTIONS, Qsb, Section, agc_compressor, agc_knee,
     limiter_feed, soft_limit_curve,
 };
-use cw_core::{PlannedTransmission, TrainingSettings, Transmission, plan_transmission};
+use cw_core::{PlannedTransmission, TrainingSettings, Transmission};
 use gloo_timers::callback::Interval;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
@@ -16,7 +16,7 @@ use web_sys::{
     GainNode, OscillatorType,
 };
 
-use super::{MorseBackend, PlaybackSignal, PlaybackWait, WaitFlags};
+use super::{MorseBackend, PlaybackSignal, WaitFlags};
 
 /// How much of the band each streamed buffer holds.
 const STREAM_CHUNK_SEC: f64 = 0.1;
@@ -106,7 +106,6 @@ pub struct MorsePlayer {
     /// Gains that are fading out, with the context time their ramp ends: a
     /// stopped send's, or the band stream that was just replaced.
     released: Vec<(GainNode, f64)>,
-    pending_resume: RefCell<Option<js_sys::Promise>>,
     live_osc: Option<web_sys::OscillatorNode>,
     live_gain: Option<GainNode>,
     /// Kept so the listener can be taken off again when this player goes.
@@ -539,19 +538,10 @@ impl MorsePlayer {
             limiter_in: headroom,
             floor_in,
             released: Vec::new(),
-            pending_resume: RefCell::new(None),
             live_osc: None,
             live_gain: None,
             on_visibility,
         })
-    }
-
-    pub fn resume_from_gesture(&self) {
-        if self.ctx.state() == AudioContextState::Suspended
-            && let Ok(promise) = self.ctx.resume()
-        {
-            *self.pending_resume.borrow_mut() = Some(promise);
-        }
     }
 
     fn ensure_live_tone(&mut self) -> Result<(), String> {
@@ -756,37 +746,6 @@ impl MorsePlayer {
         self.stop_flag.set(false);
     }
 
-    fn start_send(
-        &mut self,
-        transmission: &Transmission,
-        settings: &TrainingSettings,
-    ) -> Result<PlaybackWait, String> {
-        self.resume_from_gesture();
-        self.release_group_gain();
-        let epoch = self.bump_epoch();
-        self.reset_stop_flag();
-        self.apply_band_now(settings)?;
-        let planned = plan_transmission(transmission, settings);
-        let plan = &planned.wanted;
-        let started_at = self.ctx.current_time();
-        self.schedule_plan(&planned, Qsb::of(&settings.band))?;
-        if let Some(stream) = &self.band.stream {
-            stream.reserve(planned.others.len(), started_at + plan.duration_sec);
-        }
-        Ok(PlaybackWait::new(
-            plan.duration_sec,
-            plan.resolved_char_wpm,
-            plan.resolved_effective_wpm,
-            Rc::new(WebSignal {
-                ctx: self.ctx.clone(),
-                stop_flag: self.stop_flag.clone(),
-                epoch: self.epoch.clone(),
-                mine: epoch,
-                started_at,
-            }),
-        ))
-    }
-
     fn schedule_plan(
         &mut self,
         planned: &PlannedTransmission,
@@ -865,20 +824,45 @@ impl MorsePlayer {
 }
 
 impl MorseBackend for MorsePlayer {
+    /// Nothing waits on the resume. A context that the browser will not let
+    /// start keeps its clock still, and the send waiting on it fails after
+    /// its grace — which is what rebuilds the player and, failing that, tells
+    /// the listener — rather than leaving the session parked on a promise
+    /// that may never settle.
     fn resume_from_gesture(&mut self) {
-        MorsePlayer::resume_from_gesture(self);
+        if self.ctx.state() == AudioContextState::Suspended {
+            let _ = self.ctx.resume();
+        }
     }
 
-    fn apply_band(&mut self, settings: &TrainingSettings) -> Result<(), String> {
-        self.apply_band_now(settings)
+    fn apply_band(&mut self, settings: &TrainingSettings) {
+        // A node the browser will not make leaves the band as it was; the
+        // send that follows reports anything worse.
+        let _ = self.apply_band_now(settings);
     }
 
-    fn start_transmission(
+    fn start(
         &mut self,
-        transmission: &Transmission,
+        _transmission: &Transmission,
+        plan: &PlannedTransmission,
         settings: &TrainingSettings,
-    ) -> Result<PlaybackWait, String> {
-        self.start_send(transmission, settings)
+    ) -> Result<Rc<dyn PlaybackSignal>, String> {
+        self.resume_from_gesture();
+        self.release_group_gain();
+        let epoch = self.bump_epoch();
+        self.reset_stop_flag();
+        let started_at = self.ctx.current_time();
+        self.schedule_plan(plan, Qsb::of(&settings.band))?;
+        if let Some(stream) = &self.band.stream {
+            stream.reserve(plan.others.len(), started_at + plan.wanted.duration_sec);
+        }
+        Ok(Rc::new(WebSignal {
+            ctx: self.ctx.clone(),
+            stop_flag: self.stop_flag.clone(),
+            epoch: self.epoch.clone(),
+            mine: epoch,
+            started_at,
+        }))
     }
 
     fn stop(&mut self) {
@@ -923,10 +907,6 @@ impl MorseBackend for MorsePlayer {
         let _ = live_gain
             .gain()
             .linear_ramp_to_value_at_time(level, now + 0.001);
-    }
-
-    fn take_resume_promise(&self) -> Option<js_sys::Promise> {
-        self.pending_resume.borrow_mut().take()
     }
 }
 

@@ -8,6 +8,8 @@
 
 use std::rc::Rc;
 
+use cw_core::PlaybackPlan;
+
 use crate::time::{POLL_MS, sleep_ms};
 
 /// How long a send may overrun its own duration before it is called stalled.
@@ -119,16 +121,13 @@ pub struct PlaybackWait {
 }
 
 impl PlaybackWait {
-    pub fn new(
-        duration_sec: f64,
-        char_wpm: f64,
-        effective_wpm: f64,
-        signal: Rc<dyn PlaybackSignal>,
-    ) -> Self {
+    /// Wait on `signal` for a send that plays as `plan` says: its length,
+    /// and the speeds it resolved to, are the plan's, whoever plays it.
+    pub fn new(plan: &PlaybackPlan, signal: Rc<dyn PlaybackSignal>) -> Self {
         Self {
-            duration_sec,
-            char_wpm,
-            effective_wpm,
+            duration_sec: plan.duration_sec,
+            char_wpm: plan.resolved_char_wpm,
+            effective_wpm: plan.resolved_effective_wpm,
             signal,
         }
     }
@@ -275,10 +274,14 @@ mod tests {
     }
 
     fn scripted(duration_sec: f64, steps: Vec<WaitFlags>) -> PlaybackWait {
-        PlaybackWait::new(
+        let plan = PlaybackPlan {
+            events: Vec::new(),
             duration_sec,
-            20.0,
-            18.0,
+            resolved_char_wpm: 20.0,
+            resolved_effective_wpm: 18.0,
+        };
+        PlaybackWait::new(
+            &plan,
             Rc::new(Scripted {
                 steps: RefCell::new(steps),
             }),

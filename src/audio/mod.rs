@@ -17,7 +17,9 @@ mod web;
 #[cfg_attr(not(test), allow(unused_imports))]
 pub use wait::{PlaybackOutcome, PlaybackSignal, PlaybackWait, WaitFlags};
 
-use cw_core::{TrainingSettings, Transmission};
+use std::rc::Rc;
+
+use cw_core::{PlannedTransmission, TrainingSettings, Transmission, plan_transmission};
 
 /// True when the build has no audio output and only simulates the timing of a
 /// session.
@@ -31,17 +33,25 @@ pub trait MorseBackend {
     fn resume_from_gesture(&mut self) {}
 
     /// Bring the background layers in line with the settings.
-    fn apply_band(&mut self, settings: &TrainingSettings) -> Result<(), String>;
+    ///
+    /// Never fails. A device that will not open is not the band's failure:
+    /// the band is in place for when it does, and the next send reports the
+    /// device — which is what sends the session round its rebuild-and-retry.
+    fn apply_band(&mut self, settings: &TrainingSettings);
 
-    /// Schedule one send and hand back something to wait on.
-    /// Send what the receiver hears: the station being copied, and whoever
-    /// else is calling across it. The caller owns the stations, so every
-    /// repeat of a group arrives from the same operators.
-    fn start_transmission(
+    /// Start one send, through the receiver `settings` describe, and hand
+    /// back what to watch it by.
+    ///
+    /// `transmission` is the send as the session asked for it: the station
+    /// being copied, and whoever else is calling across it. `plan` is how it
+    /// plays — every station's tones against one clock — and is all a player
+    /// needs; it is planned once, by [`start_send`], for every backend.
+    fn start(
         &mut self,
         transmission: &Transmission,
+        plan: &PlannedTransmission,
         settings: &TrainingSettings,
-    ) -> Result<PlaybackWait, String>;
+    ) -> Result<Rc<dyn PlaybackSignal>, String>;
 
     /// Silence the Morse, leaving the background alone.
     fn stop(&mut self);
@@ -54,12 +64,25 @@ pub trait MorseBackend {
     fn set_live_tone(&mut self, on: bool, frequency_hz: f64, gain: f64) {
         let _ = (on, frequency_hz, gain);
     }
+}
 
-    /// The promise for a resumed browser audio context, if one is pending.
-    #[cfg(feature = "web")]
-    fn take_resume_promise(&self) -> Option<js_sys::Promise> {
-        None
-    }
+/// Send `transmission` on `player`, and hand back something to wait on. The
+/// caller owns the stations, so every repeat of a group arrives from the same
+/// operators.
+///
+/// The band is brought in line first, so a send whose settings moved it is
+/// heard over the band they describe. The send is planned here, once, and the
+/// wait reads its length and speeds off that plan — whichever backend plays
+/// it, and the test double too.
+pub fn start_send(
+    player: &mut dyn MorseBackend,
+    transmission: &Transmission,
+    settings: &TrainingSettings,
+) -> Result<PlaybackWait, String> {
+    player.apply_band(settings);
+    let plan = plan_transmission(transmission, settings);
+    let signal = player.start(transmission, &plan, settings)?;
+    Ok(PlaybackWait::new(&plan.wanted, signal))
 }
 
 /// The player this build ships with.
@@ -97,6 +120,8 @@ pub mod fake {
         Start(String),
         Stop,
         Shutdown,
+        /// The paddle sidetone gated on or off.
+        LiveTone(bool),
     }
 
     /// How the next send should behave.
@@ -104,7 +129,7 @@ pub mod fake {
     pub enum Behaviour {
         /// Plays for its full length and finishes.
         Play,
-        /// `start_text` refuses.
+        /// `start` refuses.
         RefuseToStart,
         /// Starts, then reports a broken stream.
         FailMidSend,
@@ -270,7 +295,7 @@ pub mod fake {
     }
 
     impl MorseBackend for FakePlayer {
-        fn apply_band(&mut self, settings: &TrainingSettings) -> Result<(), String> {
+        fn apply_band(&mut self, settings: &TrainingSettings) {
             self.recorder
                 .calls
                 .borrow_mut()
@@ -278,14 +303,14 @@ pub mod fake {
             self.recorder
                 .band_running
                 .set(cw_core::band::BandMixer::needs_background(settings));
-            Ok(())
         }
 
-        fn start_transmission(
+        fn start(
             &mut self,
             transmission: &Transmission,
-            settings: &TrainingSettings,
-        ) -> Result<PlaybackWait, String> {
+            plan: &PlannedTransmission,
+            _settings: &TrainingSettings,
+        ) -> Result<Rc<dyn PlaybackSignal>, String> {
             self.recorder
                 .calls
                 .borrow_mut()
@@ -294,22 +319,16 @@ pub mod fake {
             if self.recorder.behaviour() == Behaviour::RefuseToStart {
                 return Err("Audio stream: device is gone".to_string());
             }
-            // The wanted station sets the length; the others are laid over it.
-            let plan = cw_core::plan_transmission(transmission, settings).wanted;
             self.epoch.set(self.epoch.get() + 1);
-            let duration_ms = (plan.duration_sec * 1000.0).ceil().max(0.0) as u32;
-            Ok(PlaybackWait::new(
-                plan.duration_sec,
-                plan.resolved_char_wpm,
-                plan.resolved_effective_wpm,
-                Rc::new(FakeSignal {
-                    recorder: Rc::clone(&self.recorder),
-                    epoch: Rc::clone(&self.epoch),
-                    mine: self.epoch.get(),
-                    duration_ms,
-                    played: Cell::new(0),
-                }),
-            ))
+            // The wanted station sets the length; the others are laid over it.
+            let duration_ms = (plan.wanted.duration_sec * 1000.0).ceil().max(0.0) as u32;
+            Ok(Rc::new(FakeSignal {
+                recorder: Rc::clone(&self.recorder),
+                epoch: Rc::clone(&self.epoch),
+                mine: self.epoch.get(),
+                duration_ms,
+                played: Cell::new(0),
+            }))
         }
 
         fn stop(&mut self) {
@@ -322,5 +341,45 @@ pub mod fake {
             self.recorder.band_running.set(false);
             self.epoch.set(self.epoch.get() + 1);
         }
+
+        fn set_live_tone(&mut self, on: bool, _frequency_hz: f64, _gain: f64) {
+            self.recorder.calls.borrow_mut().push(Call::LiveTone(on));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fake::{Call, Recorder};
+    use super::*;
+
+    /// A send brings its band with it, on every backend alike: a send whose
+    /// settings moved the band is heard over the band they describe, and the
+    /// wait is as long as the plan says, at the speeds it resolved to.
+    #[test]
+    fn a_send_is_heard_over_its_own_band_for_as_long_as_its_plan() {
+        let recorder = Recorder::new();
+        let mut player = (recorder.factory())().expect("a player");
+        let mut settings = TrainingSettings::default();
+        settings.band.noise_enabled = true;
+        settings.band.noise_level = 0.4;
+        let voice = cw_core::resolve_station(&settings, &mut cw_core::FastrandRng(3));
+        let transmission = Transmission::alone("K", voice);
+
+        let wait = start_send(player.as_mut(), &transmission, &settings).expect("a send");
+        assert_eq!(
+            recorder.calls(),
+            vec![
+                Call::New,
+                Call::Band(cw_core::band::BandKey::of(&settings.band)),
+                Call::Start("K".into()),
+            ]
+        );
+        assert!(recorder.band_running.get());
+
+        let plan = plan_transmission(&transmission, &settings).wanted;
+        assert_eq!(wait.duration_sec, plan.duration_sec);
+        assert_eq!(wait.char_wpm, plan.resolved_char_wpm);
+        assert_eq!(wait.effective_wpm, plan.resolved_effective_wpm);
     }
 }

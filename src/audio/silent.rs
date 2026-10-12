@@ -1,16 +1,16 @@
 //! Audio-less player for builds with no output backend.
 //!
-//! It runs the same [`cw_core::PlaybackPlan`] the real backends do and reports
-//! the same duration and resolved speeds, so a session keeps its Farnsworth
-//! pacing, timing and scoring — it just never makes a sound.
+//! A send is waited on for the length of its plan, as on the real backends,
+//! so a session keeps its Farnsworth pacing, timing and scoring — it just
+//! never makes a sound.
 
 use std::cell::Cell;
 use std::rc::Rc;
 use std::time::Instant;
 
-use cw_core::{TrainingSettings, Transmission, plan_morse_playback_for};
+use cw_core::{PlannedTransmission, TrainingSettings, Transmission};
 
-use super::{MorseBackend, PlaybackSignal, PlaybackWait, WaitFlags};
+use super::{MorseBackend, PlaybackSignal, WaitFlags};
 
 pub struct MorsePlayer {
     epoch: Rc<Cell<u64>>,
@@ -46,30 +46,23 @@ impl MorsePlayer {
 }
 
 impl MorseBackend for MorsePlayer {
-    fn apply_band(&mut self, _settings: &TrainingSettings) -> Result<(), String> {
-        Ok(())
-    }
+    fn apply_band(&mut self, _settings: &TrainingSettings) {}
 
-    fn start_transmission(
+    fn start(
         &mut self,
-        transmission: &Transmission,
-        settings: &TrainingSettings,
-    ) -> Result<PlaybackWait, String> {
-        // Nothing is heard, so the others change nothing but the timing, and
-        // they do not change that either.
-        let plan = plan_morse_playback_for(&transmission.text, settings, &transmission.voice);
+        _transmission: &Transmission,
+        _plan: &PlannedTransmission,
+        _settings: &TrainingSettings,
+    ) -> Result<Rc<dyn PlaybackSignal>, String> {
+        // Nothing is heard: the plan's length, which the wait already has,
+        // is all there is to a send.
         let mine = self.epoch.get().wrapping_add(1);
         self.epoch.set(mine);
-        Ok(PlaybackWait::new(
-            plan.duration_sec,
-            plan.resolved_char_wpm,
-            plan.resolved_effective_wpm,
-            Rc::new(SilentSignal {
-                epoch: Rc::clone(&self.epoch),
-                mine,
-                started: Instant::now(),
-            }),
-        ))
+        Ok(Rc::new(SilentSignal {
+            epoch: Rc::clone(&self.epoch),
+            mine,
+            started: Instant::now(),
+        }))
     }
 
     fn stop(&mut self) {

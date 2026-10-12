@@ -6,6 +6,7 @@
 mod state;
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, TryLockError};
 use std::time::Instant;
@@ -13,10 +14,10 @@ use std::time::Instant;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{BufferSize, FromSample, Sample, SampleFormat, SizedSample};
 use cw_core::band::{BandMixer, FilterDesign, Qsb, ReceiverFilter};
-use cw_core::{TrainingSettings, Transmission, plan_transmission};
+use cw_core::{PlannedTransmission, TrainingSettings, Transmission};
 
 use super::render::{BandPlayback, LiveAgc, TonePlayback, mix_plan_into, render_plan};
-use super::{MorseBackend, PlaybackWait};
+use super::{MorseBackend, PlaybackSignal};
 use state::{PlayerState, ToneSignal};
 
 /// Band and Morse share the paddle's output stream. Three device streams on
@@ -205,35 +206,26 @@ impl MorsePlayer {
 }
 
 impl MorseBackend for MorsePlayer {
-    fn apply_band(&mut self, settings: &TrainingSettings) -> Result<(), String> {
+    fn apply_band(&mut self, settings: &TrainingSettings) {
+        // A stream that will not open is reported by the next send.
         let _ = self.band_and_mixer(settings);
-        // A stream that will not open is not the band's failure: the band is
-        // in place for when it does, and the next send reports the device —
-        // which is what sends the session round its rebuild-and-retry.
-        Ok(())
     }
 
-    fn start_transmission(
+    fn start(
         &mut self,
-        transmission: &Transmission,
+        _transmission: &Transmission,
+        plan: &PlannedTransmission,
         settings: &TrainingSettings,
-    ) -> Result<PlaybackWait, String> {
-        let mixer = self.band_and_mixer(settings);
-        self.live.set_on(false);
+    ) -> Result<Rc<dyn PlaybackSignal>, String> {
+        let mixer = self.ensure_mixer();
         self.set_tone(None);
         if let Err(err) = mixer {
             self.state.note_start_failed();
             return Err(format!("Audio mixer failed to open: {err}"));
         }
 
-        let planned = plan_transmission(transmission, settings);
-        let (duration_sec, char_wpm, effective_wpm) = (
-            planned.wanted.duration_sec,
-            planned.wanted.resolved_char_wpm,
-            planned.wanted.resolved_effective_wpm,
-        );
         let armed = self.state.arm();
-        let samples = render_send(&planned, settings, self.sample_rate);
+        let samples = render_send(plan, settings, self.sample_rate);
         let playback = Arc::new(
             TonePlayback::new(
                 samples,
@@ -243,20 +235,15 @@ impl MorseBackend for MorsePlayer {
                 Arc::clone(armed.stop_flag()),
                 Arc::clone(&self.agc),
             )
-            .with_callers(planned.others.len()),
+            .with_callers(plan.others.len()),
         );
         let finished = playback.finished_flag();
         self.set_tone(Some(playback));
-        Ok(PlaybackWait::new(
-            duration_sec,
-            char_wpm,
-            effective_wpm,
-            std::rc::Rc::new(ToneSignal::new(
-                armed,
-                finished,
-                Arc::clone(&self.stream_failed),
-            )),
-        ))
+        Ok(Rc::new(ToneSignal::new(
+            armed,
+            finished,
+            Arc::clone(&self.stream_failed),
+        )))
     }
 
     fn stop(&mut self) {
@@ -593,16 +580,22 @@ mod device_tests {
             return;
         };
         let voice = cw_core::resolve_station(&settings(), &mut cw_core::FastrandRng(7));
-        let wait = player
-            .start_transmission(&Transmission::alone("K", voice), &settings())
-            .expect("the device should take a send");
+        let wait = crate::audio::start_send(
+            &mut player,
+            &cw_core::Transmission::alone("K", voice),
+            &settings(),
+        )
+        .expect("the device should take a send");
         assert!(wait.duration_sec > 0.0);
         assert!(wait.char_wpm >= 40.0);
 
         // A second send retires the first.
-        let second = player
-            .start_transmission(&Transmission::alone("M", voice), &settings())
-            .expect("a second send");
+        let second = crate::audio::start_send(
+            &mut player,
+            &cw_core::Transmission::alone("M", voice),
+            &settings(),
+        )
+        .expect("a second send");
         assert!(second.duration_sec > 0.0);
 
         player.stop();
@@ -615,14 +608,14 @@ mod device_tests {
             return;
         };
         let mut settings = settings();
-        player.apply_band(&settings).expect("band");
-        player.apply_band(&settings).expect("band again");
+        player.apply_band(&settings);
+        player.apply_band(&settings);
         settings.band.qrn_level = 0.9;
-        player.apply_band(&settings).expect("changed band");
+        player.apply_band(&settings);
         // A silent band tears the stream down without complaining.
         settings.band.qrn_enabled = false;
         settings.band.noise_enabled = false;
-        player.apply_band(&settings).expect("silent band");
+        player.apply_band(&settings);
         player.shutdown();
     }
 
@@ -634,13 +627,13 @@ mod device_tests {
             return;
         };
         let mut settings = settings();
-        player.apply_band(&settings).expect("band");
+        player.apply_band(&settings);
         assert!(lock_slot(&player.slots.band).is_some());
 
         player.agc.store(0.3);
         settings.band.qrn_enabled = false;
         settings.band.noise_enabled = false;
-        player.apply_band(&settings).expect("silent band");
+        player.apply_band(&settings);
         assert!(lock_slot(&player.slots.band).is_none());
         assert!(
             lock_slot(&player.slots.retiring).is_some(),

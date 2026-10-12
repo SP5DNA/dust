@@ -92,19 +92,6 @@ async fn schedule_text(
     if app.session_gen.get() != generation {
         return Err("Cancelled.".into());
     }
-    #[cfg(feature = "web")]
-    {
-        let promise = app.player.try_borrow().ok().and_then(|slot| {
-            slot.as_ref()
-                .and_then(|player| player.take_resume_promise())
-        });
-        if let Some(promise) = promise {
-            let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
-        }
-        if app.session_gen.get() != generation {
-            return Err("Cancelled.".into());
-        }
-    }
     for _ in 0..8 {
         if app.session_gen.get() != generation {
             return Err("Cancelled.".into());
@@ -114,7 +101,7 @@ async fn schedule_text(
                 let Some(player) = slot.as_mut() else {
                     return Err("Audio is unavailable.".into());
                 };
-                return player.start_transmission(transmission, settings);
+                return crate::audio::start_send(player.as_mut(), transmission, settings);
             }
             Err(_) => sleep_ms(POLL_MS).await,
         }
