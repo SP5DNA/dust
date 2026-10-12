@@ -2,13 +2,12 @@
 //! the off-air recordings were: white noise in, a Welch spectrum out, edges
 //! read off it.
 
-use std::f64::consts::{SQRT_2, TAU};
+use std::f64::consts::TAU;
 
 use super::*;
 use crate::band::random::Gaussian;
-
-/// Every shape the control offers.
-const ALL_SHAPES: [FilterShape; 3] = [FilterShape::Sharp, FilterShape::Soft, FilterShape::Peaked];
+use crate::band::test_support::{ALL_SHAPES, IF_SHAPES, hann, if_shape, peak, tone_gain, welch};
+use crate::settings::{FILTER_WIDTH_MAX, TrainingSettings};
 
 /// The rate the long noise renders run at. Every edge measured here is below
 /// 2 kHz, the design does not depend on the rate, and a quarter of 48 kHz keeps
@@ -23,47 +22,8 @@ const SEGMENT: usize = 4_096;
 const SMOOTH_BINS: usize = 5;
 /// A minute of noise, as the acceptance asks.
 const RENDER_SEC: usize = 60;
-
-/// In-place radix-2 FFT. Slow and simple, which is all a test needs.
-fn fft(re: &mut [f64], im: &mut [f64]) {
-    let n = re.len();
-    let mut j = 0;
-    for i in 1..n {
-        let mut bit = n >> 1;
-        while j & bit != 0 {
-            j ^= bit;
-            bit >>= 1;
-        }
-        j |= bit;
-        if i < j {
-            re.swap(i, j);
-            im.swap(i, j);
-        }
-    }
-    let twiddles: Vec<(f64, f64)> = (0..n / 2)
-        .map(|k| {
-            let (s, c) = (-TAU * k as f64 / n as f64).sin_cos();
-            (c, s)
-        })
-        .collect();
-    let mut len = 2;
-    while len <= n {
-        let stride = n / len;
-        for start in (0..n).step_by(len) {
-            for k in 0..len / 2 {
-                let (wr, wi) = twiddles[k * stride];
-                let (a, b) = (start + k, start + k + len / 2);
-                let tr = re[b] * wr - im[b] * wi;
-                let ti = re[b] * wi + im[b] * wr;
-                re[b] = re[a] - tr;
-                im[b] = im[a] - ti;
-                re[a] += tr;
-                im[a] += ti;
-            }
-        }
-        len <<= 1;
-    }
-}
+/// The rate the running filter is listened to at.
+const SR: u32 = 48_000;
 
 /// The receiver's power response to `seconds` of white noise: a Hann-window
 /// Welch spectrum of the output divided by the input's variance, so a bin
@@ -85,29 +45,11 @@ fn noise_response(design: &FilterDesign, seconds: usize) -> (f64, Vec<f64>) {
         })
         .collect();
     let variance = input_power / n as f64;
-
-    let window: Vec<f64> = (0..SEGMENT)
-        .map(|i| 0.5 - 0.5 * (TAU * i as f64 / SEGMENT as f64).cos())
+    let window_power: f64 = hann(SEGMENT).iter().map(|w| w * w).sum();
+    let raw: Vec<f64> = welch(&output, SEGMENT)[..SEGMENT / 2]
+        .iter()
+        .map(|p| p / (window_power * variance))
         .collect();
-    let window_power: f64 = window.iter().map(|w| w * w).sum();
-    let mut power = vec![0.0; SEGMENT / 2];
-    let mut segments = 0;
-    let (mut re, mut im) = (vec![0.0; SEGMENT], vec![0.0; SEGMENT]);
-    let mut start = 0;
-    while start + SEGMENT <= output.len() {
-        for (i, w) in window.iter().enumerate() {
-            re[i] = output[start + i] * w;
-            im[i] = 0.0;
-        }
-        fft(&mut re, &mut im);
-        for (k, slot) in power.iter_mut().enumerate() {
-            *slot += re[k] * re[k] + im[k] * im[k];
-        }
-        segments += 1;
-        start += SEGMENT / 2;
-    }
-    let scale = 1.0 / (f64::from(segments) * window_power * variance);
-    let raw: Vec<f64> = power.iter().map(|p| p * scale).collect();
     let half = SMOOTH_BINS / 2;
     let smoothed = (0..raw.len())
         .map(|k| {
@@ -143,24 +85,6 @@ fn edge(bin_hz: f64, power: &[f64], pitch: f64, db: f64, direction: isize) -> Op
 /// The folded sideband's own contribution at `hz`, as an amplitude.
 fn folded_at(design: &FilterDesign, hz: f64) -> f64 {
     design.gain() * design.lowpass(hz + design.pitch_hz()).abs()
-}
-
-/// Steady-state gain of the running filter for a tone at `hz`.
-fn tone_gain(sample_rate: u32, design: &FilterDesign, hz: f64) -> f64 {
-    let mut filter = ReceiverFilter::new(sample_rate, design);
-    let step = TAU * hz / f64::from(sample_rate);
-    let settle = sample_rate as usize / 2;
-    // A whole number of cycles, so the RMS is exact.
-    let cycles = (hz / 4.0).round().max(1.0);
-    let measure = (cycles * f64::from(sample_rate) / hz).round() as usize;
-    let mut sum_sq = 0.0;
-    for n in 0..settle + measure {
-        let out = filter.process((step * n as f64).sin());
-        if n >= settle {
-            sum_sq += out * out;
-        }
-    }
-    (sum_sq / measure as f64).sqrt() * SQRT_2
 }
 
 /// The acceptance the off-air measurements set, for one shape at one pitch
@@ -486,7 +410,13 @@ fn every_corner_of_the_controls_is_stable_and_finite() {
                 MAX_RECEIVER_WIDTH_HZ,
             ] {
                 let design = FilterDesign::new(pitch, bandwidth, shape);
-                assert!(design.gain().is_finite() && design.gain() > 0.0);
+                assert!(
+                    design.gain().is_finite()
+                        && design.gain() > 0.0
+                        && design.gain() <= 1.0 / MIN_PITCH_RESPONSE,
+                    "{shape:?} {pitch}/{bandwidth}: make-up gain {}",
+                    design.gain()
+                );
                 for sample_rate in [8_000u32, 11_025, 22_050, 44_100, 48_000, 96_000, 192_000] {
                     let name = format!("{shape:?} {pitch}/{bandwidth} at {sample_rate}");
                     for section in design.sections(f64::from(sample_rate)) {
@@ -981,15 +911,6 @@ fn the_receiver_always_passes_the_side_tone_range() {
     }
 }
 
-/// The IF filter a shape is built on: the peak filter sits behind the sharp
-/// one.
-fn if_shape(shape: FilterShape) -> FilterShape {
-    match shape {
-        FilterShape::Peaked => FilterShape::Sharp,
-        other => other,
-    }
-}
-
 /// What the default band's hiss sounds like, measured the way the off-air
 /// recordings were: thirty seconds of the noise alone through the whole
 /// receiver, AGC and all.
@@ -1022,24 +943,7 @@ fn the_default_hiss_rings_at_the_note() {
     mixer.fill_background(&mut settle);
     let mut x = vec![0.0f32; RATE as usize * 30];
     mixer.fill_background(&mut x);
-
-    let window: Vec<f64> = (0..POINTS)
-        .map(|i| 0.5 - 0.5 * (TAU * i as f64 / POINTS as f64).cos())
-        .collect();
-    let mut power = vec![0.0; POINTS / 2 + 1];
-    let (mut re, mut im) = (vec![0.0; POINTS], vec![0.0; POINTS]);
-    let mut start = 0;
-    while start + POINTS <= x.len() {
-        for (i, w) in window.iter().enumerate() {
-            re[i] = f64::from(x[start + i]) * w;
-            im[i] = 0.0;
-        }
-        fft(&mut re, &mut im);
-        for (k, slot) in power.iter_mut().enumerate() {
-            *slot += re[k] * re[k] + im[k] * im[k];
-        }
-        start += POINTS / 2;
-    }
+    let power = welch(&x, POINTS);
     let bin_hz = f64::from(RATE) / POINTS as f64;
     let total: f64 = power.iter().sum();
     let share = |keep: &dyn Fn(f64) -> bool| {
@@ -1114,4 +1018,387 @@ fn a_receiver_that_cannot_pass_the_range_is_not_widened_for_nothing() {
             20.0 * quietest.log10()
         );
     }
+}
+
+// ---------------------------------------------------------- the running filter
+
+/// The control has to mean what it says: asked for so many hertz between the
+/// 6 dB points, that is what you get, sharp or soft — half of it either side
+/// of the pitch, because an IF filter is symmetric in hertz.
+///
+/// Measured at a pitch high enough that even the widest setting stays clear of
+/// zero beat, so what is measured is the filter and not the folded sideband.
+#[test]
+fn the_width_control_is_in_hertz_and_lands_where_it_says() {
+    for shape in IF_SHAPES {
+        for asked in [FILTER_WIDTH_MIN, 250.0, 500.0, 1_000.0, FILTER_WIDTH_MAX] {
+            let pitch = (2.0 * asked).max(600.0);
+            let design = FilterDesign::new(pitch, asked, shape);
+            let edge = |direction: f64| {
+                let mut hz = pitch;
+                while design.response_at(hz) > 0.5 && hz > 1.0 {
+                    hz += direction * 0.25;
+                }
+                hz
+            };
+            let (low, high) = (edge(-1.0), edge(1.0));
+            let error = ((high - low) - asked).abs() / asked;
+            assert!(
+                error < 0.01,
+                "{shape:?}: asked for {asked} Hz and got {:.1} Hz",
+                high - low
+            );
+            // Arithmetic symmetry: the edges straddle the pitch evenly.
+            assert!(
+                ((low + high) / 2.0 - pitch).abs() < 1.0,
+                "{shape:?} {asked}: edges at {low}/{high} around {pitch}"
+            );
+        }
+    }
+}
+
+/// The response the design reports has to be the response the audio has, or
+/// a display that draws it is decoration. Measure the real filter and compare.
+#[test]
+fn the_design_response_is_the_filter_you_hear() {
+    for shape in ALL_SHAPES {
+        for (center, bandwidth) in [
+            (500.0, 500.0),
+            (600.0, 250.0),
+            (700.0, 1_200.0),
+            (500.0, 150.0),
+        ] {
+            let design = FilterDesign::new(center, bandwidth, shape);
+            for offset in [-400.0, -200.0, -80.0, -30.0, 0.0, 30.0, 80.0, 200.0, 400.0] {
+                let hz = center + offset;
+                let drawn = design.response_at(hz);
+                let real = tone_gain(SR, &design, hz);
+                // The digital filter is the analogue one sampled, so the two
+                // agree as closely as a quarter-second tone can measure them,
+                // the folded sideband of the widest setting included.
+                assert!(
+                    (drawn - real).abs() < 0.005,
+                    "{shape:?} {center}/{bandwidth} at {hz} Hz: design {drawn:.4}, measured {real:.4}"
+                );
+            }
+        }
+    }
+}
+
+/// A band-pass is a band-pass: unity where it is tuned, falling away either
+/// side however wide it is set — never a bump off to one side, which is what
+/// a station sitting off-centre would otherwise be rewarded by.
+#[test]
+fn the_response_peaks_where_the_filter_is_tuned() {
+    for shape in ALL_SHAPES {
+        for bandwidth in [FILTER_WIDTH_MIN, 500.0, FILTER_WIDTH_MAX] {
+            let design = FilterDesign::new(600.0, bandwidth, shape);
+            assert!((design.response_at(600.0) - 1.0).abs() < 1e-9);
+            // Nowhere in the audible passband louder than the pitch, however
+            // far the filter reaches towards zero beat; and where it does not
+            // reach that far, falling steadily away above the pitch. (Below
+            // it is the mirror image; the filter's own tests check that.)
+            let mut previous = 1.0;
+            for step in 1..400 {
+                let offset = f64::from(step) * 5.0;
+                let above = design.response_at(600.0 + offset);
+                if bandwidth < 600.0 {
+                    assert!(
+                        above <= previous + 1e-12,
+                        "{shape:?} {bandwidth}: rose again {offset} Hz above the pitch"
+                    );
+                }
+                previous = above;
+                for hz in [600.0 + offset, 600.0 - offset] {
+                    if hz >= LOWEST_EDGE_HZ {
+                        let db = 20.0 * design.response_at(hz).log10();
+                        assert!(db < 0.75, "{shape:?} {bandwidth}: {db:+.2} dB at {hz} Hz");
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The two prototypes are what they claim to be, moved to the pitch.
+/// Butterworth is maximally flat — |H|² = 1/(1+Ω¹⁶) for eight poles, with Ω
+/// the distance from the pitch over its 3 dB point, which is 3^(1/16) inside
+/// the 6 dB edge — and the soft one is the Bessel polynomial, scaled so it is
+/// 6 dB down at the edge. Checked at a pitch where the folded sideband is far
+/// out of the way.
+#[test]
+fn the_prototypes_are_butterworth_and_bessel() {
+    let (center, bandwidth) = (1_200.0, 300.0);
+    let offsets = [-400.0, -150.0, -100.0, 0.0, 100.0, 160.0, 300.0, 800.0];
+    let sharp = FilterDesign::new(center, bandwidth, FilterShape::Sharp);
+    let cutoff = bandwidth / 2.0 / 3f64.powf(1.0 / 16.0);
+    for hz in offsets.map(|o| center + o) {
+        let omega: f64 = (hz - center) / cutoff;
+        let ideal = 1.0 / (1.0 + omega.powi(16)).sqrt();
+        assert!(
+            (sharp.response_at(hz) - ideal).abs() < 1e-9,
+            "Butterworth at {hz} Hz: {} vs {ideal}",
+            sharp.response_at(hz)
+        );
+    }
+
+    // Bessel: |H(jΩ)|² = θ(0)² / |θ(jΩ·ωc)|², with θ the reverse Bessel
+    // polynomial and ωc its 3 dB frequency.
+    const THETA: [f64; 9] = [
+        2_027_025.0,
+        2_027_025.0,
+        945_945.0,
+        270_270.0,
+        51_975.0,
+        6_930.0,
+        630.0,
+        36.0,
+        1.0,
+    ];
+    const OMEGA_C: f64 = 3.179_617_237_511;
+    // Where that prototype, 3 dB down at 1 rad/s, is down 6 dB: half voltage.
+    const HALF_VOLTAGE: f64 = 1.391_855_048;
+    let soft = FilterDesign::new(center, bandwidth, FilterShape::Soft);
+    for hz in offsets.map(|o| center + o) {
+        let omega = (hz - center) / (bandwidth / 2.0) * HALF_VOLTAGE * OMEGA_C;
+        // θ(jΩ): even powers are real with alternating signs, odd imaginary.
+        let (mut re, mut im) = (0.0, 0.0);
+        for (k, c) in THETA.iter().enumerate() {
+            let term = c * omega.powi(k as i32);
+            match k % 4 {
+                0 => re += term,
+                1 => im += term,
+                2 => re -= term,
+                _ => im -= term,
+            }
+        }
+        let ideal = THETA[0] / re.hypot(im);
+        assert!(
+            (soft.response_at(hz) - ideal).abs() < 1e-6,
+            "Bessel at {hz} Hz: {} vs {ideal}",
+            soft.response_at(hz)
+        );
+    }
+}
+
+/// Sharp is steep: between its 6 dB and 60 dB widths, about the factor of two
+/// a good eight-pole crystal filter has. Soft rolls off more gently, which is
+/// the point of it — but neither is the wide-skirted mush of a single tuned
+/// circuit. Read off the upper skirt, which the folded sideband never
+/// reaches; the lower one is its mirror image.
+#[test]
+fn sharp_has_crystal_filter_skirts_and_soft_is_gentler() {
+    let shape_factor = |shape| {
+        let design = FilterDesign::new(600.0, 400.0, shape);
+        let half_width_at = |db: f64| {
+            let target = 10f64.powf(-db / 20.0);
+            let mut hz = 600.0;
+            while design.response_at(hz) > target {
+                hz += 0.5;
+            }
+            hz - 600.0
+        };
+        half_width_at(60.0) / half_width_at(6.0)
+    };
+    let sharp = shape_factor(FilterShape::Sharp);
+    let soft = shape_factor(FilterShape::Soft);
+    assert!(
+        (1.8..2.8).contains(&sharp),
+        "a sharp CW filter should have a shape factor near 2, got {sharp:.2}"
+    );
+    assert!(soft > sharp * 1.2, "soft {soft:.2} vs sharp {sharp:.2}");
+    assert!(soft < 6.0, "even soft is eight poles: {soft:.2}");
+}
+
+/// How long the filter keeps sounding after the key comes up: milliseconds
+/// for the envelope to fall 40 dB below where it was keyed down.
+fn ring_ms(bandwidth: f64, shape: FilterShape) -> f64 {
+    let design = FilterDesign::new(600.0, bandwidth, shape);
+    let mut filter = ReceiverFilter::new(SR, &design);
+    let step = TAU * 600.0 / f64::from(SR);
+    for n in 0..SR as usize / 2 {
+        filter.process((step * n as f64).sin());
+    }
+    // Envelope over one cycle of the tone at a time.
+    let cycle = (f64::from(SR) / 600.0).round() as usize;
+    let mut blocks = 0;
+    loop {
+        let block: Vec<f32> = (0..cycle).map(|_| filter.process(0.0) as f32).collect();
+        blocks += 1;
+        if peak(&block) < 0.01 || blocks > 2_000 {
+            return blocks as f64 * cycle as f64 / f64::from(SR) * 1000.0;
+        }
+    }
+}
+
+/// Ringing is the filter, and it follows the filter: narrower rings longer,
+/// and the sharp shape rings longer than the soft one at the same width —
+/// which is the whole reason a rig offers both.
+#[test]
+fn narrow_and_sharp_filters_ring_longer() {
+    for shape in IF_SHAPES {
+        let wide = ring_ms(500.0, shape);
+        let narrow = ring_ms(FILTER_WIDTH_MIN, shape);
+        // Not the full ratio of the widths: 500 Hz around a 600 Hz pitch is
+        // too wide a fraction of it to be a scaled copy of the narrow one.
+        assert!(
+            narrow > wide * 1.4,
+            "{shape:?}: {narrow:.1} ms at 150 Hz against {wide:.1} ms at 500 Hz"
+        );
+    }
+    for bandwidth in [FILTER_WIDTH_MIN, 250.0, 500.0] {
+        let sharp = ring_ms(bandwidth, FilterShape::Sharp);
+        let soft = ring_ms(bandwidth, FilterShape::Soft);
+        assert!(
+            sharp > soft * 1.3,
+            "at {bandwidth} Hz sharp rang {sharp:.1} ms and soft {soft:.1} ms"
+        );
+    }
+    // And in absolute terms it is the ringing of a CW filter — tens of
+    // milliseconds at its narrowest — not the hundreds a resonator a few
+    // hertz wide rings for, which is a whistle.
+    let longest = ring_ms(FILTER_WIDTH_MIN, FilterShape::Sharp);
+    assert!(
+        (10.0..80.0).contains(&longest),
+        "the narrowest sharp filter rang {longest:.1} ms"
+    );
+}
+
+/// Overshoot is what ringing looks like on a keyed tone: a sharp filter's
+/// envelope swings past the steady level when a dit starts, a soft one's
+/// barely does.
+#[test]
+fn a_sharp_filter_overshoots_a_keyed_tone_and_a_soft_one_does_not() {
+    let overshoot = |shape| {
+        let design = FilterDesign::new(600.0, 250.0, shape);
+        let mut filter = ReceiverFilter::new(SR, &design);
+        let step = TAU * 600.0 / f64::from(SR);
+        let out: Vec<f32> = (0..SR as usize / 4)
+            .map(|n| filter.process((step * n as f64).sin()) as f32)
+            .collect();
+        let steady = peak(&out[out.len() / 2..]);
+        peak(&out) / steady
+    };
+    let sharp = overshoot(FilterShape::Sharp);
+    let soft = overshoot(FilterShape::Soft);
+    assert!(sharp > 1.08, "sharp overshot by only {sharp:.3}");
+    assert!(soft < 1.03, "soft overshot by {soft:.3}");
+}
+
+/// Narrower means narrower: at a fixed distance off the centre, squeezing the
+/// filter always passes less of what is beside you.
+#[test]
+fn narrowing_the_filter_passes_less_of_what_is_beside_you() {
+    for shape in ALL_SHAPES {
+        for offset in [100.0, 200.0, 400.0] {
+            let wide = FilterDesign::new(600.0, 1_000.0, shape).response_at(600.0 + offset);
+            let narrow = FilterDesign::new(600.0, 200.0, shape).response_at(600.0 + offset);
+            assert!(narrow < wide, "{shape:?} {offset} Hz off");
+        }
+    }
+}
+
+/// The filter is the answer to a pile-up as much as to the noise: a station
+/// off your pitch falls away as you narrow it, while the one you are on is
+/// left alone.
+#[test]
+fn narrowing_the_receiver_pushes_an_interfering_station_down() {
+    let offset = crate::settings::BandSettings::default().pileup_spread_hz;
+    for shape in IF_SHAPES {
+        let rejection = |bandwidth: f64| {
+            let design = FilterDesign::new(500.0, bandwidth, shape);
+            20.0 * (design.response_at(500.0 + offset) / design.response_at(500.0)).log10()
+        };
+        assert!(rejection(FILTER_WIDTH_MIN) < rejection(1_000.0) - 20.0);
+        assert!(
+            20.0 * tone_gain(
+                SR,
+                &FilterDesign::new(500.0, FILTER_WIDTH_MIN, shape),
+                500.0
+            )
+            .log10()
+                > -0.5
+        );
+    }
+}
+
+/// Nonsense in, something finite out. No sample rate, no width, no centre:
+/// the receiver still produces numbers rather than poisoning the stream.
+#[test]
+fn a_degenerate_filter_still_produces_numbers() {
+    for shape in IF_SHAPES {
+        for (center, bandwidth) in [(f64::NAN, 500.0), (500.0, f64::NAN), (0.0, 0.0), (1e9, 1e9)] {
+            let design = FilterDesign::new(center, bandwidth, shape);
+            assert!(design.gain().is_finite() && design.gain() > 0.0);
+            for sample_rate in [0, 1, 8, 8_000, 192_000] {
+                let mut filter = ReceiverFilter::new(sample_rate, &design);
+                let mut out = [1.0f32; 64];
+                filter.apply(&mut out);
+                assert!(
+                    out.iter().all(|s| s.is_finite()),
+                    "{center}/{bandwidth} at {sample_rate}"
+                );
+            }
+        }
+    }
+}
+
+/// A sferic is an impulse by the time it arrives; what you hear is your own
+/// filter ringing, so its length is the filter's. Close the filter and the
+/// ticks of static stretch into pings — the familiar sound of a narrow filter
+/// on a noisy band.
+#[test]
+fn the_filter_decides_how_long_a_crash_rings() {
+    let tail_ms = |bandwidth: f64| {
+        let design = FilterDesign::new(600.0, bandwidth, FilterShape::Sharp);
+        let mut filter = ReceiverFilter::new(SR, &design);
+        let response: Vec<f64> = (0..SR as usize / 2)
+            .map(|n| filter.process(if n == 0 { 1.0 } else { 0.0 }).abs())
+            .collect();
+        let top = response.iter().copied().fold(0.0, f64::max);
+        let last = response.iter().rposition(|v| *v > top / 100.0).unwrap_or(0);
+        last as f64 * 1000.0 / f64::from(SR)
+    };
+    assert!(tail_ms(FILTER_WIDTH_MIN) > tail_ms(500.0) * 2.5);
+}
+
+/// The passband's edges are the filter's own 6 dB points, and a tone and its
+/// mirror — the same number of hertz the other side — are passed alike,
+/// wherever the folded sideband is out of the way.
+#[test]
+fn the_passband_edges_are_the_filters_and_mirrors_pass_alike() {
+    for shape in ALL_SHAPES {
+        for (center, bandwidth) in [(500.0, 150.0), (1_200.0, 500.0)] {
+            let design = FilterDesign::new(center, bandwidth, shape);
+            let (low, high) = passband_edges(center, bandwidth);
+            assert!(((high - low) - bandwidth).abs() < 1e-9);
+            assert!(((low + high) / 2.0 - center).abs() < 1e-9);
+            // The peak filter takes a little more off the edges on top of the
+            // IF filter, which is what puts its own 6 dB points inside them.
+            let if_part = FilterDesign::new(center, bandwidth, if_shape(shape));
+            for edge in [low, high] {
+                let db = 20.0 * if_part.response_at(edge).log10();
+                assert!(
+                    (db + 6.02).abs() < 0.05,
+                    "{shape:?} {center}/{bandwidth}: {db:.2} dB at {edge:.1} Hz"
+                );
+            }
+            for hz in [center * 0.7, center * 0.9, center * 1.3] {
+                let a = design.response_at(hz);
+                let b = design.response_at(mirror_hz(center, hz));
+                assert!(
+                    (a - b).abs() < 1e-3 * a.max(b),
+                    "{shape:?} {center}/{bandwidth}: {a:.3e} at {hz} Hz, {b:.3e} at its mirror"
+                );
+            }
+        }
+    }
+    // Wider than twice the pitch, the passband stops short of zero beat
+    // rather than offering room that is really the other sideband.
+    assert_eq!(
+        passband_edges(400.0, FILTER_WIDTH_MAX),
+        (LOWEST_EDGE_HZ, 1_400.0)
+    );
+    assert!(passband_edges(f64::NAN, f64::NAN).0.is_finite());
+    assert!(mirror_hz(500.0, 0.0).is_finite());
 }

@@ -8,6 +8,7 @@
 
 use super::*;
 use crate::band::ReceiverFilter;
+use crate::band::test_support::{Fft, hann};
 use crate::settings::FILTER_WIDTH_MAX;
 
 /// Rate for the bookkeeping tests, which never listen: a station's dits are
@@ -255,57 +256,6 @@ fn stations_send_overs_of_a_few_seconds() {
 
 // ---------------------------------------------------------------- listening
 
-/// A radix-2 FFT with its tables built once, which is what keeps a ten-minute
-/// listen affordable in a debug build.
-struct Fft {
-    twiddles: Vec<(f64, f64)>,
-    reverse: Vec<usize>,
-}
-
-impl Fft {
-    fn new(n: usize) -> Self {
-        let bits = n.trailing_zeros();
-        Self {
-            twiddles: (0..n / 2)
-                .map(|k| {
-                    let (s, c) = (-TAU * k as f64 / n as f64).sin_cos();
-                    (c, s)
-                })
-                .collect(),
-            reverse: (0..n)
-                .map(|i| i.reverse_bits() >> (usize::BITS - bits))
-                .collect(),
-        }
-    }
-
-    fn run(&self, re: &mut [f64], im: &mut [f64]) {
-        let n = re.len();
-        for (i, &j) in self.reverse.iter().enumerate() {
-            if i < j {
-                re.swap(i, j);
-                im.swap(i, j);
-            }
-        }
-        let mut half = 1;
-        while half < n {
-            let stride = n / (2 * half);
-            for start in (0..n).step_by(2 * half) {
-                for k in 0..half {
-                    let (c, s) = self.twiddles[k * stride];
-                    let (a, b) = (start + k, start + k + half);
-                    let tr = re[b] * c - im[b] * s;
-                    let ti = re[b] * s + im[b] * c;
-                    re[b] = re[a] - tr;
-                    im[b] = im[a] - ti;
-                    re[a] += tr;
-                    im[a] += ti;
-                }
-            }
-            half *= 2;
-        }
-    }
-}
-
 /// What a listener hears of the band, measured the way the recordings were:
 /// a Hann STFT, with a station counted wherever its bin stands 10 dB over the
 /// noise the default floor would put in that bin.
@@ -323,9 +273,7 @@ struct Heard {
 /// frames that start in it.
 fn listen(x: &[f64], fs: u32, points: usize, hop_sec: f64, center: f64) -> Heard {
     let fs = f64::from(fs);
-    let window: Vec<f64> = (0..points)
-        .map(|i| 0.5 - 0.5 * (TAU * i as f64 / points as f64).cos())
-        .collect();
+    let window = hann(points);
     let energy: f64 = window.iter().map(|w| w * w).sum();
     // The reference floor is white at this variance, and the filter's
     // passband leaves it so.

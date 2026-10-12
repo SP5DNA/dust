@@ -134,6 +134,12 @@ native-audio = ["dep:cpal"]
 # Plays nothing, but keeps a session's timing so the rest of the app is usable.
 silent-audio = []
 
+# The band's tests listen to minutes of audio sample by sample; unoptimised,
+# that is most of the time the whole suite takes. A little optimisation for
+# the core alone keeps them quick without slowing anything else's build.
+[profile.test.package.cw-core]
+opt-level = 1
+
 [profile.release]
 lto = true
 codegen-units = 1

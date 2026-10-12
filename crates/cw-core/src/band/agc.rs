@@ -462,6 +462,7 @@ pub(super) fn agc_law_db(over_db: f64) -> f64 {
 mod tests {
     use super::*;
     use crate::band::noise::{NoiseFloor, noise_floor_rms};
+    use crate::band::test_support::rms;
     use crate::band::{BandMixer, ReceiverFilter, agc_knee};
     use crate::settings::{FILTER_WIDTH_MAX, FilterShape, TrainingSettings};
     use crate::timing::{StationVoice, plan_morse_playback_for};
@@ -595,10 +596,6 @@ mod tests {
             .fold((0.0, 0usize), |(s, c), i| (s + gain[i], c + 1));
         assert!(count > 0, "nothing to average");
         db(sum / count as f64)
-    }
-
-    fn rms(x: &[f32]) -> f64 {
-        (x.iter().map(|s| f64::from(*s).powi(2)).sum::<f64>() / x.len().max(1) as f64).sqrt()
     }
 
     fn seconds(t: f64) -> usize {
