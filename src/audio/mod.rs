@@ -6,6 +6,13 @@
 
 #[cfg(any(feature = "web", test))]
 mod band_queue;
+#[cfg(any(
+    feature = "native-audio",
+    feature = "web",
+    feature = "silent-audio",
+    test
+))]
+mod epoch;
 #[cfg(any(feature = "native-audio", test))]
 mod mixer;
 #[cfg(feature = "native-audio")]
@@ -113,9 +120,9 @@ pub fn default_backend() -> Result<Box<dyn MorseBackend>, String> {
 /// tests drive the whole runtime through it.
 #[cfg(test)]
 pub mod fake {
+    use super::epoch::{Epoch, Ticket};
     use super::*;
     use std::cell::{Cell, RefCell};
-    use std::rc::Rc;
 
     #[derive(Clone, Debug, PartialEq)]
     pub enum Call {
@@ -226,7 +233,7 @@ pub mod fake {
                 recorder.calls.borrow_mut().push(Call::New);
                 Ok(Box::new(FakePlayer {
                     recorder: Rc::clone(&recorder),
-                    epoch: Rc::new(Cell::new(0)),
+                    epoch: Epoch::default(),
                 }))
             })
         }
@@ -234,20 +241,19 @@ pub mod fake {
 
     pub struct FakePlayer {
         recorder: Rc<Recorder>,
-        epoch: Rc<Cell<u64>>,
+        epoch: Epoch,
     }
 
     struct FakeSignal {
         recorder: Rc<Recorder>,
-        epoch: Rc<Cell<u64>>,
-        mine: u64,
+        ticket: Ticket,
         duration_ms: u32,
         played: Cell<u32>,
     }
 
     impl PlaybackSignal for FakeSignal {
         fn poll(&self) -> WaitFlags {
-            if self.epoch.get() != self.mine {
+            if self.ticket.is_cancelled() {
                 return WaitFlags {
                     cancelled: true,
                     ..Default::default()
@@ -323,13 +329,11 @@ pub mod fake {
             if self.recorder.behaviour() == Behaviour::RefuseToStart {
                 return Err("Audio stream: device is gone".to_string());
             }
-            self.epoch.set(self.epoch.get() + 1);
             // The wanted station sets the length; the others are laid over it.
             let duration_ms = (plan.wanted.duration_sec * 1000.0).ceil().max(0.0) as u32;
             Ok(Rc::new(FakeSignal {
                 recorder: Rc::clone(&self.recorder),
-                epoch: Rc::clone(&self.epoch),
-                mine: self.epoch.get(),
+                ticket: self.epoch.arm(),
                 duration_ms,
                 played: Cell::new(0),
             }))
@@ -337,13 +341,13 @@ pub mod fake {
 
         fn stop(&mut self) {
             self.recorder.calls.borrow_mut().push(Call::Stop);
-            self.epoch.set(self.epoch.get() + 1);
+            self.epoch.bump();
         }
 
         fn shutdown(&mut self) {
             self.recorder.calls.borrow_mut().push(Call::Shutdown);
             self.recorder.band_running.set(false);
-            self.epoch.set(self.epoch.get() + 1);
+            self.epoch.bump();
         }
 
         fn set_live_tone(&mut self, on: bool, _frequency_hz: f64, _gain: f64) {

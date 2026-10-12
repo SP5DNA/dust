@@ -4,21 +4,20 @@
 //! so a session keeps its Farnsworth pacing, timing and scoring — it just
 //! never makes a sound.
 
-use std::cell::Cell;
 use std::rc::Rc;
 use std::time::Instant;
 
 use cw_core::{PlannedTransmission, TrainingSettings, Transmission};
 
+use super::epoch::{Epoch, Ticket};
 use super::{MorseBackend, PlaybackSignal, WaitFlags};
 
 pub struct MorsePlayer {
-    epoch: Rc<Cell<u64>>,
+    epoch: Epoch,
 }
 
 struct SilentSignal {
-    epoch: Rc<Cell<u64>>,
-    mine: u64,
+    ticket: Ticket,
     started: Instant,
 }
 
@@ -26,7 +25,7 @@ impl PlaybackSignal for SilentSignal {
     fn poll(&self) -> WaitFlags {
         let elapsed = self.started.elapsed().as_millis();
         WaitFlags {
-            cancelled: self.epoch.get() != self.mine,
+            cancelled: self.ticket.is_cancelled(),
             finished: false,
             failed: false,
             // There is no audio to park, so a send always runs to its length.
@@ -40,7 +39,7 @@ impl PlaybackSignal for SilentSignal {
 impl MorsePlayer {
     pub fn new() -> Result<Self, String> {
         Ok(Self {
-            epoch: Rc::new(Cell::new(0)),
+            epoch: Epoch::default(),
         })
     }
 }
@@ -56,17 +55,14 @@ impl MorseBackend for MorsePlayer {
     ) -> Result<Rc<dyn PlaybackSignal>, String> {
         // Nothing is heard: the plan's length, which the wait already has,
         // is all there is to a send.
-        let mine = self.epoch.get().wrapping_add(1);
-        self.epoch.set(mine);
         Ok(Rc::new(SilentSignal {
-            epoch: Rc::clone(&self.epoch),
-            mine,
+            ticket: self.epoch.arm(),
             started: Instant::now(),
         }))
     }
 
     fn stop(&mut self) {
-        self.epoch.set(self.epoch.get().wrapping_add(1));
+        self.epoch.bump();
     }
 
     fn shutdown(&mut self) {

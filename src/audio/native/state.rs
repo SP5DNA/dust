@@ -1,41 +1,27 @@
 //! The player's bookkeeping, with no device attached.
 //!
-//! One epoch is shared by every send the player has ever made. It is what
-//! keeps an old waiter from claiming a new send's ending: a send is only
-//! current while the epoch it was armed with is the player's own. Stopping
+//! The epoch keeps an old waiter from claiming a new send's ending; stopping
 //! the sound itself is the mixer's business, send by send.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use cw_core::TrainingSettings;
 use cw_core::band::BandKey;
 
+use crate::audio::epoch::{Epoch, Ticket};
 use crate::audio::{PlaybackSignal, WaitFlags};
 
 pub struct PlayerState {
-    epoch: Arc<AtomicU64>,
+    epoch: Epoch,
     /// What the band playing now was built from.
     band: Option<BandKey>,
-}
-
-/// A send that has been given the current epoch.
-pub struct ArmedSend {
-    epoch: Arc<AtomicU64>,
-    mine: u64,
-}
-
-impl ArmedSend {
-    /// True once this send is no longer the player's current one.
-    pub fn superseded(&self) -> bool {
-        self.epoch.load(Ordering::Acquire) != self.mine
-    }
 }
 
 impl PlayerState {
     pub fn new() -> Self {
         Self {
-            epoch: Arc::new(AtomicU64::new(0)),
+            epoch: Epoch::default(),
             band: None,
         }
     }
@@ -55,24 +41,20 @@ impl PlayerState {
     }
 
     /// Claim the audio for a new send.
-    pub fn arm(&mut self) -> ArmedSend {
-        let mine = self.epoch.fetch_add(1, Ordering::AcqRel) + 1;
-        ArmedSend {
-            epoch: Arc::clone(&self.epoch),
-            mine,
-        }
+    pub fn arm(&mut self) -> Ticket {
+        self.epoch.arm()
     }
 
     /// Retire the current send, stopped or never started, so nothing can
     /// mistake it for the current one.
     pub fn retire(&mut self) {
-        self.epoch.fetch_add(1, Ordering::AcqRel);
+        self.epoch.bump();
     }
 }
 
 /// What the stream tells a waiter.
 pub struct ToneSignal {
-    armed: ArmedSend,
+    ticket: Ticket,
     finished: Arc<AtomicBool>,
     /// The word of the stream the send was started on that it broke. A send
     /// is never moved to another stream: one that replaces a broken stream
@@ -81,13 +63,9 @@ pub struct ToneSignal {
 }
 
 impl ToneSignal {
-    pub fn new(
-        armed: ArmedSend,
-        finished: Arc<AtomicBool>,
-        stream_failed: Arc<AtomicBool>,
-    ) -> Self {
+    pub fn new(ticket: Ticket, finished: Arc<AtomicBool>, stream_failed: Arc<AtomicBool>) -> Self {
         Self {
-            armed,
+            ticket,
             finished,
             stream_failed,
         }
@@ -97,7 +75,7 @@ impl ToneSignal {
 impl PlaybackSignal for ToneSignal {
     fn poll(&self) -> WaitFlags {
         WaitFlags {
-            cancelled: self.armed.superseded(),
+            cancelled: self.ticket.is_cancelled(),
             finished: self.finished.load(Ordering::Acquire),
             // A broken stream never calls back again, so the send would never
             // finish; saying so lets the session rebuild the player.
@@ -115,26 +93,6 @@ impl PlaybackSignal for ToneSignal {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_send_is_current_until_something_else_claims_the_audio() {
-        let mut state = PlayerState::new();
-        let first = state.arm();
-        assert!(!first.superseded());
-
-        let second = state.arm();
-        assert!(
-            first.superseded(),
-            "the first send should have been retired"
-        );
-        assert!(!second.superseded());
-
-        state.retire();
-        assert!(second.superseded());
-        // A stop is not undone by the send after it.
-        let third = state.arm();
-        assert!(second.superseded() && !third.superseded());
-    }
 
     #[test]
     fn the_background_is_rebuilt_only_when_its_settings_change() {
