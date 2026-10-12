@@ -5,43 +5,8 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
-use cw_core::band::{BandMixer, qsb_gain_at};
-use cw_core::{PlaybackPlan, ToneEvent, TrainingSettings};
-
-/// Fading settings the audio callback can read while the UI changes them.
-pub struct LiveQsb {
-    enabled: AtomicBool,
-    depth_bits: AtomicU64,
-    rate_bits: AtomicU64,
-}
-
-impl LiveQsb {
-    pub fn new() -> Arc<Self> {
-        Arc::new(Self {
-            enabled: AtomicBool::new(false),
-            depth_bits: AtomicU64::new(0.0f64.to_bits()),
-            rate_bits: AtomicU64::new(0.12f64.to_bits()),
-        })
-    }
-
-    pub fn store(&self, settings: &TrainingSettings) {
-        self.enabled
-            .store(settings.band.qsb_enabled, Ordering::Relaxed);
-        self.depth_bits
-            .store(settings.band.qsb_depth.to_bits(), Ordering::Relaxed);
-        self.rate_bits
-            .store(settings.band.qsb_rate_hz.to_bits(), Ordering::Relaxed);
-    }
-
-    pub fn gain_at(&self, t_sec: f64) -> f32 {
-        qsb_gain_at(
-            t_sec,
-            self.enabled.load(Ordering::Relaxed),
-            f64::from_bits(self.depth_bits.load(Ordering::Relaxed)),
-            f64::from_bits(self.rate_bits.load(Ordering::Relaxed)),
-        )
-    }
-}
+use cw_core::band::{BandMixer, Qsb};
+use cw_core::{PlaybackPlan, ToneEvent};
 
 /// The gain the receiver's AGC is holding the band down to.
 ///
@@ -203,7 +168,8 @@ pub struct TonePlayback {
     released: AtomicUsize,
     finished: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
-    qsb: Arc<LiveQsb>,
+    /// The fading this send was started with.
+    qsb: Option<Qsb>,
     /// What the receiver's AGC is doing to everything, this send included.
     agc: Arc<LiveAgc>,
     /// How many other stations are calling across this send.
@@ -215,7 +181,7 @@ impl TonePlayback {
         samples: Vec<f32>,
         sample_rate: u32,
         started_at_sec: f64,
-        qsb: Arc<LiveQsb>,
+        qsb: Option<Qsb>,
         stop: Arc<AtomicBool>,
         agc: Arc<LiveAgc>,
     ) -> Self {
@@ -244,6 +210,13 @@ impl TonePlayback {
         Arc::clone(&self.finished)
     }
 
+    /// How much of the signal the fading lets through `i` samples in.
+    fn fading(&self, i: usize) -> f32 {
+        self.qsb.map_or(1.0, |qsb| {
+            qsb.gain_at(self.started_at_sec + i as f64 / self.sample_rate)
+        })
+    }
+
     /// Fill one callback's worth of interleaved samples.
     #[cfg_attr(not(test), expect(dead_code))]
     pub fn fill(&self, out: &mut [f32], channels: usize) {
@@ -261,13 +234,12 @@ impl TonePlayback {
             return;
         }
         let mut i = self.pos.load(Ordering::SeqCst);
-        let sr = self.sample_rate;
         let mut loudest = 0.0f32;
         write_interleaved(out, channels, mix, || {
             let Some(dry) = self.samples.get(i).copied() else {
                 return 0.0;
             };
-            let faded = dry * self.qsb.gain_at(self.started_at_sec + i as f64 / sr);
+            let faded = dry * self.fading(i);
             loudest = loudest.max(faded.abs());
             i += 1;
             faded * self.agc.gain()
@@ -291,16 +263,13 @@ impl TonePlayback {
         let total = release_samples(self.sample_rate);
         let mut done = self.released.load(Ordering::SeqCst);
         let mut i = self.pos.load(Ordering::SeqCst);
-        let sr = self.sample_rate;
         write_interleaved(out, channels, mix, || {
             if done >= total {
                 return 0.0;
             }
             let dry = self.samples.get(i).copied().unwrap_or(0.0);
-            let value = dry
-                * self.qsb.gain_at(self.started_at_sec + i as f64 / sr)
-                * self.agc.gain()
-                * release_gain(done as f64 / total as f64);
+            let value =
+                dry * self.fading(i) * self.agc.gain() * release_gain(done as f64 / total as f64);
             i += 1;
             done += 1;
             value
@@ -385,7 +354,15 @@ impl BandPlayback {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cw_core::{FastrandRng, plan_morse_playback_for, resolve_station};
+    use cw_core::{FastrandRng, TrainingSettings, plan_morse_playback_for, resolve_station};
+
+    fn fading(depth: f64, rate_hz: f64) -> Option<Qsb> {
+        let mut settings = TrainingSettings::default();
+        settings.band.qsb_enabled = true;
+        settings.band.qsb_depth = depth;
+        settings.band.qsb_rate_hz = rate_hz;
+        Qsb::of(&settings.band)
+    }
 
     /// A send carrying a pile-up tells the band how many are calling across
     /// it for as long as it plays, and lets go when it is done — so the
@@ -394,15 +371,8 @@ mod tests {
     fn a_send_holds_room_for_its_callers_until_it_ends() {
         let agc = LiveAgc::new();
         let stop = Arc::new(AtomicBool::new(false));
-        let playback = TonePlayback::new(
-            vec![0.1; 400],
-            8_000,
-            0.0,
-            LiveQsb::new(),
-            stop,
-            Arc::clone(&agc),
-        )
-        .with_callers(2);
+        let playback = TonePlayback::new(vec![0.1; 400], 8_000, 0.0, None, stop, Arc::clone(&agc))
+            .with_callers(2);
         let mut out = vec![0.0f32; 160];
         playback.mix_into(&mut out, 1);
         assert_eq!(agc.callers(), 2);
@@ -417,7 +387,7 @@ mod tests {
             vec![0.1; 8_000],
             8_000,
             0.0,
-            LiveQsb::new(),
+            None,
             Arc::clone(&stop),
             Arc::clone(&agc),
         )
@@ -537,11 +507,7 @@ mod tests {
     }
 
     fn playback(samples: Vec<f32>, stop: Arc<AtomicBool>) -> TonePlayback {
-        let qsb = LiveQsb::new();
-        let mut settings = TrainingSettings::default();
-        settings.band.qsb_enabled = false;
-        qsb.store(&settings);
-        TonePlayback::new(samples, 8_000, 0.0, qsb, stop, LiveAgc::new())
+        TonePlayback::new(samples, 8_000, 0.0, None, stop, LiveAgc::new())
     }
 
     #[test]
@@ -617,17 +583,11 @@ mod tests {
 
     #[test]
     fn fading_is_applied_to_the_samples_as_they_go_out() {
-        let qsb = LiveQsb::new();
-        let mut settings = TrainingSettings::default();
-        settings.band.qsb_enabled = true;
-        settings.band.qsb_depth = 0.75;
-        settings.band.qsb_rate_hz = 1.5;
-        qsb.store(&settings);
         let playback = TonePlayback::new(
             vec![1.0; 8_000],
             8_000,
             0.0,
-            qsb,
+            fading(0.75, 1.5),
             Arc::new(AtomicBool::new(false)),
             LiveAgc::new(),
         );
@@ -646,10 +606,6 @@ mod tests {
     #[test]
     fn the_send_ducks_with_the_band() {
         let agc = LiveAgc::new();
-        let qsb = LiveQsb::new();
-        let mut settings = TrainingSettings::default();
-        settings.band.qsb_enabled = false;
-        qsb.store(&settings);
 
         let level = |gain: f64| {
             agc.store(gain);
@@ -657,7 +613,7 @@ mod tests {
                 vec![1.0; 8],
                 8_000,
                 0.0,
-                Arc::clone(&qsb),
+                None,
                 Arc::new(AtomicBool::new(false)),
                 Arc::clone(&agc),
             );
@@ -678,18 +634,13 @@ mod tests {
 
     #[test]
     fn fading_carries_on_where_the_last_send_left_off() {
-        let qsb = LiveQsb::new();
-        let mut settings = TrainingSettings::default();
-        settings.band.qsb_enabled = true;
-        settings.band.qsb_depth = 0.75;
-        settings.band.qsb_rate_hz = 0.5;
-        qsb.store(&settings);
+        let qsb = fading(0.75, 0.5);
         let level_at = |offset: f64| {
             let playback = TonePlayback::new(
                 vec![1.0; 8],
                 8_000,
                 offset,
-                Arc::clone(&qsb),
+                qsb,
                 Arc::new(AtomicBool::new(false)),
                 LiveAgc::new(),
             );
@@ -710,7 +661,7 @@ mod tests {
         // and a fade you can predict a cycle ahead is the one thing real QSB
         // never is — so it asks the shared clock directly now.
         for offset in [0.0, 0.37, 1.4, 6.25, 41.0] {
-            let expected = cw_core::band::qsb_gain_at(offset, true, 0.75, 0.5);
+            let expected = qsb.expect("fading is on").gain_at(offset);
             assert!(
                 (level_at(offset) - expected).abs() < 1e-6,
                 "a send at {offset}s played at {}, but the band was at {expected}",

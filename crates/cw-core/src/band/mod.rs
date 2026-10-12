@@ -25,8 +25,8 @@
 //!    quite silent outside the passband — as no real receiver is. A soft
 //!    limiter catches whatever is still too loud.
 //!
-//! QSB is applied to the Morse alone ([`qsb_gain_at`]): fading is a property
-//! of the path a station arrives on, not of the noise around it.
+//! QSB is applied to the Morse alone ([`Qsb`]): fading is a property of the
+//! path a station arrives on, not of the noise around it.
 //!
 //! What it deliberately does not do is invent a sound the receiver would not
 //! make. Sparse clicks through resonators a few hertz wide, their tuning
@@ -58,11 +58,11 @@ pub(crate) use filter::mirror_hz;
 pub use filter::{
     FilterDesign, MAX_RECEIVER_SECTIONS, MAX_RECEIVER_WIDTH_HZ, ReceiverFilter, Section, Sections,
 };
-pub use key::{BandKey, QsbKey};
+pub use key::BandKey;
 pub use knee::agc_knee;
 pub use noise::AudioFloor;
 pub use output::{LimiterFeed, limiter_feed, soft_limit_curve};
-pub use qsb::{QSB_MIN_GAIN, QSB_PATHS, QSB_SPREAD, qsb_gain_at, qsb_path};
+pub use qsb::Qsb;
 pub use source::BandSource;
 
 use crate::settings::{STATIONS_MIN, TrainingSettings};

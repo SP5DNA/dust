@@ -4,12 +4,10 @@ use std::rc::Rc;
 
 use cw_core::band::{
     AGC_ATTACK_SEC, AGC_COMPRESSOR_KNEE_DB, AGC_RELEASE_SEC, AudioFloor, BandKey, BandMixer,
-    BandSource, FilterDesign, MAX_RECEIVER_SECTIONS, QSB_MIN_GAIN, QSB_PATHS, QSB_SPREAD, QsbKey,
-    Section, agc_compressor, agc_knee, limiter_feed, qsb_path, soft_limit_curve,
+    BandSource, FilterDesign, MAX_RECEIVER_SECTIONS, Qsb, Section, agc_compressor, agc_knee,
+    limiter_feed, soft_limit_curve,
 };
-use cw_core::{
-    BandSettings, PlannedTransmission, TrainingSettings, Transmission, plan_transmission,
-};
+use cw_core::{PlannedTransmission, TrainingSettings, Transmission, plan_transmission};
 use gloo_timers::callback::Interval;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
@@ -86,7 +84,6 @@ pub struct MorsePlayer {
     stop_flag: Rc<Cell<bool>>,
     epoch: Rc<Cell<u64>>,
     mix_gain: GainNode,
-    cw_gain: GainNode,
     group_gain: Option<GainNode>,
     band: BandGraph,
     /// The receiver's own filter — the same resonators the native player
@@ -116,15 +113,11 @@ pub struct MorsePlayer {
     on_visibility: Option<Closure<dyn FnMut()>>,
 }
 
-/// The background layers: the band itself, streamed, and the fading
-/// oscillators on the Morse. Each is rebuilt only when its own settings move:
-/// moving the fading leaves the band playing, and a new band leaves the
-/// fading where it was in its wander.
+/// The band, streamed, and what it was built from.
 struct BandGraph {
     stream: Option<BandStream>,
     /// What the stream, and the AGC set for it, were built from.
     key: Option<BandKey>,
-    fading: Fading,
 }
 
 impl BandGraph {
@@ -132,7 +125,6 @@ impl BandGraph {
         Self {
             stream: None,
             key: None,
-            fading: Fading::default(),
         }
     }
 
@@ -142,88 +134,6 @@ impl BandGraph {
     fn stop_stream(&mut self) -> Option<([GainNode; 2], f64)> {
         self.key = None;
         self.stream.take().map(BandStream::fade_out)
-    }
-}
-
-/// The fading on the Morse: an oscillator for each propagation path, each
-/// through a gain onto the Morse's own gain.
-#[derive(Default)]
-struct Fading {
-    oscillators: Vec<web_sys::OscillatorNode>,
-    depths: Vec<GainNode>,
-    /// What it was built from.
-    key: Option<QsbKey>,
-}
-
-impl Fading {
-    /// Start fading the Morse as `band` asks, onto `cw_gain`. One oscillator
-    /// per propagation path, summed into the same gain — the same arithmetic
-    /// `qsb_gain_at` does for the native player, so the browser wanders the
-    /// same way. Every oscillator starts at zero phase, as the shared model
-    /// assumes.
-    ///
-    /// Each node is kept as soon as it is made, so one that fails part-way
-    /// leaves nothing running that [`Fading::stop`] cannot find.
-    fn start(
-        &mut self,
-        ctx: &AudioContext,
-        cw_gain: &GainNode,
-        band: &BandSettings,
-    ) -> Result<(), String> {
-        if !band.qsb_enabled || band.qsb_depth <= 0.0 {
-            return Ok(());
-        }
-        let depth = band.qsb_depth.clamp(0.0, 1.0);
-        let rate = band.qsb_rate_hz.clamp(0.03, 1.5);
-        let gain_range = depth.min(1.0 - QSB_MIN_GAIN);
-        let base_gain = 1.0 - gain_range / 2.0;
-        cw_gain
-            .gain()
-            .set_value_at_time(base_gain as f32, ctx.current_time())
-            .map_err(|e| format!("qsb base: {e:?}"))?;
-        for path in 0..QSB_PATHS {
-            let (multiple, weight) = qsb_path(path);
-            let lfo = ctx
-                .create_oscillator()
-                .map_err(|e| format!("qsb osc: {e:?}"))?;
-            self.oscillators.push(lfo.clone());
-            let lfo_gain = ctx.create_gain().map_err(|e| format!("qsb gain: {e:?}"))?;
-            self.depths.push(lfo_gain.clone());
-            lfo.set_type(OscillatorType::Sine);
-            lfo.frequency()
-                .set_value_at_time((rate * multiple) as f32, ctx.current_time())
-                .map_err(|e| format!("qsb rate: {e:?}"))?;
-            lfo_gain
-                .gain()
-                .set_value_at_time(
-                    (gain_range / 2.0 * weight * QSB_SPREAD) as f32,
-                    ctx.current_time(),
-                )
-                .map_err(|e| format!("qsb depth: {e:?}"))?;
-            lfo.connect_with_audio_node(&lfo_gain)
-                .map_err(|e| format!("qsb connect: {e:?}"))?;
-            lfo_gain
-                .connect_with_audio_param(&cw_gain.gain())
-                .map_err(|e| format!("qsb param: {e:?}"))?;
-            lfo.start().map_err(|e| format!("qsb start: {e:?}"))?;
-        }
-        Ok(())
-    }
-
-    /// Stop the oscillators, take them out of the graph, and put the Morse
-    /// back at full level.
-    fn stop(&mut self, ctx: &AudioContext, cw_gain: &GainNode) {
-        for lfo in self.oscillators.drain(..) {
-            let _ = lfo.stop();
-            let _ = lfo.disconnect();
-        }
-        for gain in self.depths.drain(..) {
-            let _ = gain.disconnect();
-        }
-        let now = ctx.current_time();
-        let _ = cw_gain.gain().cancel_scheduled_values(now);
-        let _ = cw_gain.gain().set_value_at_time(1.0, now);
-        self.key = None;
     }
 }
 
@@ -530,18 +440,10 @@ impl MorsePlayer {
     pub fn new() -> Result<Self, String> {
         let ctx = AudioContext::new().map_err(|e| format!("AudioContext: {e:?}"))?;
         let mix_gain = ctx.create_gain().map_err(|e| format!("mix gain: {e:?}"))?;
-        let cw_gain = ctx.create_gain().map_err(|e| format!("cw gain: {e:?}"))?;
         mix_gain
             .gain()
             .set_value_at_time(1.0, ctx.current_time())
             .map_err(|e| format!("mix set: {e:?}"))?;
-        cw_gain
-            .gain()
-            .set_value_at_time(1.0, ctx.current_time())
-            .map_err(|e| format!("cw set: {e:?}"))?;
-        cw_gain
-            .connect_with_audio_node(&mix_gain)
-            .map_err(|e| format!("cw connect: {e:?}"))?;
         // The receiver's filter sits where a real one does: at the end, with
         // everything already mixed into it. The native player filters the send
         // and the background separately, which comes to the same thing — the
@@ -625,7 +527,6 @@ impl MorsePlayer {
             stop_flag: Rc::new(Cell::new(false)),
             epoch: Rc::new(Cell::new(0)),
             mix_gain,
-            cw_gain,
             group_gain: None,
             band: BandGraph::new(),
             receiver: None,
@@ -736,7 +637,6 @@ impl MorsePlayer {
 
     fn apply_band_now(&mut self, settings: &TrainingSettings) -> Result<(), String> {
         self.tune_receiver(settings)?;
-        self.tune_fading(settings)?;
         let key = BandKey::of(&settings.band);
         if self.band.key == Some(key) {
             return Ok(());
@@ -756,24 +656,6 @@ impl MorsePlayer {
         }
         self.tune_agc(settings);
         self.band.key = Some(key);
-        Ok(())
-    }
-
-    /// Re-arm the fading on the Morse when its settings have moved, and only
-    /// then: the band under it plays on.
-    fn tune_fading(&mut self, settings: &TrainingSettings) -> Result<(), String> {
-        let key = QsbKey::of(&settings.band);
-        if self.band.fading.key == Some(key) {
-            return Ok(());
-        }
-        self.band.fading.stop(&self.ctx, &self.cw_gain);
-        if self.ctx.state() == AudioContextState::Closed {
-            return Ok(());
-        }
-        self.band
-            .fading
-            .start(&self.ctx, &self.cw_gain, &settings.band)?;
-        self.band.fading.key = Some(key);
         Ok(())
     }
 
@@ -884,7 +766,7 @@ impl MorsePlayer {
         let planned = plan_transmission(transmission, settings);
         let plan = &planned.wanted;
         let started_at = self.ctx.current_time();
-        self.schedule_plan(&planned)?;
+        self.schedule_plan(&planned, Qsb::of(&settings.band))?;
         if let Some(stream) = &self.band.stream {
             stream.reserve(planned.others.len(), started_at + plan.duration_sec);
         }
@@ -902,20 +784,33 @@ impl MorsePlayer {
         ))
     }
 
-    fn schedule_plan(&mut self, planned: &PlannedTransmission) -> Result<(), String> {
+    fn schedule_plan(
+        &mut self,
+        planned: &PlannedTransmission,
+        fading: Option<Qsb>,
+    ) -> Result<(), String> {
         self.reset_stop_flag();
 
         let group_gain = self.ctx.create_gain().map_err(|e| format!("gain: {e:?}"))?;
         group_gain
-            .gain()
-            .set_value_at_time(1.0, self.ctx.current_time())
-            .map_err(|e| format!("gain set: {e:?}"))?;
-        group_gain
-            .connect_with_audio_node(&self.cw_gain)
+            .connect_with_audio_node(&self.mix_gain)
             .map_err(|e| format!("connect: {e:?}"))?;
         self.group_gain = Some(group_gain.clone());
 
         let start = self.ctx.current_time();
+        // The fading, on the send's own gain, read off the context's clock
+        // as the native player reads it off its own: a send drops into a
+        // fade already in progress rather than starting one. The curve is
+        // the shared fade, sampled — nothing else the graph can build stays
+        // inside its range.
+        if let Some(fading) = fading {
+            let length = planned.wanted.duration_sec.max(0.01);
+            let mut curve = fading.curve(start, length);
+            group_gain
+                .gain()
+                .set_value_curve_at_time(&mut curve, start, length)
+                .map_err(|e| format!("fading: {e:?}"))?;
+        }
         // The wanted station and everyone calling over it go into the same
         // gain: interference is addition, and each station's events already
         // carry its own pitch and level.
@@ -997,7 +892,6 @@ impl MorseBackend for MorsePlayer {
         // Faded rather than disconnected on the spot: the fades are let go of
         // on the next send, or when the player itself goes.
         self.retire_stream();
-        self.band.fading.stop(&self.ctx, &self.cw_gain);
         if let Some(gain) = &self.live_gain {
             let now = self.ctx.current_time();
             let _ = gain.gain().cancel_scheduled_values(now);

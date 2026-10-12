@@ -12,10 +12,10 @@ use std::time::Instant;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{BufferSize, FromSample, Sample, SampleFormat, SizedSample};
-use cw_core::band::{BandMixer, FilterDesign, ReceiverFilter};
+use cw_core::band::{BandMixer, FilterDesign, Qsb, ReceiverFilter};
 use cw_core::{TrainingSettings, Transmission, plan_transmission};
 
-use super::render::{BandPlayback, LiveAgc, LiveQsb, TonePlayback, mix_plan_into, render_plan};
+use super::render::{BandPlayback, LiveAgc, TonePlayback, mix_plan_into, render_plan};
 use super::{MorseBackend, PlaybackWait};
 use state::{PlayerState, ToneSignal};
 
@@ -72,7 +72,6 @@ pub struct MorsePlayer {
     /// reports the failure so the session can recover rather than stall.
     stream_failed: Arc<AtomicBool>,
     sample_rate: u32,
-    qsb: Arc<LiveQsb>,
     /// What the background's AGC is holding everything down to.
     agc: Arc<LiveAgc>,
     /// When the player opened. Fading is read off this clock so it keeps
@@ -116,7 +115,6 @@ impl MorsePlayer {
             stream: None,
             stream_failed: Arc::new(AtomicBool::new(false)),
             sample_rate: supported.sample_rate().0,
-            qsb: LiveQsb::new(),
             agc: LiveAgc::new(),
             opened_at: Instant::now(),
             live: LiveSidetone::new(),
@@ -159,7 +157,6 @@ impl MorsePlayer {
     /// a device that changed rate is known about before the band is built at
     /// the old one. Says whether the stream is up.
     fn band_and_mixer(&mut self, settings: &TrainingSettings) -> Result<(), String> {
-        self.qsb.store(settings);
         let mixer = self.ensure_mixer();
         if let Err(err) = &mixer {
             eprintln!("audio mixer: {err}");
@@ -242,7 +239,7 @@ impl MorseBackend for MorsePlayer {
                 samples,
                 self.sample_rate,
                 self.opened_at.elapsed().as_secs_f64(),
-                Arc::clone(&self.qsb),
+                Qsb::of(&settings.band),
                 Arc::clone(armed.stop_flag()),
                 Arc::clone(&self.agc),
             )
