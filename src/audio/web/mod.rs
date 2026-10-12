@@ -19,7 +19,7 @@ mod stream;
 use std::cell::Cell;
 use std::rc::Rc;
 
-use cw_core::band::{BandKey, BandMixer, Qsb};
+use cw_core::band::{BandKey, Qsb};
 use cw_core::{PlannedTransmission, TrainingSettings, Transmission};
 use gloo_timers::callback::Timeout;
 use wasm_bindgen::JsCast;
@@ -158,7 +158,7 @@ impl MorsePlayer {
         if self.ctx.state() == AudioContextState::Closed {
             return Ok(());
         }
-        if BandMixer::needs_background(settings) {
+        if settings.band.has_background() {
             let stream =
                 BandStream::start(&self.ctx, &self.chain.mix, &self.chain.floor_in, settings)?;
             stream.reserve(pileup);
@@ -209,7 +209,7 @@ impl MorseBackend for MorsePlayer {
     }
 
     fn apply_band(&mut self, settings: &TrainingSettings) {
-        if BandMixer::needs_background(settings) {
+        if settings.band.has_background() {
             self.resume_from_gesture();
         }
         // A node the browser will not make leaves the band as it was; the

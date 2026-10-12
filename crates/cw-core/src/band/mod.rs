@@ -66,7 +66,7 @@ pub use output::{LimiterFeed, limiter_feed, soft_limit, soft_limit_curve};
 pub use qsb::Qsb;
 pub use source::BandSource;
 
-use crate::settings::{STATIONS_MIN, TrainingSettings};
+use crate::settings::{BandSettings, STATIONS_MIN, TrainingSettings};
 use agc::Agc;
 use calibration::{noise_level, qrn_level};
 
@@ -111,13 +111,6 @@ impl BandMixer {
             },
             audio_floor: AudioFloor::for_band(sample_rate, band, seed),
         }
-    }
-
-    /// Whether these settings put anything on the band at all. When they do
-    /// not, there is no background stream to run.
-    pub fn needs_background(settings: &TrainingSettings) -> bool {
-        let band = &settings.band;
-        qrn_level(band) > 0.0 || noise_level(band) > 0.0 || band.stations_max > STATIONS_MIN
     }
 
     /// One sample of the band, with `send` — the Morse at this instant,
@@ -165,7 +158,16 @@ impl BandMixer {
     }
 }
 
+impl BandSettings {
+    /// Whether these settings put anything on the band at all. When they do
+    /// not, there is no background stream to run.
+    pub fn has_background(&self) -> bool {
+        qrn_level(self) > 0.0 || noise_level(self) > 0.0 || self.stations_max > STATIONS_MIN
+    }
+}
+
 #[cfg(test)]
 mod test_support;
+
 #[cfg(test)]
 mod tests;

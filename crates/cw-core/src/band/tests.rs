@@ -639,12 +639,12 @@ fn a_rebuilt_band_carries_the_gain_on() {
 
 #[test]
 fn a_silent_band_needs_no_background_stream_and_mixes_to_silence() {
-    assert!(!BandMixer::needs_background(&quiet()));
-    assert!(BandMixer::needs_background(&only_qrn(0.3)));
-    assert!(BandMixer::needs_background(&only_noise(0.2)));
+    assert!(!quiet().band.has_background());
+    assert!(only_qrn(0.3).band.has_background());
+    assert!(only_noise(0.2).band.has_background());
     // Enabled at zero level is still silence.
-    assert!(!BandMixer::needs_background(&only_qrn(0.0)));
-    assert!(!BandMixer::needs_background(&only_noise(0.0)));
+    assert!(!only_qrn(0.0).band.has_background());
+    assert!(!only_noise(0.0).band.has_background());
 
     let mut mixer = BandMixer::new(8_000, &quiet(), 1);
     let mut out = [1.0f32; 64];

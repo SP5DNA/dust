@@ -4,8 +4,8 @@
 
 use cw_core::TrainingSettings;
 use cw_core::band::{
-    AGC_ATTACK_SEC, AGC_COMPRESSOR_KNEE_DB, AGC_RELEASE_SEC, BandMixer, FilterDesign,
-    agc_compressor, agc_knee, limiter_feed, soft_limit_curve,
+    AGC_ATTACK_SEC, AGC_COMPRESSOR_KNEE_DB, AGC_RELEASE_SEC, FilterDesign, agc_compressor,
+    agc_knee, limiter_feed, soft_limit_curve,
 };
 use web_sys::{AudioContext, DynamicsCompressorNode, GainNode};
 
@@ -120,7 +120,7 @@ impl Chain {
     /// receiver's output, which has been through the compressor, and not for
     /// the audio-stage floor, which has not ([`limiter_feed`]).
     pub fn tune_agc(&self, ctx: &AudioContext, settings: &TrainingSettings) {
-        let knee = if BandMixer::needs_background(settings) {
+        let knee = if settings.band.has_background() {
             agc_knee(&settings.band, &FilterDesign::from_settings(settings))
         } else {
             None

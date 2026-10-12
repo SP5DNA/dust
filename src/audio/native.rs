@@ -202,7 +202,7 @@ impl MorseBackend for MorsePlayer {
             return;
         }
         let rate = self.mixer().sample_rate();
-        let band = BandMixer::needs_background(settings).then(|| {
+        let band = settings.band.has_background().then(|| {
             // A fresh band every time, as the browser's is: with stations
             // on it, a fixed seed would replay the same callsigns at the
             // same moments in every session.

@@ -301,7 +301,7 @@ pub mod fake {
                 .push(Call::Band(cw_core::band::BandKey::of(&settings.band)));
             self.recorder
                 .band_running
-                .set(cw_core::band::BandMixer::needs_background(settings));
+                .set(settings.band.has_background());
         }
 
         fn start(
