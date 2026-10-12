@@ -3,12 +3,12 @@ use std::collections::VecDeque;
 use std::rc::Rc;
 
 use cw_core::band::{
-    AGC_ATTACK_SEC, AGC_COMPRESSOR_KNEE_DB, AGC_RELEASE_SEC, AudioFloor, BandMixer, BandSource,
-    FilterDesign, MAX_RECEIVER_SECTIONS, QSB_MIN_GAIN, QSB_PATHS, QSB_SPREAD, Section,
-    agc_compressor, agc_knee, limiter_feed, qsb_path, receiver_width_hz, soft_limit_curve,
+    AGC_ATTACK_SEC, AGC_COMPRESSOR_KNEE_DB, AGC_RELEASE_SEC, AudioFloor, BandKey, BandMixer,
+    BandSource, FilterDesign, MAX_RECEIVER_SECTIONS, QSB_MIN_GAIN, QSB_PATHS, QSB_SPREAD, QsbKey,
+    Section, agc_compressor, agc_knee, limiter_feed, qsb_path, soft_limit_curve,
 };
 use cw_core::{
-    FilterShape, PlannedTransmission, TrainingSettings, Transmission, plan_transmission,
+    BandSettings, PlannedTransmission, TrainingSettings, Transmission, plan_transmission,
 };
 use gloo_timers::callback::Interval;
 use wasm_bindgen::JsCast;
@@ -117,66 +117,113 @@ pub struct MorsePlayer {
 }
 
 /// The background layers: the band itself, streamed, and the fading
-/// oscillators on the Morse.
+/// oscillators on the Morse. Each is rebuilt only when its own settings move:
+/// moving the fading leaves the band playing, and a new band leaves the
+/// fading where it was in its wander.
 struct BandGraph {
     stream: Option<BandStream>,
-    sources: Vec<AudioScheduledSourceNode>,
-    nodes: Vec<AudioNode>,
-    signature: String,
+    /// What the stream, and the AGC set for it, were built from.
+    key: Option<BandKey>,
+    fading: Fading,
 }
 
 impl BandGraph {
     fn new() -> Self {
         Self {
             stream: None,
-            sources: Vec::new(),
-            nodes: Vec::new(),
-            signature: String::new(),
+            key: None,
+            fading: Fading::default(),
         }
     }
 
-    /// Take the band down. The stream fades rather than stopping dead; its
+    /// Take the band's stream down. It fades rather than stopping dead; its
     /// output gains are handed back so the caller can let them go once the
     /// fade has run.
-    fn stop_layers(
+    fn stop_stream(&mut self) -> Option<([GainNode; 2], f64)> {
+        self.key = None;
+        self.stream.take().map(BandStream::fade_out)
+    }
+}
+
+/// The fading on the Morse: an oscillator for each propagation path, each
+/// through a gain onto the Morse's own gain.
+#[derive(Default)]
+struct Fading {
+    oscillators: Vec<web_sys::OscillatorNode>,
+    depths: Vec<GainNode>,
+    /// What it was built from.
+    key: Option<QsbKey>,
+}
+
+impl Fading {
+    /// Start fading the Morse as `band` asks, onto `cw_gain`. One oscillator
+    /// per propagation path, summed into the same gain — the same arithmetic
+    /// `qsb_gain_at` does for the native player, so the browser wanders the
+    /// same way. Every oscillator starts at zero phase, as the shared model
+    /// assumes.
+    ///
+    /// Each node is kept as soon as it is made, so one that fails part-way
+    /// leaves nothing running that [`Fading::stop`] cannot find.
+    fn start(
         &mut self,
         ctx: &AudioContext,
         cw_gain: &GainNode,
-    ) -> Option<([GainNode; 2], f64)> {
-        let fading = self.stream.take().map(BandStream::fade_out);
-        for source in self.sources.drain(..) {
-            let _ = source.stop();
-            let _ = source.unchecked_ref::<AudioNode>().disconnect();
+        band: &BandSettings,
+    ) -> Result<(), String> {
+        if !band.qsb_enabled || band.qsb_depth <= 0.0 {
+            return Ok(());
         }
-        for node in self.nodes.drain(..) {
-            let _ = node.disconnect();
+        let depth = band.qsb_depth.clamp(0.0, 1.0);
+        let rate = band.qsb_rate_hz.clamp(0.03, 1.5);
+        let gain_range = depth.min(1.0 - QSB_MIN_GAIN);
+        let base_gain = 1.0 - gain_range / 2.0;
+        cw_gain
+            .gain()
+            .set_value_at_time(base_gain as f32, ctx.current_time())
+            .map_err(|e| format!("qsb base: {e:?}"))?;
+        for path in 0..QSB_PATHS {
+            let (multiple, weight) = qsb_path(path);
+            let lfo = ctx
+                .create_oscillator()
+                .map_err(|e| format!("qsb osc: {e:?}"))?;
+            self.oscillators.push(lfo.clone());
+            let lfo_gain = ctx.create_gain().map_err(|e| format!("qsb gain: {e:?}"))?;
+            self.depths.push(lfo_gain.clone());
+            lfo.set_type(OscillatorType::Sine);
+            lfo.frequency()
+                .set_value_at_time((rate * multiple) as f32, ctx.current_time())
+                .map_err(|e| format!("qsb rate: {e:?}"))?;
+            lfo_gain
+                .gain()
+                .set_value_at_time(
+                    (gain_range / 2.0 * weight * QSB_SPREAD) as f32,
+                    ctx.current_time(),
+                )
+                .map_err(|e| format!("qsb depth: {e:?}"))?;
+            lfo.connect_with_audio_node(&lfo_gain)
+                .map_err(|e| format!("qsb connect: {e:?}"))?;
+            lfo_gain
+                .connect_with_audio_param(&cw_gain.gain())
+                .map_err(|e| format!("qsb param: {e:?}"))?;
+            lfo.start().map_err(|e| format!("qsb start: {e:?}"))?;
+        }
+        Ok(())
+    }
+
+    /// Stop the oscillators, take them out of the graph, and put the Morse
+    /// back at full level.
+    fn stop(&mut self, ctx: &AudioContext, cw_gain: &GainNode) {
+        for lfo in self.oscillators.drain(..) {
+            let _ = lfo.stop();
+            let _ = lfo.disconnect();
+        }
+        for gain in self.depths.drain(..) {
+            let _ = gain.disconnect();
         }
         let now = ctx.current_time();
         let _ = cw_gain.gain().cancel_scheduled_values(now);
         let _ = cw_gain.gain().set_value_at_time(1.0, now);
-        self.signature.clear();
-        fading
-    }
-}
-
-/// What a receiver bank was built for. Compared straight off the settings, so
-/// a send that changes nothing costs nothing.
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct ReceiverKey {
-    pitch_hz: f64,
-    /// The width it is really built at, which the side-tone range can widen
-    /// past the one on the control.
-    width_hz: f64,
-    shape: FilterShape,
-}
-
-impl ReceiverKey {
-    fn of(settings: &TrainingSettings) -> Self {
-        Self {
-            pitch_hz: settings.side_tone_center(),
-            width_hz: receiver_width_hz(settings),
-            shape: settings.band.filter_shape,
-        }
+        self.key = None;
     }
 }
 
@@ -191,7 +238,8 @@ impl ReceiverKey {
 /// Its coefficients are fixed once it is made, so a retune builds a new bank
 /// and crossfades to it rather than moving the old one.
 struct ReceiverBank {
-    key: ReceiverKey,
+    /// What it was built from.
+    design: FilterDesign,
     sections: Vec<web_sys::IirFilterNode>,
     /// Sums the sections. Ramped in and out across a retune.
     output: GainNode,
@@ -205,7 +253,6 @@ impl ReceiverBank {
         input: &GainNode,
         into: &GainNode,
         design: &FilterDesign,
-        key: ReceiverKey,
     ) -> Result<Self, String> {
         let output = ctx
             .create_gain()
@@ -215,7 +262,7 @@ impl ReceiverBank {
             .set_value_at_time(0.0, ctx.current_time())
             .map_err(|e| format!("receiver output set: {e:?}"))?;
         let mut bank = Self {
-            key,
+            design: design.clone(),
             sections: Vec::with_capacity(MAX_RECEIVER_SECTIONS),
             output,
         };
@@ -643,13 +690,15 @@ impl MorsePlayer {
     /// new one fades in, then is taken out of the graph.
     fn tune_receiver(&mut self, settings: &TrainingSettings) -> Result<(), String> {
         self.drop_retired_receivers();
-        let key = ReceiverKey::of(settings);
-        if self.receiver.as_ref().is_some_and(|bank| bank.key == key) {
+        let design = FilterDesign::from_settings(settings);
+        if self
+            .receiver
+            .as_ref()
+            .is_some_and(|bank| bank.design == design)
+        {
             return Ok(());
         }
-        let design = FilterDesign::from_settings(settings);
-        let bank =
-            ReceiverBank::build(&self.ctx, &self.mix_gain, &self.receiver_gain, &design, key)?;
+        let bank = ReceiverBank::build(&self.ctx, &self.mix_gain, &self.receiver_gain, &design)?;
         let now = self.ctx.current_time();
         let gain = bank.output.gain();
         match self.receiver.replace(bank) {
@@ -687,17 +736,17 @@ impl MorsePlayer {
 
     fn apply_band_now(&mut self, settings: &TrainingSettings) -> Result<(), String> {
         self.tune_receiver(settings)?;
-        let signature = settings.band_signature();
-        if signature == self.band.signature {
+        self.tune_fading(settings)?;
+        let key = BandKey::of(&settings.band);
+        if self.band.key == Some(key) {
             return Ok(());
         }
         // A send in flight keeps its pile-up when the band under it changes.
         let pileup = self.band.stream.as_ref().and_then(BandStream::pileup);
-        self.retire_band();
+        self.retire_stream();
         if self.ctx.state() == AudioContextState::Closed {
             return Ok(());
         }
-        add_qsb(&self.ctx, &self.cw_gain, settings, &mut self.band)?;
         if BandMixer::needs_background(settings) {
             let stream = BandStream::start(&self.ctx, &self.mix_gain, &self.floor_in, settings)?;
             if let Some((callers, until)) = pileup {
@@ -706,14 +755,33 @@ impl MorsePlayer {
             self.band.stream = Some(stream);
         }
         self.tune_agc(settings);
-        self.band.signature = signature;
+        self.band.key = Some(key);
         Ok(())
     }
 
-    /// Fade the band out, and let go of whatever earlier fades have finished.
-    fn retire_band(&mut self) {
+    /// Re-arm the fading on the Morse when its settings have moved, and only
+    /// then: the band under it plays on.
+    fn tune_fading(&mut self, settings: &TrainingSettings) -> Result<(), String> {
+        let key = QsbKey::of(&settings.band);
+        if self.band.fading.key == Some(key) {
+            return Ok(());
+        }
+        self.band.fading.stop(&self.ctx, &self.cw_gain);
+        if self.ctx.state() == AudioContextState::Closed {
+            return Ok(());
+        }
+        self.band
+            .fading
+            .start(&self.ctx, &self.cw_gain, &settings.band)?;
+        self.band.fading.key = Some(key);
+        Ok(())
+    }
+
+    /// Fade the band's stream out, and let go of whatever earlier fades have
+    /// finished.
+    fn retire_stream(&mut self) {
         self.drop_released();
-        if let Some((gains, done)) = self.band.stop_layers(&self.ctx, &self.cw_gain) {
+        if let Some((gains, done)) = self.band.stop_stream() {
             self.released
                 .extend(gains.into_iter().map(|gain| (gain, done)));
         }
@@ -928,7 +996,8 @@ impl MorseBackend for MorsePlayer {
         MorseBackend::stop(self);
         // Faded rather than disconnected on the spot: the fades are let go of
         // on the next send, or when the player itself goes.
-        self.retire_band();
+        self.retire_stream();
+        self.band.fading.stop(&self.ctx, &self.cw_gain);
         if let Some(gain) = &self.live_gain {
             let now = self.ctx.current_time();
             let _ = gain.gain().cancel_scheduled_values(now);
@@ -1002,62 +1071,4 @@ fn install_resume_on_foreground(ctx: &AudioContext) -> Option<Closure<dyn FnMut(
     doc.add_event_listener_with_callback("visibilitychange", closure.as_ref().unchecked_ref())
         .ok()?;
     Some(closure)
-}
-
-fn push_source(graph: &mut BandGraph, source: impl JsCast) {
-    graph.sources.push(source.unchecked_into());
-}
-
-fn push_node(graph: &mut BandGraph, node: impl JsCast) {
-    graph.nodes.push(node.unchecked_into());
-}
-
-fn add_qsb(
-    ctx: &AudioContext,
-    cw_gain: &GainNode,
-    settings: &TrainingSettings,
-    graph: &mut BandGraph,
-) -> Result<(), String> {
-    if !settings.band.qsb_enabled || settings.band.qsb_depth <= 0.0 {
-        return Ok(());
-    }
-    let depth = settings.band.qsb_depth.clamp(0.0, 1.0);
-    let rate = settings.band.qsb_rate_hz.clamp(0.03, 1.5);
-    let gain_range = depth.min(1.0 - QSB_MIN_GAIN);
-    let base_gain = 1.0 - gain_range / 2.0;
-    cw_gain
-        .gain()
-        .set_value_at_time(base_gain as f32, ctx.current_time())
-        .map_err(|e| format!("qsb base: {e:?}"))?;
-    // One oscillator per propagation path, summed into the same gain — which
-    // is the same arithmetic `qsb_gain_at` does for the native player, so the
-    // browser wanders the same way rather than keeping the old tremolo. Every
-    // oscillator starts at zero phase, as the shared model assumes.
-    for path in 0..QSB_PATHS {
-        let (multiple, weight) = qsb_path(path);
-        let lfo = ctx
-            .create_oscillator()
-            .map_err(|e| format!("qsb osc: {e:?}"))?;
-        let lfo_gain = ctx.create_gain().map_err(|e| format!("qsb gain: {e:?}"))?;
-        lfo.set_type(OscillatorType::Sine);
-        lfo.frequency()
-            .set_value_at_time((rate * multiple) as f32, ctx.current_time())
-            .map_err(|e| format!("qsb rate: {e:?}"))?;
-        lfo_gain
-            .gain()
-            .set_value_at_time(
-                (gain_range / 2.0 * weight * QSB_SPREAD) as f32,
-                ctx.current_time(),
-            )
-            .map_err(|e| format!("qsb depth: {e:?}"))?;
-        lfo.connect_with_audio_node(&lfo_gain)
-            .map_err(|e| format!("qsb connect: {e:?}"))?;
-        lfo_gain
-            .connect_with_audio_param(&cw_gain.gain())
-            .map_err(|e| format!("qsb param: {e:?}"))?;
-        lfo.start().map_err(|e| format!("qsb start: {e:?}"))?;
-        push_source(graph, lfo);
-        push_node(graph, lfo_gain);
-    }
-    Ok(())
 }

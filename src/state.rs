@@ -272,7 +272,10 @@ mod tests {
             settings.band.qrn_enabled = true;
             settings.band.qrn_level = 0.4;
             h.app.apply_band_live(&settings);
-            assert_eq!(h.calls(), vec![Call::Band(settings.band_signature())]);
+            assert_eq!(
+                h.calls(),
+                vec![Call::Band(cw_core::band::BandKey::of(&settings.band))]
+            );
         });
     }
 

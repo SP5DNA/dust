@@ -9,13 +9,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use cw_core::TrainingSettings;
+use cw_core::band::BandKey;
 
 use crate::audio::{PlaybackSignal, WaitFlags};
 
 pub struct PlayerState {
     stop: Arc<AtomicBool>,
     epoch: Arc<AtomicU64>,
-    band_signature: Option<String>,
+    /// What the band playing now was built from.
+    band: Option<BandKey>,
 }
 
 /// A send that has been given the current epoch.
@@ -42,21 +44,22 @@ impl PlayerState {
         Self {
             stop: Arc::new(AtomicBool::new(false)),
             epoch: Arc::new(AtomicU64::new(0)),
-            band_signature: None,
+            band: None,
         }
     }
 
-    /// Whether the background layers have to be rebuilt for these settings.
+    /// Whether the band has to be rebuilt for these settings. The fading is
+    /// not part of it: it is applied to the Morse as it plays.
     pub fn band_needs_rebuild(&self, settings: &TrainingSettings) -> bool {
-        self.band_signature.as_deref() != Some(settings.band_signature().as_str())
+        self.band != Some(BandKey::of(&settings.band))
     }
 
     pub fn note_band(&mut self, settings: &TrainingSettings) {
-        self.band_signature = Some(settings.band_signature());
+        self.band = Some(BandKey::of(&settings.band));
     }
 
     pub fn forget_band(&mut self) {
-        self.band_signature = None;
+        self.band = None;
     }
 
     /// Claim the audio for a new send.
@@ -181,6 +184,15 @@ mod tests {
         let mut faster = settings.clone();
         faster.playback.char_wpm_min = 40.0;
         assert!(!state.band_needs_rebuild(&faster));
+
+        // Nor is the fading: it plays on the Morse, live, and a new band
+        // would only be a new draw of stations and static for nothing.
+        let mut fading = settings.clone();
+        fading.band.qsb_depth = 0.9;
+        fading.band.qsb_rate_hz = 0.5;
+        assert!(!state.band_needs_rebuild(&fading));
+        fading.band.qsb_enabled = false;
+        assert!(!state.band_needs_rebuild(&fading));
 
         state.forget_band();
         assert!(state.band_needs_rebuild(&settings));

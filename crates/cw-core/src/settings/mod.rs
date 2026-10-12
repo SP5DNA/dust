@@ -286,7 +286,7 @@ pub struct BandSettings {
     /// narrowing a real filter does: less static gets through, the signal
     /// loses a little of its keying sidebands, and the filter rings longer.
     /// The receiver is built at least wide enough to pass the whole side-tone
-    /// range, whatever is set here ([`crate::band::receiver_width_hz`]).
+    /// range, whatever is set here ([`crate::band::FilterDesign::from_settings`]).
     ///
     /// Older saves held a width at 3 dB, as `filterBandwidthHz`. That key is
     /// deliberately not read: almost every one of them is the old default
@@ -979,44 +979,6 @@ mod invariant_tests {
         // A different sequence is a different alphabet.
         s.curriculum.custom_sequence = vec!['A', 'B'];
         assert_eq!(s.alphabet_fingerprint(), "AB");
-    }
-
-    #[test]
-    fn the_band_signature_changes_with_every_band_setting() {
-        let base = TrainingSettings::default();
-        let mut seen = vec![base.band_signature()];
-        let edits: Vec<fn(&mut TrainingSettings)> = vec![
-            |s| s.band.side_tone_min = 333.0,
-            |s| s.band.side_tone_max = 999.0,
-            |s| s.band.qsb_enabled = false,
-            |s| s.band.qsb_depth = 0.9,
-            |s| s.band.qsb_rate_hz = 0.9,
-            |s| s.band.qrn_enabled = false,
-            |s| s.band.qrn_level = 0.9,
-            |s| s.band.noise_enabled = false,
-            |s| s.band.noise_level = 0.9,
-            // The band's own traffic is capped by how many may call at once,
-            // and keeps clear of the wanted station by its quietest level.
-            |s| s.band.stations_max = 3,
-            |s| s.band.volume_min = 0.3,
-            |s| s.band.agc_enabled = false,
-            |s| s.band.filter_width_hz = 250.0,
-            |s| s.band.filter_shape = FilterShape::Soft,
-        ];
-        for edit in edits {
-            let mut changed = base.clone();
-            edit(&mut changed);
-            let signature = changed.band_signature();
-            assert!(
-                !seen.contains(&signature),
-                "signature repeated: {signature}"
-            );
-            seen.push(signature);
-        }
-        // Speed is not a band setting, so it leaves the signature alone.
-        let mut faster = base.clone();
-        faster.playback.char_wpm_min = 40.0;
-        assert_eq!(faster.band_signature(), base.band_signature());
     }
 
     #[test]

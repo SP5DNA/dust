@@ -44,8 +44,10 @@ use std::f64::consts::{PI, TAU};
 
 use super::calibration::REFERENCE_BANDWIDTH_HZ;
 use super::dsp::{Biquad, db_to_gain, finite_or, gain_to_db};
+use super::memo::{Exact, LastAnswer};
 use crate::settings::{
-    DEFAULT_FILTER_WIDTH_HZ, FILTER_WIDTH_MAX, FILTER_WIDTH_MIN, FilterShape, TrainingSettings,
+    BandSettings, DEFAULT_FILTER_WIDTH_HZ, FILTER_WIDTH_MAX, FILTER_WIDTH_MIN, FilterShape,
+    TrainingSettings,
 };
 
 /// How many poles the receiver's IF filter has: the low-pass prototype every
@@ -81,7 +83,7 @@ pub const APF_BOOST_DB: f64 = 6.0;
 /// The widest the receiver is ever built, in hertz at 6 dB.
 ///
 /// Wider than the width control goes, because the receiver always passes the
-/// whole side-tone range ([`receiver_width_hz`]): the widest range the
+/// whole side-tone range ([`FilterDesign::from_settings`]): the widest range the
 /// controls allow, 200-1200 Hz, through the gentle shoulders of the soft
 /// shape, needs its prototype 2.4 kHz wide, and the folded sideband — that
 /// filter reaches 500 Hz past zero beat — asks for more again.
@@ -416,14 +418,18 @@ impl FilterDesign {
     }
 
     /// The receiver the settings ask for: centred on the middle of the
-    /// side-tone range, at the width [`receiver_width_hz`] makes of the one
-    /// asked for, in the shape asked for.
+    /// side-tone range, in the shape asked for, at the width asked for — or
+    /// wider, where that would not pass the whole range
+    /// ([`ReceiverAsk::width_hz`]).
+    ///
+    /// Remembered: everything that asks — the settings screen as it draws,
+    /// every send, the pile-up planner, the band — asks about the settings in
+    /// force, and working out how wide to build a receiver over a wide range
+    /// takes milliseconds.
     pub fn from_settings(settings: &TrainingSettings) -> Self {
-        Self::new(
-            settings.side_tone_center(),
-            receiver_width_hz(settings),
-            settings.band.filter_shape,
-        )
+        static LAST: LastAnswer<ReceiverAsk, FilterDesign> = LastAnswer::new();
+        let ask = ReceiverAsk::of(&settings.band);
+        LAST.get_or(ask, || ask.design())
     }
 
     /// The pitch the filter is centred on, after clamping.
@@ -806,85 +812,117 @@ const COVERAGE_STEPS: usize = 128;
 /// when none passes it, to be worth building that wide.
 const NEARLY_PASSES_DB: f64 = 0.5;
 
-/// The width the receiver is built at, in hertz at 6 dB: the one asked for,
-/// or wider, if that would not pass the whole side-tone range.
-///
-/// Every send goes through the same filter, and the filter sits still at the
-/// middle of the side-tone range while the sends are scattered across it. So
-/// it has to pass both ends to within [`COVERAGE_DB`] of the middle, or a
-/// wide range behind a narrow filter would quietly bury every send near
-/// either end of it — which is not what anyone asked for by setting a range.
-/// The narrowest width that does that is what the width is widened to, and
-/// only ever widened: a filter already wide enough is left as it is.
-///
-/// For [`FilterShape::Peaked`] that is the IF filter's width, worked out for
-/// the Sharp filter it is. The peak filter's resonance is there to favour the
-/// pitch, so a send near the end of a wide range comes out a few decibels
-/// weaker through it, as it would with the APF in on a rig; that is the
-/// point of it, and accepted.
-///
-/// A range that runs close enough to zero beat can be beyond any width: the
-/// soft filter over the widest range the controls allow, 200-1200 Hz, folds
-/// so much of the other sideband onto its pitch that the top of the range
-/// stays a little over a decibel down however wide it is built. There the
-/// width that comes closest is used.
-///
-/// Runs whenever the settings change, never per sample.
-pub fn receiver_width_hz(settings: &TrainingSettings) -> f64 {
-    let asked = finite_or(settings.band.filter_width_hz, DEFAULT_FILTER_WIDTH_HZ)
-        .clamp(FILTER_WIDTH_MIN, FILTER_WIDTH_MAX);
-    let low = finite_or(settings.band.side_tone_min, 500.0).max(LOWEST_EDGE_HZ);
-    let high = finite_or(settings.band.side_tone_max, low).max(low);
-    let center = low + (high - low) / 2.0;
-    let shape = match settings.band.filter_shape {
-        FilterShape::Peaked => FilterShape::Sharp,
-        shape => shape,
-    };
-    // On its own the prototype falls steadily away from the pitch, so the
-    // narrowest width that passes both ends puts them exactly at its
-    // coverage point.
-    let cover = (high - low) * half_voltage(shape) / prototype_point(shape, COVERAGE_DB);
-    let mut width = asked.max(cover).min(MAX_RECEIVER_WIDTH_HZ);
-    // Wide enough to reach towards zero beat, though, the folded sideband can
-    // take a little more off the range: off the bottom of it, where it
-    // reaches, and off all of it once it adds to the pitch and the make-up
-    // gain brings the pitch back to unity. So the real response is the judge,
-    // and the filter is widened a step at a time until it passes — to within
-    // a ten-millionth, because where the width just worked out puts the ends
-    // exactly at the level, a sideband folding back 140 dB down is no reason
-    // to widen it a step.
-    let level = db_to_gain(COVERAGE_DB) * (1.0 - 1e-7);
-    let quietest = |width: f64| {
-        let design = FilterDesign::new(center, width, shape);
-        (0..COVERAGE_POINTS)
-            .map(|i| {
-                design.response_at(low + (high - low) * i as f64 / (COVERAGE_POINTS - 1) as f64)
-            })
-            .fold(f64::INFINITY, f64::min)
-    };
-    // Where the range runs so close to zero beat that no width passes it, a
-    // wider build is only worth the noise it lets in if it nearly does —
-    // within half a decibel. Otherwise the width it started from stands.
-    let start = width;
-    let nearly = level * db_to_gain(-NEARLY_PASSES_DB);
-    let mut closest = (f64::NEG_INFINITY, width);
-    for _ in 0..COVERAGE_STEPS {
-        let level_here = quietest(width);
-        if level_here >= level {
-            return width;
+/// What a receiver is built from: the side-tone range it has to pass, and the
+/// width and shape asked for.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ReceiverAsk {
+    tone_min: Exact,
+    tone_max: Exact,
+    width: Exact,
+    shape: FilterShape,
+}
+
+impl ReceiverAsk {
+    fn of(band: &BandSettings) -> Self {
+        Self {
+            tone_min: Exact(band.side_tone_min),
+            tone_max: Exact(band.side_tone_max),
+            width: Exact(band.filter_width_hz),
+            shape: band.filter_shape,
         }
-        if level_here > closest.0 {
-            closest = (level_here, width);
-        }
-        if width >= MAX_RECEIVER_WIDTH_HZ {
-            break;
-        }
-        width = (width * COVERAGE_STEP).min(MAX_RECEIVER_WIDTH_HZ);
     }
-    if closest.0 >= nearly {
-        closest.1
-    } else {
-        start
+
+    /// The side-tone range, held to the audible passband.
+    fn range(self) -> (f64, f64) {
+        let low = finite_or(self.tone_min.0, 500.0).max(LOWEST_EDGE_HZ);
+        let high = finite_or(self.tone_max.0, low).max(low);
+        (low, high)
+    }
+
+    fn design(self) -> FilterDesign {
+        let (low, high) = self.range();
+        FilterDesign::new(low + (high - low) / 2.0, self.width_hz(), self.shape)
+    }
+
+    /// The width the receiver is built at, in hertz at 6 dB: the one asked for,
+    /// or wider, if that would not pass the whole side-tone range.
+    ///
+    /// Every send goes through the same filter, and the filter sits still at the
+    /// middle of the side-tone range while the sends are scattered across it. So
+    /// it has to pass both ends to within [`COVERAGE_DB`] of the middle, or a
+    /// wide range behind a narrow filter would quietly bury every send near
+    /// either end of it — which is not what anyone asked for by setting a range.
+    /// The narrowest width that does that is what the width is widened to, and
+    /// only ever widened: a filter already wide enough is left as it is.
+    ///
+    /// For [`FilterShape::Peaked`] that is the IF filter's width, worked out for
+    /// the Sharp filter it is. The peak filter's resonance is there to favour the
+    /// pitch, so a send near the end of a wide range comes out a few decibels
+    /// weaker through it, as it would with the APF in on a rig; that is the
+    /// point of it, and accepted.
+    ///
+    /// A range that runs close enough to zero beat can be beyond any width: the
+    /// soft filter over the widest range the controls allow, 200-1200 Hz, folds
+    /// so much of the other sideband onto its pitch that the top of the range
+    /// stays a little over a decibel down however wide it is built. There the
+    /// width that comes closest is used.
+    ///
+    /// Runs whenever the settings change, never per sample.
+    fn width_hz(self) -> f64 {
+        let asked = finite_or(self.width.0, DEFAULT_FILTER_WIDTH_HZ)
+            .clamp(FILTER_WIDTH_MIN, FILTER_WIDTH_MAX);
+        let (low, high) = self.range();
+        let center = low + (high - low) / 2.0;
+        let shape = match self.shape {
+            FilterShape::Peaked => FilterShape::Sharp,
+            shape => shape,
+        };
+        // On its own the prototype falls steadily away from the pitch, so the
+        // narrowest width that passes both ends puts them exactly at its
+        // coverage point.
+        let cover = (high - low) * half_voltage(shape) / prototype_point(shape, COVERAGE_DB);
+        let mut width = asked.max(cover).min(MAX_RECEIVER_WIDTH_HZ);
+        // Wide enough to reach towards zero beat, though, the folded sideband can
+        // take a little more off the range: off the bottom of it, where it
+        // reaches, and off all of it once it adds to the pitch and the make-up
+        // gain brings the pitch back to unity. So the real response is the judge,
+        // and the filter is widened a step at a time until it passes — to within
+        // a ten-millionth, because where the width just worked out puts the ends
+        // exactly at the level, a sideband folding back 140 dB down is no reason
+        // to widen it a step.
+        let level = db_to_gain(COVERAGE_DB) * (1.0 - 1e-7);
+        let quietest = |width: f64| {
+            let design = FilterDesign::new(center, width, shape);
+            (0..COVERAGE_POINTS)
+                .map(|i| {
+                    design.response_at(low + (high - low) * i as f64 / (COVERAGE_POINTS - 1) as f64)
+                })
+                .fold(f64::INFINITY, f64::min)
+        };
+        // Where the range runs so close to zero beat that no width passes it, a
+        // wider build is only worth the noise it lets in if it nearly does —
+        // within half a decibel. Otherwise the width it started from stands.
+        let start = width;
+        let nearly = level * db_to_gain(-NEARLY_PASSES_DB);
+        let mut closest = (f64::NEG_INFINITY, width);
+        for _ in 0..COVERAGE_STEPS {
+            let level_here = quietest(width);
+            if level_here >= level {
+                return width;
+            }
+            if level_here > closest.0 {
+                closest = (level_here, width);
+            }
+            if width >= MAX_RECEIVER_WIDTH_HZ {
+                break;
+            }
+            width = (width * COVERAGE_STEP).min(MAX_RECEIVER_WIDTH_HZ);
+        }
+        if closest.0 >= nearly {
+            closest.1
+        } else {
+            start
+        }
     }
 }
 

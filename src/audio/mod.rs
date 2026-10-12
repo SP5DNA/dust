@@ -93,7 +93,7 @@ pub mod fake {
     #[derive(Clone, Debug, PartialEq)]
     pub enum Call {
         New,
-        Band(String),
+        Band(cw_core::band::BandKey),
         Start(String),
         Stop,
         Shutdown,
@@ -274,7 +274,7 @@ pub mod fake {
             self.recorder
                 .calls
                 .borrow_mut()
-                .push(Call::Band(settings.band_signature()));
+                .push(Call::Band(cw_core::band::BandKey::of(&settings.band)));
             self.recorder
                 .band_running
                 .set(cw_core::band::BandMixer::needs_background(settings));

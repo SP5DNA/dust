@@ -635,7 +635,6 @@ fn the_default_receiver_is_a_peaked_300_hz_filter() {
     let design = FilterDesign::from_settings(&settings);
     assert_eq!(design.shape(), FilterShape::Peaked);
     assert_eq!(design.pitch_hz(), 500.0);
-    assert_eq!(receiver_width_hz(&settings), 300.0);
     assert_eq!(design.width_hz(), 300.0);
     let (w3, w6, w20, w60) = (
         full_width(&design, -3.0),
@@ -816,9 +815,8 @@ fn the_receiver_always_passes_the_side_tone_range() {
                 settings.band.filter_shape = shape;
                 settings.band.filter_width_hz = FILTER_WIDTH_MIN;
                 let settings = settings.clamp();
-                let width = receiver_width_hz(&settings);
                 let design = FilterDesign::from_settings(&settings);
-                assert_eq!(design.width_hz(), width);
+                let width = design.width_hz();
                 assert!(width >= FILTER_WIDTH_MIN);
                 widest = widest.max(width);
                 let name = format!("{shape:?} {low}-{high}: {width:.0} Hz");
@@ -860,7 +858,10 @@ fn the_receiver_always_passes_the_side_tone_range() {
     println!("widest receiver the coverage asked for: {widest:.0} Hz");
     // A width already enough is left exactly as it was set.
     let settings = TrainingSettings::default();
-    assert_eq!(receiver_width_hz(&settings), settings.band.filter_width_hz);
+    assert_eq!(
+        FilterDesign::from_settings(&settings).width_hz(),
+        settings.band.filter_width_hz
+    );
 
     // The widest range the controls allow passes too, sharp: the folded
     // sideband is in it, and the width it is built at is what the real
@@ -937,7 +938,7 @@ fn the_default_hiss_rings_at_the_note() {
     settings.band.agc_enabled = true;
     let settings = settings.clamp();
     let pitch = settings.side_tone_center();
-    let width = receiver_width_hz(&settings);
+    let width = FilterDesign::from_settings(&settings).width_hz();
     let mut mixer = crate::band::BandMixer::new(RATE, &settings, 0x4155);
     let mut settle = vec![0.0f32; RATE as usize / 2];
     mixer.fill_background(&mut settle);
@@ -1006,7 +1007,7 @@ fn a_receiver_that_cannot_pass_the_range_is_not_widened_for_nothing() {
         settings.band.side_tone_max = high;
         settings.band.filter_width_hz = asked;
         let settings = settings.clamp();
-        let built = crate::band::receiver_width_hz(&settings);
+        let built = FilterDesign::from_settings(&settings).width_hz();
         let design = FilterDesign::from_settings(&settings);
         let quietest = (0..=32)
             .map(|i| design.response_at(low + (high - low) * f64::from(i) / 32.0))

@@ -3,8 +3,9 @@
 use std::sync::OnceLock;
 
 use super::agc::AGC_TRIGGER;
-use super::calibration::REFERENCE_NOISE_LEVEL;
+use super::calibration::{REFERENCE_NOISE_LEVEL, noise_level, qrn_level};
 use super::filter::{FilterDesign, ReceiverFilter, reference_width_hz};
+use super::memo::{Exact, LastAnswer};
 use super::source::BandSource;
 use crate::settings::{BandSettings, FilterShape, STATIONS_MIN, TrainingSettings};
 
@@ -25,13 +26,25 @@ pub const FLOOR_MEASURE_RATE: u32 = 16_000;
 /// receiver's AGC threshold does: closing the filter or finding a quiet band
 /// takes noise away from under the knee, and leaves the station you are
 /// copying exactly as loud as it was.
+///
+/// Remembered, because measuring it is three seconds of band: the floor
+/// depends only on the noise, the static and the receiver, so moving the
+/// fading, the stations or the volume asks the same question again.
 pub fn agc_knee(band: &BandSettings, receiver: &FilterDesign) -> Option<f64> {
     if !band.agc_enabled {
         return None;
     }
-    let floor =
-        band_standing_level(FLOOR_MEASURE_RATE, band, receiver).max(reference_floor_level());
-    Some(AGC_TRIGGER * floor)
+    static LAST: LastAnswer<(Exact, Exact, FilterDesign), f64> = LastAnswer::new();
+    let key = (
+        Exact(noise_level(band)),
+        Exact(qrn_level(band)),
+        receiver.clone(),
+    );
+    Some(LAST.get_or(key, || {
+        let floor =
+            band_standing_level(FLOOR_MEASURE_RATE, band, receiver).max(reference_floor_level());
+        AGC_TRIGGER * floor
+    }))
 }
 
 /// How high this band's floor ordinarily peaks, through the receiver.

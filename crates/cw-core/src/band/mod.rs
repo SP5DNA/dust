@@ -39,7 +39,9 @@ mod agc;
 mod calibration;
 mod dsp;
 mod filter;
+mod key;
 mod knee;
+mod memo;
 mod noise;
 mod output;
 mod qsb;
@@ -55,8 +57,8 @@ pub use calibration::heard_snr_db;
 pub(crate) use filter::mirror_hz;
 pub use filter::{
     FilterDesign, MAX_RECEIVER_SECTIONS, MAX_RECEIVER_WIDTH_HZ, ReceiverFilter, Section, Sections,
-    receiver_width_hz,
 };
+pub use key::{BandKey, QsbKey};
 pub use knee::agc_knee;
 pub use noise::AudioFloor;
 pub use output::{LimiterFeed, limiter_feed, soft_limit_curve};
