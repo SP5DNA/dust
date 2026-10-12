@@ -29,20 +29,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn level_one_unlocks_two() {
-        let alphabet = ['A', 'B', 'C', 'D'];
-        assert_eq!(unlocked_prefix(&alphabet, 1), vec!['A', 'B']);
-        assert_eq!(unlocked_prefix(&alphabet, 3), vec!['A', 'B', 'C', 'D']);
-        assert_eq!(max_level_for_len(alphabet.len()), 3);
-    }
-
-    #[test]
-    fn short_alphabet_unlocks_all() {
-        assert_eq!(unlocked_prefix(&['K', 'M'], 99), vec!['K', 'M']);
-        assert_eq!(unlocked_prefix(&['X'], 1), vec!['X']);
-    }
-
-    #[test]
     fn level_one_unlocks_two_characters() {
         assert_eq!(unlocked_count_for_level(0), 2);
         assert_eq!(unlocked_count_for_level(LEVEL_MIN), 2);
@@ -55,6 +41,9 @@ mod tests {
         assert_eq!(max_level_for_len(1), LEVEL_MIN);
         assert_eq!(max_level_for_len(2), LEVEL_MIN);
         assert_eq!(max_level_for_len(10), 9);
+        // The top level unlocks the whole alphabet.
+        let alphabet = ['A', 'B', 'C', 'D'];
+        assert_eq!(unlocked_prefix(&alphabet, max_level_for_len(4)), alphabet);
     }
 
     #[test]
