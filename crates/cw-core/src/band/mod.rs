@@ -29,36 +29,32 @@
 //! sounded like one. A real CW filter is hundreds of hertz wide, sits still,
 //! and is fed with continuous noise; this is that.
 
-pub mod activity;
-pub mod agc;
-pub mod filter;
-pub mod noise;
-pub mod qsb;
+mod activity;
+mod agc;
+mod filter;
+mod noise;
+mod qsb;
 
-pub use activity::BandActivity;
+// What the players, the settings screen and the pile-up planner use. The rest
+// is the band's own business.
 pub use agc::{
-    AGC_ATTACK_SEC, AGC_COMPRESSOR_KNEE_DB, AGC_COMPRESSOR_RATIO, AGC_HANG_SEC, AGC_MAX_DUCK_DB,
-    AGC_RELEASE_SEC, AGC_SLOPE, AGC_TRIGGER, Agc, CompressorSetting, agc_compressor,
-    agc_compressor_threshold_db, agc_law_db, compressor_curve_db, compressor_makeup_db,
+    AGC_ATTACK_SEC, AGC_COMPRESSOR_KNEE_DB, AGC_RELEASE_SEC, CompressorSetting, agc_compressor,
 };
+pub(crate) use filter::mirror_hz;
 pub use filter::{
-    APF_BOOST_DB, APF_WIDTH_HZ, COVERAGE_DB, FilterDesign, MAX_RECEIVER_SECTIONS,
-    MAX_RECEIVER_WIDTH_HZ, ReceiverFilter, Section, Sections, mirror_hz, passband_edges,
+    FilterDesign, MAX_RECEIVER_SECTIONS, MAX_RECEIVER_WIDTH_HZ, ReceiverFilter, Section, Sections,
     receiver_width_hz,
 };
-pub use noise::{
-    Atmospherics, AudioFloor, BandSource, FLOOR_BELOW_DB, FLOOR_HIGH_PASS_HZ, FLOOR_LOW_PASS_HZ,
-    Gaussian, NoiseFloor, REFERENCE_BANDWIDTH_HZ, SIGNAL_RMS, heard_snr_db, noise_floor_rms,
-    noise_floor_snr_db,
-};
+pub use noise::{AudioFloor, BandSource, heard_snr_db};
 pub use qsb::{QSB_MIN_GAIN, QSB_PATHS, QSB_SPREAD, qsb_gain_at, qsb_path};
 
 use crate::settings::{STATIONS_MIN, TrainingSettings};
+use agc::{AGC_TRIGGER, Agc};
 
 /// What a receiver does with a loud crash: catches it, rather than letting it
 /// square off. Linear up to the knee, asymptotic to full scale above it — so
 /// the biggest static is loud without turning into a buzz.
-pub fn soft_limit(x: f64) -> f64 {
+fn soft_limit(x: f64) -> f64 {
     const KNEE: f64 = 0.7;
     let magnitude = x.abs();
     if magnitude <= KNEE {
@@ -70,7 +66,7 @@ pub fn soft_limit(x: f64) -> f64 {
 
 /// How far past full scale [`soft_limit_curve`] reaches before it simply holds
 /// at its last value. Far beyond anything the band and the Morse add up to.
-pub const SOFT_LIMIT_HEADROOM: f64 = 4.0;
+const SOFT_LIMIT_HEADROOM: f64 = 4.0;
 
 /// [`soft_limit`] as a lookup table, for a Web Audio `WaveShaperNode`.
 ///
@@ -128,7 +124,7 @@ pub fn limiter_feed(setting: &CompressorSetting) -> LimiterFeed {
 /// Measured rather than worked out, because the filter's shape and width and
 /// the static all move it. The band is calibrated to sound the same at any
 /// sample rate, so a low rate measures it as well as a high one.
-pub fn band_standing_level(sample_rate: u32, settings: &TrainingSettings) -> f64 {
+fn band_standing_level(sample_rate: u32, settings: &TrainingSettings) -> f64 {
     const SEED: u64 = 0x5EED_1234;
     const SETTLE_SEC: f64 = 0.25;
     const MEASURE_SEC: f64 = 2.75;
@@ -170,7 +166,7 @@ pub fn band_standing_level(sample_rate: u32, settings: &TrainingSettings) -> f64
 /// The rate the floor is measured at for the AGC's knee. Both backends use
 /// it, so both arrive at the same knee to the bit; it is low because the
 /// browser measures on its main thread every time a band setting moves.
-pub const FLOOR_MEASURE_RATE: u32 = 16_000;
+const FLOOR_MEASURE_RATE: u32 = 16_000;
 
 /// Where the receiver's AGC starts to turn the gain down, as the amplitude of
 /// a steady tone; `None` with the AGC switched off.
@@ -290,11 +286,6 @@ impl BandMixer {
     /// arrived at.
     pub fn agc_gain(&self) -> f64 {
         self.agc.gain()
-    }
-
-    /// Where this receiver's AGC starts to act; `None` when it is off.
-    pub fn agc_knee(&self) -> Option<f64> {
-        self.agc.knee()
     }
 
     pub fn fill_background(&mut self, out: &mut [f32]) {

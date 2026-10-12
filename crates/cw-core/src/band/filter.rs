@@ -282,6 +282,19 @@ impl Section {
 }
 
 #[cfg(test)]
+impl FilterDesign {
+    fn shape(&self) -> FilterShape {
+        self.shape
+    }
+
+    /// The make-up gain that brings the pitch back to unity, already folded
+    /// into every section's numerator: how far the folded sideband moved it.
+    pub(super) fn gain(&self) -> f64 {
+        self.rotation.abs()
+    }
+}
+
+#[cfg(test)]
 impl Section {
     /// This section's response to a tone at `hz`, as the difference equation
     /// gives it: the transfer function on the unit circle.
@@ -420,17 +433,6 @@ impl FilterDesign {
     /// The IF filter's width between its 6 dB points, after clamping.
     pub fn width_hz(&self) -> f64 {
         self.width_hz
-    }
-
-    pub fn shape(&self) -> FilterShape {
-        self.shape
-    }
-
-    /// The make-up gain that brings the pitch back to unity. Already folded
-    /// into every section's numerator; reported for anything that wants to
-    /// know how far the folded sideband moved it.
-    pub fn gain(&self) -> f64 {
-        self.rotation.abs()
     }
 
     /// How much noise the receiver lets through, as the width of a perfect

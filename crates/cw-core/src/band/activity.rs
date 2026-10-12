@@ -442,7 +442,7 @@ impl BandActivity {
 
     /// Off, or something on the band. A band with no station on it at this
     /// moment is still a band — someone will be along.
-    pub fn is_silent(&self) -> bool {
+    fn is_silent(&self) -> bool {
         self.level <= 0.0
     }
 

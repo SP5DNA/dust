@@ -5,7 +5,7 @@
 use std::f64::consts::{SQRT_2, TAU};
 
 use super::*;
-use crate::band::Gaussian;
+use crate::band::noise::Gaussian;
 
 /// Every shape the control offers.
 const ALL_SHAPES: [FilterShape; 3] = [FilterShape::Sharp, FilterShape::Soft, FilterShape::Peaked];

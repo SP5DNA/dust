@@ -165,7 +165,7 @@ impl NoiseFloor {
         Self::new(sample_rate, noise_floor_rms(level), seed)
     }
 
-    pub fn is_silent(&self) -> bool {
+    fn is_silent(&self) -> bool {
         self.sigma <= 0.0
     }
 
@@ -259,7 +259,7 @@ impl AudioFloor {
         Self::new(sample_rate, noise_floor_rms(level), seed ^ AUDIO_FLOOR_SEED)
     }
 
-    pub fn is_silent(&self) -> bool {
+    fn is_silent(&self) -> bool {
         self.sigma <= 0.0
     }
 
@@ -492,7 +492,7 @@ impl Atmospherics {
         Self::new(sample_rate, level, seed)
     }
 
-    pub fn is_silent(&self) -> bool {
+    fn is_silent(&self) -> bool {
         self.crackle.is_off() && self.flashes.is_off()
     }
 
@@ -735,10 +735,6 @@ impl BandSource {
             atmospherics: Atmospherics::from_settings(sample_rate, settings, seed ^ 0x51ED_2701),
             activity: BandActivity::from_settings(sample_rate, settings, seed ^ 0xAC71_7174),
         }
-    }
-
-    pub fn is_silent(&self) -> bool {
-        self.floor.is_silent() && self.atmospherics.is_silent() && self.activity.is_silent()
     }
 
     /// A pile-up is calling with this many stations besides yours, and they

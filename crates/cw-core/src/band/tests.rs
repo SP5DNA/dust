@@ -7,6 +7,12 @@
 
 use std::f64::consts::{SQRT_2, TAU};
 
+use super::agc::agc_law_db;
+use super::filter::passband_edges;
+use super::noise::{
+    Atmospherics, FLOOR_BELOW_DB, NoiseFloor, REFERENCE_BANDWIDTH_HZ, SIGNAL_RMS, noise_floor_rms,
+    noise_floor_snr_db,
+};
 use super::*;
 use crate::settings::{FILTER_WIDTH_MAX, FILTER_WIDTH_MIN, FilterShape};
 
@@ -1146,7 +1152,9 @@ fn a_silent_band_needs_no_background_stream_and_mixes_to_silence() {
     let mut out = [1.0f32; 64];
     mixer.fill_background(&mut out);
     assert!(out.iter().all(|s| *s == 0.0));
-    assert!(BandSource::new(8_000, &quiet(), 1).is_silent());
+    let mut out = [1.0f32; 64];
+    BandSource::new(8_000, &quiet(), 1).fill(&mut out);
+    assert!(out.iter().all(|s| *s == 0.0));
 }
 
 #[test]
@@ -1407,7 +1415,6 @@ fn the_audio_floor_goes_with_the_noise() {
     let mut off = only_qrn(0.6);
     off.band.noise_level = 0.5;
     for settings in [off, only_noise(0.0)] {
-        assert!(AudioFloor::from_settings(SR, &settings, 3).is_silent());
         let floored = with_and_without_floor(&settings, 0.0, 5);
         assert_eq!(floored.heard, floored.band);
     }
