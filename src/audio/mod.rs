@@ -4,6 +4,8 @@
 //! and reports the same [`WaitFlags`], so the session runtime never has to know
 //! which one it is talking to.
 
+#[cfg(any(feature = "web", test))]
+mod band_queue;
 #[cfg(any(feature = "native-audio", test))]
 mod mixer;
 #[cfg(feature = "native-audio")]

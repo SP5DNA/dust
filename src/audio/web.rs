@@ -7,8 +7,8 @@ use cw_core::band::{
     BandSource, FilterDesign, MAX_RECEIVER_SECTIONS, Qsb, Section, agc_compressor, agc_knee,
     limiter_feed, soft_limit_curve,
 };
-use cw_core::{PlannedTransmission, TrainingSettings, Transmission};
-use gloo_timers::callback::Interval;
+use cw_core::{PlannedTransmission, STATIONS_MIN, TrainingSettings, Transmission};
+use gloo_timers::callback::{Interval, Timeout};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 use web_sys::{
@@ -16,7 +16,9 @@ use web_sys::{
     GainNode, OscillatorType,
 };
 
+use super::band_queue::{Reservation, callers_at, first_to_remake};
 use super::shape::{BAND_FADE_SEC, SEND_RELEASE_SEC, ToneRequest, fade_curve};
+use super::wait::{heard_ms, schedule_lead_sec};
 use super::{MorseBackend, PlaybackSignal, WaitFlags};
 
 /// How much of the band each streamed buffer holds.
@@ -35,6 +37,12 @@ const LIMITER_POINTS: usize = 4_097;
 /// Points in a band's fade curve: plenty for a quarter sine over a few tens
 /// of milliseconds.
 const FADE_POINTS: usize = 32;
+/// How far ahead of the clock a queued band buffer has to start to be taken
+/// back and made again: past whatever the browser is already rendering.
+const REMAKE_MARGIN_SEC: f64 = 0.03;
+/// How long after everything has gone quiet the context is suspended: long
+/// enough for the last fades to play out.
+const SLEEP_AFTER_MS: u32 = 250;
 
 /// What a scheduled send looks like to a waiter.
 ///
@@ -45,7 +53,6 @@ const FADE_POINTS: usize = 32;
 /// while the Morse has not been heard at all.
 struct WebSignal {
     ctx: AudioContext,
-    stop_flag: Rc<Cell<bool>>,
     epoch: Rc<Cell<u64>>,
     mine: u64,
     started_at: f64,
@@ -53,18 +60,37 @@ struct WebSignal {
 
 impl PlaybackSignal for WebSignal {
     fn poll(&self) -> WaitFlags {
-        let played = ((self.ctx.current_time() - self.started_at) * 1000.0).max(0.0);
         WaitFlags {
-            cancelled: self.stop_flag.get() || self.epoch.get() != self.mine,
+            cancelled: self.epoch.get() != self.mine,
             finished: false,
             failed: self.ctx.state() == AudioContextState::Closed,
             // A hidden page is the one case where a frozen clock is not a
             // fault. The tones stay scheduled at their own context times, so
             // coming back resumes the group where it stopped.
             suspended: page_is_hidden(),
-            played_ms: Some(played.min(f64::from(u32::MAX / 4)) as u32),
+            played_ms: Some(heard_ms(
+                self.ctx.current_time(),
+                self.started_at,
+                heard_latency(&self.ctx),
+            )),
         }
     }
+}
+
+/// A latency the context reports, in seconds, if it reports it at all:
+/// `baseLatency` and `outputLatency` are not in every browser, nor in
+/// web-sys.
+fn reported_latency(ctx: &AudioContext, name: &str) -> f64 {
+    js_sys::Reflect::get(ctx, &name.into())
+        .ok()
+        .and_then(|value| value.as_f64())
+        .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
+        .unwrap_or(0.0)
+}
+
+/// How long after the context renders a sample it reaches the ear.
+fn heard_latency(ctx: &AudioContext) -> f64 {
+    reported_latency(ctx, "baseLatency") + reported_latency(ctx, "outputLatency")
 }
 
 /// Whether the page is out of sight. A context this app suspended itself, on a
@@ -78,7 +104,6 @@ fn page_is_hidden() -> bool {
 
 pub struct MorsePlayer {
     ctx: AudioContext,
-    stop_flag: Rc<Cell<bool>>,
     epoch: Rc<Cell<u64>>,
     mix_gain: GainNode,
     group_gain: Option<GainNode>,
@@ -107,6 +132,13 @@ pub struct MorsePlayer {
     live_gain: Option<GainNode>,
     /// Kept so the listener can be taken off again when this player goes.
     on_visibility: Option<Closure<dyn FnMut()>>,
+    /// Suspends the context once everything has gone quiet, unless something
+    /// is played first. A running context keeps the audio thread awake and
+    /// the device from sleeping, with nothing to play.
+    sleep: Option<Timeout>,
+    /// Set while the context is suspended because nothing is playing, so
+    /// the page coming back into view does not wake it for nothing.
+    asleep: Rc<Cell<bool>>,
 }
 
 /// The band, streamed, and what it was built from.
@@ -257,11 +289,26 @@ struct StreamState {
     floor_chunk: Vec<f32>,
     /// Context time the next buffer starts at.
     next_start: f64,
-    /// Buffers scheduled and not yet over, with the time each one ends.
-    queued: VecDeque<(AudioBufferSourceNode, f64)>,
-    /// A pile-up calling across the send, and the context time it stops: the
-    /// band's own traffic makes room for its callers until then.
-    pileup: Option<(usize, f64)>,
+    /// Buffers scheduled and not yet over.
+    queued: VecDeque<Queued>,
+    /// A pile-up calling across the send: the band's own traffic makes room
+    /// for its callers until it stops.
+    pileup: Option<Reservation>,
+    /// Whether the band has stations of its own to make room with. Without
+    /// them a pile-up changes nothing in it, and nothing is ever remade.
+    makes_room: bool,
+}
+
+/// One buffer of the band, scheduled.
+struct Queued {
+    node: AudioBufferSourceNode,
+    starts: f64,
+    ends: f64,
+    /// How many callers it made room for.
+    callers: usize,
+    /// The generators as they stood before it was made, so it can be made
+    /// again for a pile-up that started or stopped after it was queued.
+    before: Option<(BandSource, AudioFloor)>,
 }
 
 impl BandStream {
@@ -325,6 +372,7 @@ impl BandStream {
             next_start: now,
             queued: VecDeque::new(),
             pileup: None,
+            makes_room: settings.band.stations_max > STATIONS_MIN,
         }));
         state.borrow_mut().top_up()?;
         let ticking = Rc::clone(&state);
@@ -342,18 +390,18 @@ impl BandStream {
     }
 
     /// The pile-up the band is making room for, if any.
-    fn pileup(&self) -> Option<(usize, f64)> {
+    fn pileup(&self) -> Option<Reservation> {
         self.state
             .try_borrow()
             .ok()
             .and_then(|stream| stream.pileup)
     }
 
-    /// `callers` other stations are calling across a send until `until`, on
-    /// the context clock. None at all clears it, as a stopped send does.
-    fn reserve(&self, callers: usize, until: f64) {
+    /// Make room for a pile-up from now on, or for none, as a stopped send
+    /// does.
+    fn reserve(&self, pileup: Option<Reservation>) {
         if let Ok(mut stream) = self.state.try_borrow_mut() {
-            stream.pileup = (callers > 0).then_some((callers, until));
+            let _ = stream.reserve(pileup);
         }
     }
 
@@ -374,8 +422,9 @@ impl BandStream {
                 BAND_FADE_SEC,
             );
         }
-        for (node, _) in &stream.queued {
-            let _ = node
+        for queued in &stream.queued {
+            let _ = queued
+                .node
                 .unchecked_ref::<AudioScheduledSourceNode>()
                 .stop_with_when(done);
         }
@@ -406,10 +455,10 @@ impl StreamState {
         while self.next_start < now + lead {
             // Each buffer is generated for the moment it will play, so the
             // pile-up's callers are made room for exactly while they call.
-            let callers = match self.pileup {
-                Some((callers, until)) if self.next_start < until => callers,
-                _ => 0,
-            };
+            let callers = callers_at(self.pileup, self.next_start);
+            let before = self
+                .makes_room
+                .then(|| (self.source.clone(), self.floor.clone()));
             self.source.reserve_stations(callers);
             self.source.fill(&mut self.chunk);
             self.floor.fill(&mut self.floor_chunk);
@@ -433,14 +482,60 @@ impl StreamState {
             node.start_with_when(self.next_start)
                 .map_err(|e| format!("band start: {e:?}"))?;
             let ends = self.next_start + self.chunk.len() as f64 / f64::from(sample_rate);
-            self.queued.push_back((node, ends));
+            self.queued.push_back(Queued {
+                node,
+                starts: self.next_start,
+                ends,
+                callers,
+                before,
+            });
             self.next_start = ends;
         }
-        while let Some((node, _)) = self.queued.front().filter(|(_, ends)| *ends < now) {
-            let _ = node.disconnect();
+        while let Some(done) = self.queued.front().filter(|queued| queued.ends < now) {
+            let _ = done.node.disconnect();
             self.queued.pop_front();
         }
         Ok(())
+    }
+
+    /// Make room for `pileup` from now on. The buffers already queued were
+    /// made for whoever was calling when they were: half a second of them,
+    /// more with the page hidden. Those made for the wrong number of callers
+    /// that can still be taken back are, and the band is made again from the
+    /// first of them, from where its generators stood — so the pile-up is
+    /// made room for within a few tens of milliseconds of the send, and let
+    /// go of as soon after a stop.
+    fn reserve(&mut self, pileup: Option<Reservation>) -> Result<(), String> {
+        self.pileup = pileup;
+        if !self.makes_room {
+            return Ok(());
+        }
+        let not_before = self.ctx.current_time()
+            + reported_latency(&self.ctx, "baseLatency")
+            + REMAKE_MARGIN_SEC;
+        let Some(first) = first_to_remake(
+            self.queued
+                .iter()
+                .map(|queued| (queued.starts, queued.callers)),
+            pileup,
+            not_before,
+        ) else {
+            return Ok(());
+        };
+        let Some((source, floor)) = self.queued[first].before.clone() else {
+            return Ok(());
+        };
+        self.next_start = self.queued[first].starts;
+        for taken in self.queued.drain(first..) {
+            let _ = taken
+                .node
+                .unchecked_ref::<AudioScheduledSourceNode>()
+                .stop();
+            let _ = taken.node.disconnect();
+        }
+        self.source = source;
+        self.floor = floor;
+        self.top_up()
     }
 }
 
@@ -529,10 +624,10 @@ impl MorsePlayer {
         limiter
             .connect_with_audio_node(&ctx.destination())
             .map_err(|e| format!("mix connect: {e:?}"))?;
-        let on_visibility = install_resume_on_foreground(&ctx);
+        let asleep = Rc::new(Cell::new(false));
+        let on_visibility = install_resume_on_foreground(&ctx, Rc::clone(&asleep));
         Ok(Self {
             ctx,
-            stop_flag: Rc::new(Cell::new(false)),
             epoch: Rc::new(Cell::new(0)),
             mix_gain,
             group_gain: None,
@@ -547,6 +642,8 @@ impl MorsePlayer {
             live_osc: None,
             live_gain: None,
             on_visibility,
+            sleep: None,
+            asleep,
         })
     }
 
@@ -572,9 +669,11 @@ impl MorsePlayer {
             .map_err(|e| format!("live mute: {e:?}"))?;
         osc.connect_with_audio_node(&gain)
             .map_err(|e| format!("live osc connect: {e:?}"))?;
-        // Straight to the speakers: the receiver filter is for what you copy,
-        // not for the sidetone of the key in your hand.
-        gain.connect_with_audio_node(&self.ctx.destination())
+        // Around the receiver — its filter and AGC are for what you copy, not
+        // for the sidetone of the key in your hand — but through the
+        // limiter, the way the floor goes: added after it, a squeeze on top
+        // of a crash squared off.
+        gain.connect_with_audio_node(&self.floor_in)
             .map_err(|e| format!("live out: {e:?}"))?;
         osc.start().map_err(|e| format!("live start: {e:?}"))?;
         self.live_osc = Some(osc);
@@ -650,9 +749,7 @@ impl MorsePlayer {
         }
         if BandMixer::needs_background(settings) {
             let stream = BandStream::start(&self.ctx, &self.mix_gain, &self.floor_in, settings)?;
-            if let Some((callers, until)) = pileup {
-                stream.reserve(callers, until);
-            }
+            stream.reserve(pileup);
             self.band.stream = Some(stream);
         }
         self.tune_agc(settings);
@@ -750,24 +847,19 @@ impl MorsePlayer {
         });
     }
 
-    pub fn reset_stop_flag(&self) {
-        self.stop_flag.set(false);
-    }
-
+    /// Schedule every station's tones from `start` on the context clock.
     fn schedule_plan(
         &mut self,
         planned: &PlannedTransmission,
         fading: Option<Qsb>,
+        start: f64,
     ) -> Result<(), String> {
-        self.reset_stop_flag();
-
         let group_gain = self.ctx.create_gain().map_err(|e| format!("gain: {e:?}"))?;
         group_gain
             .connect_with_audio_node(&self.mix_gain)
             .map_err(|e| format!("connect: {e:?}"))?;
         self.group_gain = Some(group_gain.clone());
 
-        let start = self.ctx.current_time();
         // The fading, on the send's own gain, read off the context's clock
         // as the native player reads it off its own: a send drops into a
         // fade already in progress rather than starting one. The curve is
@@ -786,9 +878,6 @@ impl MorsePlayer {
         // carry its own pitch and level.
         let every_station = std::iter::once(&planned.wanted).chain(planned.others.iter());
         for event in every_station.flat_map(|plan| plan.events.iter()) {
-            if self.stop_flag.get() {
-                break;
-            }
             let osc = self
                 .ctx
                 .create_oscillator()
@@ -838,12 +927,19 @@ impl MorseBackend for MorsePlayer {
     /// the listener — rather than leaving the session parked on a promise
     /// that may never settle.
     fn resume_from_gesture(&mut self) {
+        // Something is about to play: whatever was going to put the context
+        // to sleep is called off.
+        self.sleep = None;
+        self.asleep.set(false);
         if self.ctx.state() == AudioContextState::Suspended {
             let _ = self.ctx.resume();
         }
     }
 
     fn apply_band(&mut self, settings: &TrainingSettings) {
+        if BandMixer::needs_background(settings) {
+            self.resume_from_gesture();
+        }
         // A node the browser will not make leaves the band as it was; the
         // send that follows reports anything worse.
         let _ = self.apply_band_now(settings);
@@ -858,27 +954,30 @@ impl MorseBackend for MorsePlayer {
         self.resume_from_gesture();
         self.release_group_gain();
         let epoch = self.bump_epoch();
-        self.reset_stop_flag();
-        let started_at = self.ctx.current_time();
-        self.schedule_plan(plan, Qsb::of(&settings.band))?;
+        // One reading of the clock, for the tones, the fading, the pile-up
+        // and the waiter alike.
+        let start =
+            self.ctx.current_time() + schedule_lead_sec(reported_latency(&self.ctx, "baseLatency"));
+        self.schedule_plan(plan, Qsb::of(&settings.band), start)?;
         if let Some(stream) = &self.band.stream {
-            stream.reserve(plan.others.len(), started_at + plan.wanted.duration_sec);
+            stream.reserve(Reservation::new(
+                plan.others.len(),
+                start + plan.wanted.duration_sec,
+            ));
         }
         Ok(Rc::new(WebSignal {
             ctx: self.ctx.clone(),
-            stop_flag: self.stop_flag.clone(),
             epoch: self.epoch.clone(),
             mine: epoch,
-            started_at,
+            started_at: start,
         }))
     }
 
     fn stop(&mut self) {
         self.bump_epoch();
-        self.stop_flag.set(true);
         self.release_group_gain();
         if let Some(stream) = &self.band.stream {
-            stream.reserve(0, 0.0);
+            stream.reserve(None);
         }
     }
 
@@ -892,6 +991,16 @@ impl MorseBackend for MorsePlayer {
             let _ = gain.gain().cancel_scheduled_values(now);
             let _ = gain.gain().set_value_at_time(0.0, now);
         }
+        // Once the fades have played out there is nothing left to hear, and
+        // a running context keeps the audio thread and the device awake for
+        // the life of the page. Anything played before then calls it off.
+        let (ctx, asleep) = (self.ctx.clone(), Rc::clone(&self.asleep));
+        self.sleep = Some(Timeout::new(SLEEP_AFTER_MS, move || {
+            if ctx.state() == AudioContextState::Running {
+                asleep.set(true);
+                let _ = ctx.suspend();
+            }
+        }));
     }
 
     fn set_live_tone(&mut self, on: bool, frequency_hz: f64, gain: f64) {
@@ -944,10 +1053,13 @@ impl Drop for MorsePlayer {
 
 /// Resume the context when the page comes back into view, if it was the page
 /// going away that suspended it. Returns the listener so it can be removed.
-fn install_resume_on_foreground(ctx: &AudioContext) -> Option<Closure<dyn FnMut()>> {
+fn install_resume_on_foreground(
+    ctx: &AudioContext,
+    asleep: Rc<Cell<bool>>,
+) -> Option<Closure<dyn FnMut()>> {
     let ctx = ctx.clone();
     let closure = Closure::wrap(Box::new(move || {
-        if page_is_hidden() || ctx.state() != AudioContextState::Suspended {
+        if asleep.get() || page_is_hidden() || ctx.state() != AudioContextState::Suspended {
             return;
         }
         let _ = ctx.resume();

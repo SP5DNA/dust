@@ -107,6 +107,46 @@ pub fn stall_charge(flags: WaitFlags, poll_ms: u32) -> u32 {
     if flags.suspended { 0 } else { poll_ms }
 }
 
+/// The most of a delay between the audio clock and the ear that is believed.
+/// Bluetooth headphones run to a quarter of a second; a browser reporting
+/// more is reporting nonsense, and a send would wait for it.
+#[cfg(any(feature = "web", test))]
+const MAX_HEARD_LATENCY_SEC: f64 = 0.5;
+
+/// How far past the browser's clock a send is scheduled, given the delay the
+/// browser reports between rendering and handing over (`base_latency_sec`).
+///
+/// The clock the page reads is a render callback behind the one being
+/// rendered. A tone scheduled for a moment already under way starts late,
+/// part way through its rise — a click, and the start of the first element
+/// lost. The band's own buffers are scheduled ahead for the same reason.
+#[cfg(any(feature = "web", test))]
+pub fn schedule_lead_sec(base_latency_sec: f64) -> f64 {
+    const LEAD_SEC: f64 = 0.02;
+    let base = if base_latency_sec.is_finite() {
+        base_latency_sec.clamp(0.0, 0.1)
+    } else {
+        0.0
+    };
+    base + LEAD_SEC
+}
+
+/// How much of a send that starts at `started_at_sec` on the audio clock has
+/// been heard when the clock reads `now_sec`, `latency_sec` after it was
+/// rendered. A send is over when its last element has reached the ear, not
+/// the speaker's queue: on Bluetooth that is a quarter of a second later,
+/// and the answer window would open on top of the tone.
+#[cfg(any(feature = "web", test))]
+pub fn heard_ms(now_sec: f64, started_at_sec: f64, latency_sec: f64) -> u32 {
+    let latency = if latency_sec.is_finite() {
+        latency_sec.clamp(0.0, MAX_HEARD_LATENCY_SEC)
+    } else {
+        0.0
+    };
+    let ms = ((now_sec - started_at_sec - latency) * 1000.0).max(0.0);
+    ms.min(f64::from(u32::MAX / 4)) as u32
+}
+
 /// A send in flight, as the backend sees it.
 pub trait PlaybackSignal {
     fn poll(&self) -> WaitFlags;
@@ -163,6 +203,27 @@ mod tests {
 
     fn flags() -> WaitFlags {
         WaitFlags::default()
+    }
+
+    /// The browser schedules a send a little past its clock, and counts it
+    /// heard only once the latency to the ear has passed.
+    #[test]
+    fn the_browsers_clock_is_read_for_what_is_heard() {
+        assert_eq!(schedule_lead_sec(0.0), 0.02);
+        assert!((schedule_lead_sec(0.01) - 0.03).abs() < 1e-12);
+        assert_eq!(schedule_lead_sec(f64::NAN), 0.02);
+        assert_eq!(schedule_lead_sec(-1.0), 0.02);
+        assert!((schedule_lead_sec(9.0) - 0.12).abs() < 1e-12);
+
+        // A second in, with a quarter second still on its way to the ear.
+        assert_eq!(heard_ms(11.0, 10.0, 0.25), 750);
+        assert_eq!(heard_ms(11.0, 10.0, 0.0), 1_000);
+        // Not yet started, or not yet reached the ear: nothing heard.
+        assert_eq!(heard_ms(9.0, 10.0, 0.0), 0);
+        assert_eq!(heard_ms(10.1, 10.0, 0.25), 0);
+        // A latency the browser does not know, or gets wrong, is no help.
+        assert_eq!(heard_ms(11.0, 10.0, f64::NAN), 1_000);
+        assert_eq!(heard_ms(11.0, 10.0, 30.0), 500);
     }
 
     #[test]
