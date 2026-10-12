@@ -397,10 +397,12 @@ pub fn generate_training_group(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     /// A generator stuck on one value: the worst a broken stub can do.
     struct Stuck(f64);
 
-    impl crate::rng::Rng for Stuck {
+    impl Rng for Stuck {
         fn f64(&mut self) -> f64 {
             self.0
         }
@@ -438,8 +440,6 @@ mod tests {
             );
         }
     }
-
-    use super::*;
 
     #[test]
     fn group_length_respects_fixed_size() {
@@ -556,12 +556,6 @@ mod tests {
             assert!(group.chars().all(|c| !c.is_ascii_digit()), "{group}");
         }
     }
-}
-
-#[cfg(test)]
-mod edge_tests {
-    use super::*;
-    use crate::rng::FastrandRng;
 
     /// Returns a fixed sequence of "random" numbers, so every branch that
     /// depends on a draw can be aimed at deliberately.

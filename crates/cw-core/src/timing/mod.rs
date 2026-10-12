@@ -15,10 +15,7 @@ mod plan;
 mod station;
 
 pub use envelope::{EnvelopePoint, EnvelopeShape, envelope_shape};
-pub use pileup::{
-    Interferer, PILEUP_CALLER_SEPARATION_HZ, PILEUP_MIN_SEPARATION_HZ, PILEUP_SKIRT_DB,
-    Transmission, resolve_pileup,
-};
+pub use pileup::{Interferer, Transmission, resolve_pileup};
 pub use plan::{
     DEFAULT_TARGET_GAIN, PlannedTransmission, PlaybackPlan, ToneEvent, plan_morse_playback_for,
     plan_transmission,

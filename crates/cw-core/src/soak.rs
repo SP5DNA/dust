@@ -7,14 +7,17 @@
 
 #![cfg(test)]
 
+use crate::callsign::{CALLSIGN_TIER_MIN, parse_callsign};
+use crate::level::LEVEL_MIN;
 use crate::machine::{SessionEffect, SessionEvent, SessionMachine};
+use crate::session::MIN_RESPONSE_MS_PER_CHAR;
 use crate::{
-    AutoLevelCounters, CALLSIGN_TIER_MAX, CALLSIGN_TIER_MIN, CharSamplingState, CharSetMode,
-    CopyTally, FILTER_WIDTH_MAX, FILTER_WIDTH_MIN, FastrandRng, LEVEL_MIN, MonoMs,
-    PILEUP_LEVEL_MAX_DB, PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN, Rng,
-    STATIONS_MAX, STATIONS_MIN, Sampler, SessionId, SessionPhase, TrainingSettings, Transmission,
-    align_group, apply_auto_level, compute_char_pool, evaluate_auto_level, generate_training_group,
-    parse_callsign, plan_morse_playback_for, plan_transmission, resolve_pileup, resolve_station,
+    AutoLevelCounters, CALLSIGN_TIER_MAX, CharSamplingState, CharSetMode, CopyTally,
+    FILTER_WIDTH_MAX, FILTER_WIDTH_MIN, FastrandRng, MonoMs, PILEUP_LEVEL_MAX_DB,
+    PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN, Rng, STATIONS_MAX, STATIONS_MIN,
+    Sampler, SessionId, SessionPhase, TrainingSettings, Transmission, align_group,
+    apply_auto_level, compute_char_pool, evaluate_auto_level, generate_training_group,
+    plan_morse_playback_for, plan_transmission, resolve_pileup, resolve_station,
 };
 
 /// Enough seeds to be worth running on every commit, and cheap enough to.
@@ -366,7 +369,7 @@ fn no_run_of_events_can_put_a_session_somewhere_impossible() {
             result
                 .group_timings
                 .iter()
-                .all(|t| t.time_to_complete_ms >= crate::MIN_RESPONSE_MS_PER_CHAR),
+                .all(|t| t.time_to_complete_ms >= MIN_RESPONSE_MS_PER_CHAR),
             "seed {seed}: an answer quicker than anyone types"
         );
     }

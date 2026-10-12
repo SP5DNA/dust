@@ -255,8 +255,8 @@ pub const DEFAULT_FILTER_WIDTH_HZ: f64 = 300.0;
 pub const STATIONS_MIN: u32 = 1;
 pub const STATIONS_MAX: u32 = 5;
 /// How far either side of the wanted station the others can land, in hertz.
-/// The floor is above one critical band of hearing for a reason — see
-/// [`crate::timing::PILEUP_MIN_SEPARATION_HZ`].
+/// The floor is above one critical band of hearing for a reason — see the
+/// closest the pile-up places another station, in the timing module.
 pub const PILEUP_SPREAD_MIN: f64 = 150.0;
 pub const PILEUP_SPREAD_MAX: f64 = 800.0;
 /// How far below the wanted station the others sit, in decibels. The floor is
@@ -414,8 +414,9 @@ pub enum SettingsSection {
 }
 
 impl SettingsSection {
-    /// Every section, for the tests and for anything that wants to sweep them.
-    pub const ALL: [Self; 8] = [
+    /// Every section, for the tests that sweep them.
+    #[cfg(test)]
+    pub(crate) const ALL: [Self; 8] = [
         Self::SessionShape,
         Self::Speed,
         Self::KeyingEnvelope,

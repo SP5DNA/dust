@@ -41,11 +41,6 @@ mod tests {
         assert_eq!(unlocked_prefix(&['K', 'M'], 99), vec!['K', 'M']);
         assert_eq!(unlocked_prefix(&['X'], 1), vec!['X']);
     }
-}
-
-#[cfg(test)]
-mod level_tests {
-    use super::*;
 
     #[test]
     fn level_one_unlocks_two_characters() {

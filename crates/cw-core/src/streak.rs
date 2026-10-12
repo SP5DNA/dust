@@ -307,11 +307,6 @@ mod tests {
         assert_eq!(status.freezes_available, 0);
         assert_eq!(status.freezes_used, 2);
     }
-}
-
-#[cfg(test)]
-mod calendar_tests {
-    use super::*;
 
     #[test]
     fn a_date_that_is_not_a_date_is_refused() {

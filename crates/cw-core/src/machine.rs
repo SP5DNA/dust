@@ -862,9 +862,9 @@ mod tests {
             m.apply(SessionEvent::Focus { index: 1 }, MonoMs(10))
                 .is_empty()
         );
-        assert_eq!(m.session().focused_group(), 0);
+        assert_eq!(m.session().view().focused, 0);
         let _ = m.apply(SessionEvent::Focus { index: 0 }, MonoMs(10));
-        assert_eq!(m.session().focused_group(), 0);
+        assert_eq!(m.session().view().focused, 0);
     }
 
     #[test]

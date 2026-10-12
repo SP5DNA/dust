@@ -32,19 +32,6 @@ fn count_valid_letters(text: &str) -> u32 {
         .count() as u32
 }
 
-pub fn calculate_alphabet_size(sent_groups: &[impl AsRef<str>]) -> u32 {
-    let mut unique = std::collections::BTreeSet::new();
-    for g in sent_groups {
-        for ch in g.as_ref().chars() {
-            let up = ch.to_ascii_uppercase();
-            if is_scored_char(up) {
-                unique.insert(up);
-            }
-        }
-    }
-    unique.len().max(1) as u32
-}
-
 pub fn calculate_total_chars(sent_groups: &[impl AsRef<str>]) -> u32 {
     let total: u32 = sent_groups
         .iter()

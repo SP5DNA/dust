@@ -369,9 +369,10 @@ pub fn tier_examples(tier: u32) -> Vec<String> {
     (0..4).map(|_| generate_callsign(tier, &mut rng)).collect()
 }
 
-/// A callsign taken apart.
+/// A callsign taken apart: what the tests hold every generated call to.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct CallsignParts<'a> {
+pub(crate) struct CallsignParts<'a> {
     pub prefix: &'a str,
     pub separator: char,
     pub suffix: &'a str,
@@ -382,7 +383,8 @@ pub struct CallsignParts<'a> {
 ///
 /// The separator is the *last* digit before the suffix, which is what makes
 /// `9A1AA` split as `9A` + `1` + `AA` rather than at its leading digit.
-pub fn parse_callsign(call: &str) -> Option<CallsignParts<'_>> {
+#[cfg(test)]
+pub(crate) fn parse_callsign(call: &str) -> Option<CallsignParts<'_>> {
     let (base, portable) = match call.split_once('/') {
         Some((base, portable)) => (base, Some(portable)),
         None => (call, None),

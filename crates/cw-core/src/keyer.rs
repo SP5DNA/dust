@@ -111,7 +111,8 @@ pub struct PaddleDecoder {
 }
 
 impl PaddleDecoder {
-    pub fn is_empty(&self) -> bool {
+    #[cfg(test)]
+    fn is_empty(&self) -> bool {
         self.pattern.is_empty() && !self.invalid
     }
 

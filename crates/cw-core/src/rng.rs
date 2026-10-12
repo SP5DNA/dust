@@ -111,11 +111,6 @@ mod tests {
         }
         assert!(a > 900);
     }
-}
-
-#[cfg(test)]
-mod range_tests {
-    use super::*;
 
     struct Fixed(f64);
 

@@ -203,10 +203,6 @@ impl GroupSession {
         self.current_group
     }
 
-    pub fn focused_group(&self) -> usize {
-        self.focused_group
-    }
-
     /// The settings the session was started with. Every group is built from
     /// these, not from whatever the settings screen holds now.
     pub fn settings(&self) -> &TrainingSettings {
@@ -742,12 +738,12 @@ mod tests {
         assert!(session.confirm(9, MonoMs(1_100)).is_none());
         assert!(session.confirm(0, MonoMs(1_100)).is_some());
         assert!(session.any_confirmed());
-        assert_eq!(session.focused_group(), 1);
+        assert_eq!(session.view().focused, 1);
 
         // The last group keeps the focus.
         session.begin_group(1, MonoMs(2_000));
         assert!(session.confirm(1, MonoMs(2_100)).is_some());
-        assert_eq!(session.focused_group(), 1);
+        assert_eq!(session.view().focused, 1);
     }
 
     #[test]
@@ -783,10 +779,10 @@ mod tests {
     fn the_focus_only_moves_onto_the_current_group() {
         let mut session = GroupSession::new(SessionId::new(1), 2, TrainingSettings::default());
         session.set_focused_group(1);
-        assert_eq!(session.focused_group(), 0);
+        assert_eq!(session.view().focused, 0);
         session.begin_group(1, MonoMs(10));
         session.set_focused_group(1);
-        assert_eq!(session.focused_group(), 1);
+        assert_eq!(session.view().focused, 1);
         // Beginning a group that is not there changes nothing.
         session.begin_group(9, MonoMs(20));
         assert_eq!(session.current_group(), 1);
