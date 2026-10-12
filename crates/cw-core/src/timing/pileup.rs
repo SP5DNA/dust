@@ -271,7 +271,7 @@ fn pick_in_room(pieces: &[(f64, f64)], rng: &mut impl Rng) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rng::FastrandRng;
+    use crate::rng::SplitMix64;
     use crate::settings::{
         FILTER_WIDTH_MAX, FILTER_WIDTH_MIN, PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX,
         PILEUP_SPREAD_MIN, STATIONS_MAX, STATIONS_MIN, TrainingSettings,
@@ -294,7 +294,7 @@ mod tests {
 
     fn pileup(max: u32, seed: u64) -> (StationVoice, Vec<Interferer>) {
         let s = settings(max);
-        let mut rng = FastrandRng(seed.wrapping_mul(7919).wrapping_add(3));
+        let mut rng = SplitMix64::new(seed.wrapping_mul(7919).wrapping_add(3));
         let wanted = resolve_station(&s, &mut rng);
         let others = resolve_pileup(&s, &wanted, "W1AW", &texts(max as usize), &mut rng);
         (wanted, others)
@@ -304,9 +304,9 @@ mod tests {
     /// texts, every one of them drawn from the generator given.
     #[test]
     fn a_call_brings_the_pile_up_the_settings_ask_for() {
-        let mut rng = FastrandRng(11);
+        let mut rng = SplitMix64::new(11);
         let voice = resolve_station(&settings(1), &mut rng);
-        let say = |_: &mut FastrandRng| "DL1ABC".to_string();
+        let say = |_: &mut SplitMix64| "DL1ABC".to_string();
         let alone = Transmission::calling(&settings(1), "CQ", voice, &mut rng, say);
         assert_eq!(alone, Transmission::alone("CQ", voice));
 
@@ -400,7 +400,7 @@ mod tests {
             let s = s.clamp();
             let mut seen = std::collections::BTreeSet::new();
             for seed in 0..400u64 {
-                let mut rng = FastrandRng(seed.wrapping_mul(7919).wrapping_add(3));
+                let mut rng = SplitMix64::new(seed.wrapping_mul(7919).wrapping_add(3));
                 let wanted = resolve_station(&s, &mut rng);
                 let others =
                     resolve_pileup(&s, &wanted, "W1AW", &texts(STATIONS_MAX as usize), &mut rng);
@@ -440,12 +440,12 @@ mod tests {
     fn the_same_draw_brings_the_same_stations() {
         let s = settings(STATIONS_MAX);
         let once = {
-            let mut rng = FastrandRng(99);
+            let mut rng = SplitMix64::new(99);
             let wanted = resolve_station(&s, &mut rng);
             resolve_pileup(&s, &wanted, "W1AW", &texts(4), &mut rng)
         };
         let twice = {
-            let mut rng = FastrandRng(99);
+            let mut rng = SplitMix64::new(99);
             let wanted = resolve_station(&s, &mut rng);
             resolve_pileup(&s, &wanted, "W1AW", &texts(4), &mut rng)
         };
@@ -459,7 +459,7 @@ mod tests {
     fn the_others_are_cut_at_the_end_and_never_mid_tone() {
         let s = settings(STATIONS_MAX);
         for seed in 0..200 {
-            let mut rng = FastrandRng(seed * 31 + 7);
+            let mut rng = SplitMix64::new(seed * 31 + 7);
             let wanted = resolve_station(&s, &mut rng);
             let others = resolve_pileup(&s, &wanted, "W1AW", &texts(4), &mut rng);
             if others.is_empty() {
@@ -498,7 +498,7 @@ mod tests {
                 s.band.pileup_spread_hz = spread;
                 let s = s.clamp();
                 for seed in 0..40 {
-                    let mut rng = FastrandRng(seed * 13 + 1);
+                    let mut rng = SplitMix64::new(seed * 13 + 1);
                     let wanted = resolve_station(&s, &mut rng);
                     let others =
                         resolve_pileup(&s, &wanted, "K5ABC", &texts(max as usize), &mut rng);
@@ -546,7 +546,7 @@ mod tests {
             let skirt = 10f64.powf(PILEUP_SKIRT_DB / 20.0);
             let mut count = 0usize;
             for seed in 0..400u64 {
-                let mut rng = FastrandRng(seed * 2_654_435_761 + 11);
+                let mut rng = SplitMix64::new(seed * 2_654_435_761 + 11);
                 let wanted = resolve_station(&s, &mut rng);
                 for other in resolve_pileup(&s, &wanted, "W1AW", &texts(4), &mut rng) {
                     let through = receiver.response_at(other.voice.tone_hz);
@@ -621,7 +621,7 @@ mod tests {
             let (mut gaps, mut placed, mut quietest) = (Vec::new(), 0usize, 0.0f64);
             const GROUPS: u64 = 2_000;
             for seed in 0..GROUPS {
-                let mut rng = FastrandRng(seed * 40_503 + 5);
+                let mut rng = SplitMix64::new(seed * 40_503 + 5);
                 let wanted = resolve_station(&s, &mut rng);
                 let others = resolve_pileup(&s, &wanted, "W1AW", &texts(5), &mut rng);
                 placed += others.len();
@@ -685,7 +685,7 @@ mod tests {
                     let s = s.clamp();
                     let receiver = crate::band::FilterDesign::from_settings(&s);
                     for seed in 0..200u64 {
-                        let mut rng = FastrandRng(
+                        let mut rng = SplitMix64::new(
                             seed.wrapping_mul(2_862_933_555_777_941_757).wrapping_add(3),
                         );
                         let wanted = resolve_station(&s, &mut rng);
@@ -744,7 +744,7 @@ mod tests {
             s.band.filter_shape = shape;
             let s = s.clamp();
             for seed in 0..150u64 {
-                let mut rng = FastrandRng(seed * 6_364_136_223 + 17);
+                let mut rng = SplitMix64::new(seed * 6_364_136_223 + 17);
                 let wanted = resolve_station(&s, &mut rng);
                 let yours = wanted.volume * through_filter(&s, wanted.tone_hz);
                 for other in resolve_pileup(&s, &wanted, "W1AW", &texts(4), &mut rng) {
@@ -778,7 +778,7 @@ mod tests {
             s.band.pileup_spread_hz = crate::settings::PILEUP_SPREAD_MAX;
             let s = s.clamp();
             for seed in 0..200u64 {
-                let mut rng = FastrandRng(seed * 7919 + 3);
+                let mut rng = SplitMix64::new(seed * 7919 + 3);
                 let wanted = resolve_station(&s, &mut rng);
                 let others = resolve_pileup(&s, &wanted, "W1AW", &texts(most as usize), &mut rng);
                 let calling = others.len() + 1;
@@ -801,7 +801,7 @@ mod tests {
         s.band.pileup_spread_hz = crate::settings::PILEUP_SPREAD_MAX;
         let s = s.clamp();
         for seed in 0..200u64 {
-            let mut rng = FastrandRng(seed * 31 + 11);
+            let mut rng = SplitMix64::new(seed * 31 + 11);
             let wanted = resolve_station(&s, &mut rng);
             let others = resolve_pileup(&s, &wanted, "W1AW", &texts(3), &mut rng);
             assert_eq!(others.len() + 1, 3, "seed {seed}");

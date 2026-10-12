@@ -337,7 +337,7 @@ pub fn sampling_rows(settings: &TrainingSettings, sessions: &[SessionResult]) ->
     let pool = compute_char_pool(settings);
     let mut config = config_from_settings(settings);
     config.thompson_sampling = false;
-    let mut rng = crate::rng::FastrandRng::default();
+    let mut rng = crate::rng::SplitMix64::default();
     let probs = if settings.curriculum.char_set_mode == CharSetMode::Callsign {
         // Callsigns are not drawn character by character, so a per-character
         // weight would not describe them. Ask the real generator instead.

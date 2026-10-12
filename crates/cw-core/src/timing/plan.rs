@@ -160,7 +160,7 @@ pub fn plan_morse_playback_for(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rng::{FastrandRng, Rng};
+    use crate::rng::{Rng, SplitMix64};
     use crate::timing::compute_group_gap_for_wpm;
     use crate::timing::station::resolve_station;
 
@@ -204,7 +204,7 @@ mod tests {
         settings.playback.effective_wpm_min = 20.0;
         settings.playback.effective_wpm_max = 20.0;
         settings.playback.link_char_to_effective = true;
-        let mut rng = FastrandRng::default();
+        let mut rng = SplitMix64::default();
         let plan = planned("K", &settings, &mut rng);
         assert!(plan.duration_sec > 0.0);
         assert_eq!(plan.events.len(), 3); // -.-
@@ -221,8 +221,8 @@ mod tests {
         slow.playback.effective_wpm_min = 10.0;
         slow.playback.effective_wpm_max = 10.0;
         slow.playback.link_char_to_effective = false;
-        let mut rng_a = FastrandRng(1);
-        let mut rng_b = FastrandRng(1);
+        let mut rng_a = SplitMix64::new(1);
+        let mut rng_b = SplitMix64::new(1);
         let a = planned("KM", &fast, &mut rng_a);
         let b = planned("KM", &slow, &mut rng_b);
         assert!(b.duration_sec > a.duration_sec);
@@ -236,8 +236,8 @@ mod tests {
         settings.playback.effective_wpm_min = 20.0;
         settings.playback.effective_wpm_max = 20.0;
         settings.playback.link_char_to_effective = true;
-        let a = planned("KM", &settings, &mut FastrandRng(1));
-        let b = planned("KM#", &settings, &mut FastrandRng(1));
+        let a = planned("KM", &settings, &mut SplitMix64::new(1));
+        let b = planned("KM#", &settings, &mut SplitMix64::new(1));
         assert!(morse_for('#').is_none());
         assert!((a.duration_sec - b.duration_sec).abs() < 1e-12);
         assert_eq!(a.events.len(), b.events.len());
@@ -252,7 +252,7 @@ mod tests {
         settings.band.volume_min = 0.2;
         settings.band.volume_max = 1.0;
         settings.band.link_volume = false;
-        let mut rng = crate::rng::FastrandRng(7);
+        let mut rng = crate::rng::SplitMix64::new(7);
         let plan = planned("HELLO", &settings, &mut rng);
         let first = &plan.events[0];
         assert!(plan.events.len() > 4);
@@ -414,7 +414,7 @@ mod tests {
     #[test]
     fn a_repeat_is_the_same_operator() {
         let s = fist(1.0);
-        let voice = resolve_station(&s, &mut FastrandRng(99));
+        let voice = resolve_station(&s, &mut SplitMix64::new(99));
         let once = plan_morse_playback_for("W1AW", &s, &voice);
         let twice = plan_morse_playback_for("W1AW", &s, &voice);
         assert_eq!(once.events.len(), twice.events.len());

@@ -15,11 +15,11 @@ use crate::session::MIN_RESPONSE_MS_PER_CHAR;
 use crate::timing::resolve_pileup;
 use crate::{
     AutoLevelCounters, CALLSIGN_TIER_MAX, CharSamplingState, CharSetMode, CopyTally,
-    FILTER_WIDTH_MAX, FILTER_WIDTH_MIN, FastrandRng, MonoMs, PILEUP_LEVEL_MAX_DB,
-    PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN, Rng, STATIONS_MAX, STATIONS_MIN,
-    Sampler, SessionId, SessionPhase, TrainingSettings, Transmission, align_group,
-    compute_char_pool, evaluate_auto_level, generate_training_group, plan_morse_playback_for,
-    plan_transmission, resolve_station,
+    FILTER_WIDTH_MAX, FILTER_WIDTH_MIN, MonoMs, PILEUP_LEVEL_MAX_DB, PILEUP_LEVEL_MIN_DB,
+    PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN, Rng, STATIONS_MAX, STATIONS_MIN, Sampler, SessionId,
+    SessionPhase, SplitMix64, TrainingSettings, Transmission, align_group, compute_char_pool,
+    evaluate_auto_level, generate_training_group, plan_morse_playback_for, plan_transmission,
+    resolve_station,
 };
 
 /// Enough seeds to be worth running on every commit, and cheap enough to.
@@ -28,7 +28,7 @@ use crate::{
 const SEEDS: u64 = 2_000;
 
 /// Settings from anywhere, including values no screen would ever produce.
-fn wild_settings(rng: &mut FastrandRng) -> TrainingSettings {
+fn wild_settings(rng: &mut SplitMix64) -> TrainingSettings {
     let mut s = TrainingSettings::default();
     s.curriculum.level = rng.usize_in(0, 60) as u32;
     s.curriculum.digits_level = rng.usize_in(0, 20) as u32;
@@ -182,7 +182,7 @@ fn check_clamped(s: &TrainingSettings, seed: u64) {
 #[test]
 fn any_settings_clamp_into_something_the_trainer_can_start_from() {
     for seed in 0..SEEDS {
-        let mut rng = FastrandRng(seed.wrapping_mul(0x9E37_79B9).wrapping_add(1));
+        let mut rng = SplitMix64::new(seed.wrapping_mul(0x9E37_79B9).wrapping_add(1));
         let settings = wild_settings(&mut rng);
         check_clamped(&settings, seed);
 
@@ -259,7 +259,7 @@ fn any_settings_clamp_into_something_the_trainer_can_start_from() {
 
 /// One of everything the runtime can send, including events for the wrong
 /// group and timers that are already stale.
-fn random_event(rng: &mut FastrandRng, groups: usize, timers: &[u64]) -> SessionEvent {
+fn random_event(rng: &mut SplitMix64, groups: usize, timers: &[u64]) -> SessionEvent {
     let index = rng.usize_in(0, groups.saturating_sub(1).max(1));
     // Whatever a keyboard or a paste can produce, not just tidy call signs.
     const KEYS: [char; 12] = [
@@ -296,7 +296,7 @@ fn random_event(rng: &mut FastrandRng, groups: usize, timers: &[u64]) -> Session
 #[test]
 fn no_run_of_events_can_put_a_session_somewhere_impossible() {
     for seed in 0..SEEDS {
-        let mut rng = FastrandRng(seed.wrapping_mul(0x2545_F491).wrapping_add(7));
+        let mut rng = SplitMix64::new(seed.wrapping_mul(0x2545_F491).wrapping_add(7));
         let settings = wild_settings(&mut rng).clamp();
         let groups = settings.curriculum.num_groups.max(1) as usize;
         let sampler = Sampler::new(&[], &settings, seed);
@@ -403,7 +403,7 @@ fn scoring_holds_for_anything_a_listener_can_type() {
         'K', 'M', 'U', 'R', 'E', '5', '0', 'x', ' ', '\n', 'é', '中', '.', '\u{200b}',
     ];
     for seed in 0..SEEDS {
-        let mut rng = FastrandRng(seed.wrapping_mul(0xA24B_AED4).wrapping_add(3));
+        let mut rng = SplitMix64::new(seed.wrapping_mul(0xA24B_AED4).wrapping_add(3));
         let sent: String = (0..rng.usize_in(0, 12))
             .map(|_| KEYS[rng.usize_in(0, 6)])
             .collect();
@@ -471,7 +471,7 @@ fn scoring_holds_for_anything_a_listener_can_type() {
 #[test]
 fn settings_survive_storage_and_older_saves() {
     for seed in 0..SEEDS {
-        let mut rng = FastrandRng(seed.wrapping_mul(0x1D87_2B41).wrapping_add(11));
+        let mut rng = SplitMix64::new(seed.wrapping_mul(0x1D87_2B41).wrapping_add(11));
         let settings = wild_settings(&mut rng).clamp();
 
         let json = serde_json::to_string(&settings).expect("settings serialize");
@@ -518,7 +518,7 @@ fn settings_survive_storage_and_older_saves() {
 #[test]
 fn auto_levelling_never_walks_the_settings_out_of_range() {
     for seed in 0..SEEDS {
-        let mut rng = FastrandRng(seed.wrapping_mul(0x6C07_8965).wrapping_add(5));
+        let mut rng = SplitMix64::new(seed.wrapping_mul(0x6C07_8965).wrapping_add(5));
         let mut settings = wild_settings(&mut rng).clamp();
         settings.auto_level.auto_adjust_level = true;
         settings.auto_level.auto_adjust_above_threshold_count = rng.usize_in(0, 5) as u32;
@@ -562,7 +562,7 @@ fn auto_levelling_never_walks_the_settings_out_of_range() {
 #[test]
 fn every_callsign_the_trainer_can_send_is_a_real_one() {
     for seed in 0..SEEDS {
-        let mut rng = FastrandRng(seed.wrapping_mul(0xB5297A4D).wrapping_add(17));
+        let mut rng = SplitMix64::new(seed.wrapping_mul(0xB5297A4D).wrapping_add(17));
         let mut settings = wild_settings(&mut rng).clamp();
         settings.curriculum.char_set_mode = CharSetMode::Callsign;
         settings.curriculum.callsign_level =
@@ -607,7 +607,7 @@ fn every_callsign_the_trainer_can_send_is_a_real_one() {
 #[test]
 fn no_band_setting_makes_an_unlistenable_receiver() {
     for seed in 0..SEEDS / 20 {
-        let mut rng = FastrandRng(seed.wrapping_mul(0x27D4_EB2D).wrapping_add(19));
+        let mut rng = SplitMix64::new(seed.wrapping_mul(0x27D4_EB2D).wrapping_add(19));
         let mut settings = wild_settings(&mut rng).clamp();
         settings.band.qrn_enabled = true;
         settings.band.noise_enabled = true;
@@ -654,7 +654,7 @@ fn no_band_setting_makes_an_unlistenable_receiver() {
 #[test]
 fn a_pile_up_is_always_something_you_could_copy() {
     for seed in 0..SEEDS / 4 {
-        let mut rng = FastrandRng(seed.wrapping_mul(0x85EB_CA6B).wrapping_add(29));
+        let mut rng = SplitMix64::new(seed.wrapping_mul(0x85EB_CA6B).wrapping_add(29));
         let settings = wild_settings(&mut rng).clamp();
         let mut state = CharSamplingState::default();
         let wanted_text = generate_training_group(&settings, &mut state, &mut rng);

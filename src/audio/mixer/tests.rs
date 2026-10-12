@@ -2,7 +2,7 @@
 
 use super::*;
 use cw_core::band::{BandMixer, FilterDesign};
-use cw_core::{FastrandRng, TrainingSettings, Transmission, plan_transmission, resolve_station};
+use cw_core::{SplitMix64, TrainingSettings, Transmission, plan_transmission, resolve_station};
 
 /// Low enough to keep the long listens quick; the band sounds the same at
 /// any rate.
@@ -22,7 +22,7 @@ fn band(settings: &TrainingSettings, seed: u64) -> BandVoice {
 }
 
 fn send(settings: &TrainingSettings, text: &str) -> SendVoice {
-    let voice = resolve_station(settings, &mut FastrandRng(5));
+    let voice = resolve_station(settings, &mut SplitMix64::new(5));
     let plan = plan_transmission(&Transmission::alone(text, voice), settings);
     SendVoice::new(&plan, &FilterDesign::from_settings(settings), None, SR, 0.0)
 }

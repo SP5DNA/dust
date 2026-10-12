@@ -421,7 +421,7 @@ mod device_tests {
             eprintln!("no audio device on this machine; skipping");
             return;
         };
-        let voice = cw_core::resolve_station(&settings(), &mut cw_core::FastrandRng(7));
+        let voice = cw_core::resolve_station(&settings(), &mut cw_core::SplitMix64::new(7));
         let wait =
             crate::audio::start_send(&mut player, &Transmission::alone("K", voice), &settings())
                 .expect("the device should take a send");

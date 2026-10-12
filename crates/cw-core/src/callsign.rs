@@ -14,7 +14,7 @@
 //! digit-bearing prefixes, then portable suffixes. Tiers are cumulative, so
 //! moving up never takes practice away — a high tier sounds like a real band.
 
-use crate::rng::{FastrandRng, Rng};
+use crate::rng::{Rng, SplitMix64};
 
 pub const CALLSIGN_TIER_MIN: u32 = 1;
 pub const CALLSIGN_TIER_MAX: u32 = 6;
@@ -365,7 +365,7 @@ pub fn callsign_pool(tier: u32) -> Vec<char> {
 /// A few calls to show beside the tier setting. Deterministic, so the preview
 /// does not churn every time the screen redraws.
 pub fn tier_examples(tier: u32) -> Vec<String> {
-    let mut rng = FastrandRng(0x51A7_C0DE_u64 ^ u64::from(tier).wrapping_mul(0x9E37_79B9));
+    let mut rng = SplitMix64::new(0x51A7_C0DE_u64 ^ u64::from(tier).wrapping_mul(0x9E37_79B9));
     (0..4).map(|_| generate_callsign(tier, &mut rng)).collect()
 }
 
@@ -426,7 +426,7 @@ mod tests {
     use crate::morse::morse_for;
 
     fn calls(tier: u32, count: usize) -> Vec<String> {
-        let mut rng = FastrandRng(u64::from(tier).wrapping_mul(0x2545_F491) | 1);
+        let mut rng = SplitMix64::new(u64::from(tier).wrapping_mul(0x2545_F491) | 1);
         (0..count)
             .map(|_| generate_callsign(tier, &mut rng))
             .collect()
@@ -544,7 +544,7 @@ mod tests {
 
     #[test]
     fn a_tier_outside_the_ladder_is_pulled_back_onto_it() {
-        let mut rng = FastrandRng(7);
+        let mut rng = SplitMix64::new(7);
         let low = generate_callsign(0, &mut rng);
         assert_eq!(low.chars().count(), 4, "tier 0 should behave as tier 1");
         let high = generate_callsign(9_999, &mut rng);
@@ -620,7 +620,7 @@ mod tests {
 
     #[test]
     fn a_weighted_table_always_yields_something() {
-        let mut rng = FastrandRng(3);
+        let mut rng = SplitMix64::new(3);
         assert_eq!(pick_weighted(&[("only", 0.0)], &mut rng), Some(&"only"));
         assert_eq!(pick_weighted::<&str>(&[], &mut rng), None);
         // Weight decides: a thousand draws can only land on the heavy entry.

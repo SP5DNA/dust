@@ -2,7 +2,7 @@
 //! the letter player, the group stream and the envelope samples.
 
 use cw_core::{
-    CALLSIGN_TIER_MAX, CharSamplingState, FastrandRng, GroupSource, Sampler, TrainingSettings,
+    CALLSIGN_TIER_MAX, CharSamplingState, GroupSource, Sampler, SplitMix64, TrainingSettings,
     Transmission, compute_after_group_gap_ms, generate_callsign, generate_training_group,
     resolve_station,
 };
@@ -150,8 +150,8 @@ pub fn start_band_preview(ctx: AppCtx) {
 }
 
 /// One operator for a whole preview, drawn afresh each time one starts.
-fn new_station(settings: &TrainingSettings) -> (cw_core::StationVoice, FastrandRng) {
-    let mut rng = FastrandRng(seed_rng());
+fn new_station(settings: &TrainingSettings) -> (cw_core::StationVoice, SplitMix64) {
+    let mut rng = SplitMix64::new(seed_rng());
     (resolve_station(settings, &mut rng), rng)
 }
 

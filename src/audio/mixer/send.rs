@@ -269,7 +269,7 @@ impl SendVoice {
 mod tests {
     use super::*;
     use cw_core::{
-        FastrandRng, Interferer, TrainingSettings, Transmission, plan_transmission, resolve_station,
+        Interferer, SplitMix64, TrainingSettings, Transmission, plan_transmission, resolve_station,
     };
 
     const SR: u32 = 8_000;
@@ -294,7 +294,7 @@ mod tests {
         text: &str,
         others: &[&str],
     ) -> PlannedTransmission {
-        let mut rng = FastrandRng(1);
+        let mut rng = SplitMix64::new(1);
         let voice = resolve_station(settings, &mut rng);
         let others = others
             .iter()

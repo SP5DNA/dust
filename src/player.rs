@@ -366,7 +366,7 @@ mod tests {
     }
 
     fn cq() -> Transmission {
-        let voice = cw_core::resolve_station(&test_settings(), &mut cw_core::FastrandRng(1));
+        let voice = cw_core::resolve_station(&test_settings(), &mut cw_core::SplitMix64::new(1));
         Transmission::alone("CQ", voice)
     }
 

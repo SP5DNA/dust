@@ -1,9 +1,7 @@
 //! The band's random numbers: the crate's own generator, with the shapes the
 //! band draws from it.
 
-use std::f64::consts::TAU;
-
-use crate::rng::{FastrandRng, Rng};
+use crate::rng::{Rng, SplitMix64, box_muller};
 
 /// The crate's generator as a plain value, small enough to copy into every
 /// transmitter on the band, with the distributions the band draws.
@@ -12,9 +10,9 @@ pub struct Draw(u64);
 
 impl Rng for Draw {
     fn f64(&mut self) -> f64 {
-        let mut inner = FastrandRng(self.0);
+        let mut inner = SplitMix64::new(self.0);
         let value = inner.f64();
-        self.0 = inner.0;
+        self.0 = inner.state;
         value
     }
 }
@@ -46,18 +44,13 @@ impl Draw {
         }
     }
 
-    /// Two independent standard normal deviates, by Box–Muller.
+    /// Two independent standard normal deviates, by Box–Muller. Where they
+    /// are wanted a sample at a time, [`Gaussian`] keeps the other one of
+    /// each pair.
     pub fn normal_pair(&mut self) -> (f64, f64) {
-        // 1 − u keeps the logarithm's argument in (0, 1].
-        let radius = (-2.0 * (1.0 - self.f64()).ln()).sqrt();
-        let (sin, cos) = (TAU * self.f64()).sin_cos();
+        let (radius, angle) = box_muller(self);
+        let (sin, cos) = angle.sin_cos();
         (radius * cos, radius * sin)
-    }
-
-    /// A standard normal deviate. Where they are wanted a sample at a time,
-    /// [`Gaussian`] keeps the other one of each pair.
-    pub fn normal(&mut self) -> f64 {
-        self.normal_pair().0
     }
 
     /// Log-normal around a median: what durations and spacings follow, from

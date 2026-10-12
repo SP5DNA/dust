@@ -8,9 +8,9 @@
 //! how long they live.
 
 use cw_core::{
-    CharSamplingState, CountersKey, CountersUpdate, FastrandRng, MonoMs, Sampler, SessionEffect,
-    SessionEvent, SessionId, SessionMachine, Transmission, complete_session,
-    generate_training_group, resolve_station,
+    CharSamplingState, CountersKey, CountersUpdate, MonoMs, Sampler, SessionEffect, SessionEvent,
+    SessionId, SessionMachine, SplitMix64, Transmission, complete_session, generate_training_group,
+    resolve_station,
 };
 use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
@@ -27,7 +27,7 @@ pub struct LiveSession {
     /// Where every group's stations are drawn from. Drawn afresh for each
     /// session, so no two sessions — in one launch or across launches — hear
     /// the same operators.
-    stations: FastrandRng,
+    stations: SplitMix64,
     lease: Lease,
 }
 
@@ -119,7 +119,7 @@ pub fn start_session(ctx: AppCtx) {
     screen.set(Screen::Training);
     *app.session.borrow_mut() = Some(LiveSession {
         machine,
-        stations: FastrandRng(seed_rng()),
+        stations: SplitMix64::new(seed_rng()),
         lease: lease.clone(),
     });
     run_effects(ctx, &lease, effects);

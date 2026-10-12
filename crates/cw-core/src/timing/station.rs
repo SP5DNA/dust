@@ -84,7 +84,7 @@ fn resolve_tone_hz(settings: &TrainingSettings, rng: &mut impl Rng) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rng::FastrandRng;
+    use crate::rng::SplitMix64;
 
     fn fist(variation: f64) -> TrainingSettings {
         let mut s = TrainingSettings::default();
@@ -103,7 +103,7 @@ mod tests {
         let settings = TrainingSettings::default().clamp();
         assert!(settings.playback.link_char_to_effective);
         assert!(settings.playback.char_wpm_min < settings.playback.char_wpm_max);
-        let mut rng = FastrandRng(11);
+        let mut rng = SplitMix64::new(11);
         for _ in 0..2_000 {
             let voice = resolve_station(&settings, &mut rng);
             assert_eq!(voice.effective_wpm, voice.char_wpm);
@@ -117,7 +117,7 @@ mod tests {
     fn at_zero_every_station_is_a_keyer() {
         let s = fist(0.0);
         for seed in 0..100u64 {
-            let voice = resolve_station(&s, &mut FastrandRng(seed * 31 + 7));
+            let voice = resolve_station(&s, &mut SplitMix64::new(seed * 31 + 7));
             assert!((voice.weight - 1.0).abs() < 1e-9);
             assert!((voice.dash_ratio - 3.0).abs() < 1e-9);
         }
@@ -129,7 +129,7 @@ mod tests {
         let s = fist(1.0);
         let fists: Vec<(f64, f64)> = (0..100u64)
             .map(|seed| {
-                let v = resolve_station(&s, &mut FastrandRng(seed * 2_654_435_761 + 11));
+                let v = resolve_station(&s, &mut SplitMix64::new(seed * 2_654_435_761 + 11));
                 (v.weight, v.dash_ratio)
             })
             .collect();

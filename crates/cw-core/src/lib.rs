@@ -43,7 +43,7 @@ pub use machine::{
 };
 pub use morse::{MAX_DIGITS_LEVEL, morse_for};
 pub use pool::{compute_char_pool, current_practice_window, unlocked_practice_count};
-pub use rng::{FastrandRng, Rng};
+pub use rng::{Rng, SplitMix64};
 pub use sampling::{CharSamplingState, Sampler, generate_training_group};
 pub use sequences::{PresetId, SEQUENCE_PRESETS, SequenceChoice, SequencePreset};
 pub use session::{

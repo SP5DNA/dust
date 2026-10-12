@@ -360,7 +360,7 @@ mod tests {
         let mut settings = TrainingSettings::default();
         settings.band.noise_enabled = true;
         settings.band.noise_level = 0.4;
-        let voice = cw_core::resolve_station(&settings, &mut cw_core::FastrandRng(3));
+        let voice = cw_core::resolve_station(&settings, &mut cw_core::SplitMix64::new(3));
         let transmission = Transmission::alone("K", voice);
 
         let wait = start_send(player.as_mut(), &transmission, &settings).expect("a send");

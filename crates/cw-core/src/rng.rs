@@ -37,29 +37,55 @@ pub trait Rng {
         let hi = min.max(max);
         (lo + self.f64() * (hi - lo + 1.0)).floor().min(hi.floor())
     }
+
+    /// A standard normal deviate, by Box–Muller. Straight-line: no draw is
+    /// retried, so no generator — however badly behaved — can keep it
+    /// spinning.
+    fn normal(&mut self) -> f64
+    where
+        Self: Sized,
+    {
+        let (radius, angle) = box_muller(self);
+        radius * angle.cos()
+    }
+}
+
+/// Box–Muller's radius and angle for one pair of standard normal deviates:
+/// `radius·cos(angle)` and `radius·sin(angle)` are independent.
+pub(crate) fn box_muller(rng: &mut impl Rng) -> (f64, f64) {
+    // 1 − u maps [0, 1) onto (0, 1], where the logarithm is finite; the clamp
+    // keeps it there for a generator that hands back 1.0.
+    let u = (1.0 - rng.f64()).clamp(f64::EPSILON, 1.0);
+    ((-2.0 * u.ln()).sqrt(), std::f64::consts::TAU * rng.f64())
 }
 
 /// A small, fast, seedable generator (SplitMix64). Deterministic for a given
 /// seed, which is what lets every test replay the same session and the same
 /// band.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FastrandRng(pub u64);
+pub struct SplitMix64 {
+    pub(crate) state: u64,
+}
 
-impl Default for FastrandRng {
+impl Default for SplitMix64 {
     fn default() -> Self {
-        Self(0x4d595df4d0f33173)
+        Self::new(0x4d59_5df4_d0f3_3173)
     }
 }
 
-impl Rng for FastrandRng {
+impl Rng for SplitMix64 {
     fn f64(&mut self) -> f64 {
-        // SplitMix64 → unit interval, no extra crate in cw-core.
-        self.0 = self.0.wrapping_add(SPLITMIX_GAMMA);
-        (mix(self.0) >> 11) as f64 / ((1u64 << 53) as f64)
+        self.state = self.state.wrapping_add(SPLITMIX_GAMMA);
+        (mix(self.state) >> 11) as f64 / ((1u64 << 53) as f64)
     }
 }
 
-impl FastrandRng {
+impl SplitMix64 {
+    /// The generator that `seed` starts.
+    pub const fn new(seed: u64) -> Self {
+        Self { state: seed }
+    }
+
     /// A generator of its own for `stream`, derived from this one's state
     /// without drawing from it: the same state and stream always give the
     /// same generator, and any other pair an unrelated one.
@@ -71,7 +97,7 @@ impl FastrandRng {
     /// state puts each one somewhere unrelated on the cycle.
     #[must_use]
     pub fn fork(&self, stream: u64) -> Self {
-        Self(mix(self.0 ^ mix(stream)))
+        Self::new(mix(self.state ^ mix(stream)))
     }
 }
 
@@ -111,19 +137,19 @@ mod tests {
 
     #[test]
     fn an_empty_pool_has_nothing_to_pick() {
-        let mut rng = FastrandRng::default();
+        let mut rng = SplitMix64::default();
         assert_eq!(weighted_random_pick(&[], &[], &mut rng), None);
     }
 
     #[test]
     fn single_element() {
-        let mut rng = FastrandRng::default();
+        let mut rng = SplitMix64::default();
         assert_eq!(weighted_random_pick(&['A'], &[1.0], &mut rng), Some('A'));
     }
 
     #[test]
     fn heavy_bias() {
-        let mut rng = FastrandRng::default();
+        let mut rng = SplitMix64::default();
         let pool = ['A', 'B'];
         let weights = [100.0, 0.01];
         let mut a = 0;
@@ -219,16 +245,16 @@ mod tests {
 
     #[test]
     fn the_default_generator_is_deterministic_and_in_range() {
-        let mut a = FastrandRng::default();
-        let mut b = FastrandRng::default();
+        let mut a = SplitMix64::default();
+        let mut b = SplitMix64::default();
         for _ in 0..100 {
             let x = a.f64();
             assert_eq!(x, b.f64());
             assert!((0.0..1.0).contains(&x));
         }
         // A different seed gives a different stream.
-        let mut other = FastrandRng(1);
-        assert_ne!(FastrandRng::default().f64(), other.f64());
+        let mut other = SplitMix64::new(1);
+        assert_ne!(SplitMix64::default().f64(), other.f64());
     }
 
     /// Streams forked from neighbouring seeds, and neighbouring streams of
@@ -240,7 +266,7 @@ mod tests {
         let mut seen = std::collections::HashSet::new();
         for seed in 0..64u64 {
             for stream in 0..16u64 {
-                let mut rng = FastrandRng(seed).fork(stream);
+                let mut rng = SplitMix64::new(seed).fork(stream);
                 for _ in 0..8 {
                     assert!(
                         seen.insert(rng.f64().to_bits()),
@@ -250,7 +276,7 @@ mod tests {
             }
         }
         // And the same seed and stream are the same generator, every time.
-        assert_eq!(FastrandRng(5).fork(3), FastrandRng(5).fork(3));
-        assert_ne!(FastrandRng(5).fork(3), FastrandRng(5).fork(4));
+        assert_eq!(SplitMix64::new(5).fork(3), SplitMix64::new(5).fork(3));
+        assert_ne!(SplitMix64::new(5).fork(3), SplitMix64::new(5).fork(4));
     }
 }

@@ -6,7 +6,7 @@ use crate::alignment::CopyTally;
 use crate::callsign::generate_callsign;
 use crate::machine::GroupSource;
 use crate::pool::compute_char_pool;
-use crate::rng::{FastrandRng, Rng, weighted_random_pick};
+use crate::rng::{Rng, SplitMix64, weighted_random_pick};
 use crate::session::SessionResult;
 use crate::settings::{CharSetMode, LevelAxis, TrainingSettings};
 
@@ -72,7 +72,7 @@ impl CharSamplingState {
 #[derive(Clone, Debug)]
 pub struct Sampler {
     state: CharSamplingState,
-    rng: FastrandRng,
+    rng: SplitMix64,
 }
 
 impl Sampler {
@@ -82,7 +82,7 @@ impl Sampler {
     pub fn new(history: &[SessionResult], settings: &TrainingSettings, seed: u64) -> Self {
         Self {
             state: CharSamplingState::from_history(history, settings),
-            rng: FastrandRng(seed),
+            rng: SplitMix64::new(seed),
         }
     }
 }
@@ -168,15 +168,6 @@ fn difficulty_factor(p_error: f64, error_weight_strength: f64) -> f64 {
     }
 }
 
-/// A standard normal deviate, by Box–Muller. Straight-line: no draw is
-/// retried, so no generator — however badly behaved — can keep it spinning.
-fn random_normal(rng: &mut impl Rng) -> f64 {
-    // 1 − u maps [0, 1) onto (0, 1], where the logarithm is finite.
-    let u = (1.0 - rng.f64()).clamp(f64::EPSILON, 1.0);
-    let v = rng.f64();
-    (-2.0 * u.ln()).sqrt() * (2.0 * std::f64::consts::PI * v).cos()
-}
-
 /// Marsaglia–Tsang rejection sampling. Each rejection loop is bounded: real
 /// draws accept within a handful of tries, and only a generator stuck on one
 /// value could exhaust them, in which case the mean is as good an answer as
@@ -196,7 +187,7 @@ fn sample_gamma(shape: f64, rng: &mut impl Rng) -> f64 {
     let c = 1.0 / (9.0 * d).sqrt();
     for _ in 0..TRIES {
         let Some((x, v)) = (0..TRIES).find_map(|_| {
-            let x = random_normal(rng);
+            let x = rng.normal();
             let v = 1.0 + c * x;
             (v > 0.0).then_some((x, v))
         }) else {
@@ -421,7 +412,7 @@ mod tests {
                 assert!((0.0..=1.0).contains(&b), "beta({shape}, 2) on {stuck}: {b}");
             }
         }
-        let n = random_normal(&mut Stuck(0.0));
+        let n = Stuck(0.0).normal();
         assert!(n.is_finite());
     }
 
@@ -429,7 +420,7 @@ mod tests {
     /// α/(α+β).
     #[test]
     fn beta_draws_have_the_right_mean() {
-        let mut rng = crate::rng::FastrandRng(42);
+        let mut rng = crate::rng::SplitMix64::new(42);
         for (a, b) in [(2.0, 5.0), (0.5, 0.5), (9.0, 1.0)] {
             let n = 20_000;
             let mean = (0..n).map(|_| sample_beta(a, b, &mut rng)).sum::<f64>() / f64::from(n);
@@ -449,7 +440,7 @@ mod tests {
         settings.curriculum.min_group_size = 3;
         settings.curriculum.max_group_size = 3;
         let mut state = CharSamplingState::default();
-        let mut rng = FastrandRng::default();
+        let mut rng = SplitMix64::default();
         let group = generate_training_group(&settings, &mut state, &mut rng);
         assert_eq!(group.len(), 3);
         for ch in group.chars() {
@@ -468,7 +459,7 @@ mod tests {
             mixed_letters_percent: 70,
             char_set_mode: CharSetMode::Koch,
         };
-        let mut rng = FastrandRng::default();
+        let mut rng = SplitMix64::default();
         let weights = compute_raw_sampling_weights(&pool, &state, &config, &mut rng);
         assert!(weights.values().all(|w| *w > 0.0));
     }
@@ -481,7 +472,7 @@ mod tests {
         settings.curriculum.min_group_size = 1;
         settings.curriculum.max_group_size = 1;
         let mut state = CharSamplingState::default();
-        let mut rng = FastrandRng::default();
+        let mut rng = SplitMix64::default();
         let group = generate_training_group(&settings, &mut state, &mut rng);
         assert!(!group.is_empty());
     }
@@ -528,7 +519,7 @@ mod tests {
             mixed_letters_percent: 70,
             char_set_mode: CharSetMode::Koch,
         };
-        let mut rng = FastrandRng::default();
+        let mut rng = SplitMix64::default();
         let mut k_sum = 0.0;
         let mut m_sum = 0.0;
         for _ in 0..400 {
@@ -549,7 +540,7 @@ mod tests {
         settings.curriculum.min_group_size = 4;
         settings.curriculum.max_group_size = 4;
         let mut state = CharSamplingState::default();
-        let mut rng = FastrandRng::default();
+        let mut rng = SplitMix64::default();
         for _ in 0..40 {
             let group = generate_training_group(&settings, &mut state, &mut rng);
             assert!(!group.is_empty());
@@ -617,7 +608,7 @@ mod tests {
         let mut state = CharSamplingState::default();
         state.session_sample_counts.insert('K', 10);
         let config = config(CharSetMode::Koch, 70);
-        let mut rng = FastrandRng::default();
+        let mut rng = SplitMix64::default();
         let weights = compute_raw_sampling_weights(&pool, &state, &config, &mut rng);
         assert!(weights[&'M'] > weights[&'K']);
 
@@ -634,7 +625,7 @@ mod tests {
         let pool = ['K', 'M'];
         let state = CharSamplingState::default();
         let config = config(CharSetMode::Koch, 70);
-        let mut rng = FastrandRng::default();
+        let mut rng = SplitMix64::default();
         let weights = compute_raw_sampling_weights(&pool, &state, &config, &mut rng);
         assert_eq!(weights[&'K'], weights[&'M']);
         assert!(weights[&'K'] > 0.0);
@@ -654,14 +645,14 @@ mod tests {
         let mut config = config(CharSetMode::Koch, 70);
         config.error_weight_strength = 0.0;
         config.coverage_strength = 0.0;
-        let mut rng = FastrandRng::default();
+        let mut rng = SplitMix64::default();
         let weights = compute_raw_sampling_weights(&pool, &state, &config, &mut rng);
         assert_eq!(weights[&'K'], weights[&'M']);
     }
 
     #[test]
     fn thompson_draws_stay_inside_the_unit_interval() {
-        let mut rng = FastrandRng(12345);
+        let mut rng = SplitMix64::new(12345);
         for _ in 0..200 {
             let x = sample_beta(0.4, 2.5, &mut rng);
             assert!((0.0..=1.0).contains(&x), "beta draw out of range: {x}");
@@ -691,7 +682,7 @@ mod tests {
     fn sampling_an_empty_pool_returns_an_empty_group() {
         let mut state = CharSamplingState::default();
         let config = config(CharSetMode::Koch, 70);
-        let mut rng = FastrandRng::default();
+        let mut rng = SplitMix64::default();
         let group = sample_training_group(&[], 3, &mut state, &config, &mut rng);
         assert!(group.is_empty());
         assert_eq!(state, CharSamplingState::default());
@@ -722,7 +713,7 @@ mod tests {
         let mut settings = TrainingSettings::default();
         settings.curriculum.min_group_size = 0;
         settings.curriculum.max_group_size = 0;
-        let mut rng = FastrandRng(5);
+        let mut rng = SplitMix64::new(5);
         let group = generate_training_group(&settings, &mut CharSamplingState::default(), &mut rng);
         assert_eq!(group.chars().count(), 1);
     }
@@ -744,7 +735,7 @@ mod tests {
         let pool = ['K'];
         let mut state = CharSamplingState::default();
         let config = config(CharSetMode::Koch, 70);
-        let mut rng = FastrandRng::default();
+        let mut rng = SplitMix64::default();
         sample_training_group(&pool, 2, &mut state, &config, &mut rng);
         sample_training_group(&pool, 2, &mut state, &config, &mut rng);
         assert_eq!(state.session_sample_counts.get(&'K'), Some(&4));
@@ -802,7 +793,7 @@ mod tests {
     #[test]
     fn group_repeats_stay_inside_the_range() {
         let mut settings = TrainingSettings::default();
-        let mut rng = FastrandRng::default();
+        let mut rng = SplitMix64::default();
         assert_eq!(resolve_group_repeats(&settings, &mut rng), 1);
         settings.playback.link_group_repeat = false;
         settings.playback.group_repeat_min = 2;
@@ -853,7 +844,7 @@ mod tests {
         settings.curriculum.min_group_size = 2;
         settings.curriculum.max_group_size = 5;
         let mut state = CharSamplingState::default();
-        let mut rng = FastrandRng(99);
+        let mut rng = SplitMix64::new(99);
         for _ in 0..50 {
             let group = generate_training_group(&settings, &mut state, &mut rng);
             let len = group.chars().count();
