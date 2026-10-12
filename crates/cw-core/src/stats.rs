@@ -645,6 +645,24 @@ mod tests {
     }
 
     #[test]
+    fn callsign_sampling_shows_mean_weights_even_with_thompson_sampling_on() {
+        // The table describes the average draw, so random Thompson draws must
+        // not leak into it, whatever the setting says.
+        let mut settings = TrainingSettings::default();
+        settings.curriculum.char_set_mode = CharSetMode::Callsign;
+        settings.curriculum.callsign_level = crate::callsign::CALLSIGN_TIER_MAX;
+        settings.auto_level.char_sampling_thompson = false;
+        let shares = |rows: Vec<SamplingRow>| -> Vec<(char, f64)> {
+            rows.into_iter()
+                .map(|row| (row.character, row.sampling_prob))
+                .collect()
+        };
+        let without = shares(sampling_rows(&settings, &[]));
+        settings.auto_level.char_sampling_thompson = true;
+        assert_eq!(shares(sampling_rows(&settings, &[])), without);
+    }
+
+    #[test]
     fn sampling_rows_ignore_other_char_set_modes() {
         let mut settings = TrainingSettings::default();
         settings.curriculum.char_set_mode = CharSetMode::Koch;
