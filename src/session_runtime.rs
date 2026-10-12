@@ -72,8 +72,8 @@ enum GroupStream {
 
 /// Start a session from the settings as they are.
 ///
-/// Starting first settles the alphabet, and stores the result, so the
-/// session and the screen agree on what is being practised before anything
+/// Starting first settles the alphabet in the settings themselves, so the
+/// session and the screens agree on what is being practised before anything
 /// sounds. The machine is built here, on the UI thread, so Training has its
 /// groups before the first paint.
 pub fn start_session(ctx: AppCtx) {
