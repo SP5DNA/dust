@@ -464,7 +464,7 @@ mod tests {
     use std::f64::consts::TAU;
 
     use crate::band::BandMixer;
-    use crate::band::calibration::noise_floor_rms;
+    use crate::band::calibration::reference_floor_rms;
     use crate::band::knee::{FLOOR_MEASURE_RATE, band_standing_level, reference_floor_level};
     use crate::band::noise::NoiseFloor;
     use crate::band::test_support::{knee_for, receiver_for, rms};
@@ -768,7 +768,7 @@ mod tests {
             );
             let knee = knee_for(&settings).unwrap();
             let mut agc = Agc::new(SR, knee);
-            let mut floor = NoiseFloor::new(SR, noise_floor_rms(0.5), 3);
+            let mut floor = NoiseFloor::new(SR, reference_floor_rms(), 3);
             let mut receiver = receiver_for(SR, &settings);
             // An impulse whose peak through a 500 Hz filter is the default
             // floor's RMS, the way the static is calibrated; this cluster is
@@ -777,7 +777,7 @@ mod tests {
             // are a comb with a null at every multiple of 200 Hz, the 600 Hz
             // pitch included, and the receiver would rightly hear next to
             // nothing of them.
-            let unit = noise_floor_rms(0.5) * f64::from(SR) / 1_000.0;
+            let unit = reference_floor_rms() * f64::from(SR) / 1_000.0;
             let ms = |t: f64| seconds(t / 1_000.0);
             let hits = [0.0, 0.8, 1.9, 3.1, 4.6].map(|t| ms(1_000.0 + t));
             let mut gains = Vec::new();
@@ -838,7 +838,7 @@ mod tests {
             let mut receiver = receiver_for(SR, &settings);
             // A return stroke sixty decibels over the default floor: ten
             // impulses across three milliseconds.
-            let unit = noise_floor_rms(0.5) * f64::from(SR) / 1_000.0;
+            let unit = reference_floor_rms() * f64::from(SR) / 1_000.0;
             let (mut loudest_in, mut loudest_out) = (0.0f64, 0.0f64);
             for i in 0..SR / 10 {
                 let kick = if (1_000..1_150).contains(&i) && i % 15 == 0 {

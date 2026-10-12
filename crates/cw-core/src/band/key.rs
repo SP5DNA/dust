@@ -10,7 +10,7 @@
 
 use super::calibration::{noise_level, qrn_level};
 use super::memo::Exact;
-use crate::settings::{BandSettings, FilterShape};
+use crate::settings::{BandSettings, FilterShape, STATIONS_MIN};
 
 /// Everything the band is built from. Two settings with the same key make
 /// the same band, so a player rebuilds its band only when this changes.
@@ -26,8 +26,8 @@ pub struct BandKey {
     filter_width_hz: Exact,
     filter_shape: FilterShape,
     /// The quietest the station you are copying is sent, which the band's
-    /// own stations keep clear of.
-    volume_min: Exact,
+    /// own stations keep clear of; nothing to a band with none.
+    volume_min: Option<Exact>,
     noise: Exact,
     qrn: Exact,
     stations_max: u32,
@@ -41,7 +41,7 @@ impl BandKey {
             side_tone_max: Exact(band.side_tone_max),
             filter_width_hz: Exact(band.filter_width_hz),
             filter_shape: band.filter_shape,
-            volume_min: Exact(band.volume_min),
+            volume_min: (band.stations_max > STATIONS_MIN).then_some(Exact(band.volume_min)),
             noise: Exact(noise_level(band)),
             qrn: Exact(qrn_level(band)),
             stations_max: band.stations_max,
@@ -91,7 +91,10 @@ mod tests {
             // The band's own traffic is capped by how many may call at once,
             // and keeps clear of the wanted station by its quietest level.
             |s| s.band.stations_max = 3,
-            |s| s.band.volume_min = 0.3,
+            |s| {
+                s.band.stations_max = 3;
+                s.band.volume_min = 0.3;
+            },
             |s| s.band.agc_enabled = false,
             |s| s.band.filter_width_hz = 250.0,
             |s| s.band.filter_shape = FilterShape::Soft,
@@ -125,8 +128,9 @@ mod tests {
         }
     }
 
-    /// A layer switched off is the same band at any level, and fading
-    /// switched off is the same at any depth or rate.
+    /// A layer switched off is the same band at any level, fading switched
+    /// off is the same at any depth or rate, and a band with no stations of
+    /// its own has none to keep clear of the one you are copying.
     #[test]
     fn what_is_switched_off_does_not_move_a_key() {
         let mut quiet = BandSettings {
@@ -138,6 +142,7 @@ mod tests {
         let (band, qsb) = (BandKey::of(&quiet), QsbKey::of(&quiet));
         quiet.noise_level = 0.9;
         quiet.qrn_level = 0.9;
+        quiet.volume_min = 0.2;
         quiet.qsb_depth = 0.9;
         quiet.qsb_rate_hz = 1.0;
         assert_eq!((BandKey::of(&quiet), QsbKey::of(&quiet)), (band, qsb));
