@@ -17,11 +17,11 @@
 //! - A crash pulls the gain for a moment and lets go; it does not dig a hole
 //!   in the band for the next second.
 //!
-//! An earlier version learned the band's level over a second and a half, and
-//! learned the station with it: every over started 8 dB ducked and swelled up
-//! as the receiver got used to it, and every crash left the floor sagging for
-//! most of a second. Real AGC-off recordings show neither, and no AGC with a
-//! fixed reference can produce the first.
+//! The knee is fixed, set from the band's floor, rather than learned from
+//! what is heard: an AGC that learns the band's level learns the station with
+//! it, starts every over ducked and swells up as it gets used to it, and
+//! leaves the floor sagging for most of a second after every crash. Real
+//! receivers do neither.
 
 /// How far above the floor's own peaks the knee sits: a level has to stand
 /// 2.2 times (about 7 dB) above the highest the hiss ordinarily reaches before
@@ -497,7 +497,7 @@ mod tests {
     }
 
     /// The same, through the receiver the static and the knee are calibrated
-    /// through: the old default, a sharp filter 500 Hz wide at 3 dB.
+    /// through: the reference filter, a sharp one 500 Hz wide at 3 dB.
     fn floor_through_500_hz() -> TrainingSettings {
         let mut s = floor_only();
         s.band.filter_width_hz = crate::band::filter::reference_width_hz();
@@ -717,8 +717,7 @@ mod tests {
     }
 
     /// (7): sending groups with pauses between them, every group is ducked
-    /// the same from its first letter to its last. The old receiver started
-    /// each group a few decibels deeper and let go halfway through.
+    /// the same from its first letter to its last.
     #[test]
     fn every_group_is_ducked_the_same_from_start_to_finish() {
         let settings = floor_only();
@@ -883,18 +882,16 @@ mod tests {
     }
 
     /// (4): ten minutes of the default band, crashes and all, and the floor
-    /// never sags behind them. The old receiver left 5% of the band's quarter
-    /// seconds more than 1.5 dB under its own median, 12% at QRN 0.5.
+    /// never sags behind them.
     ///
     /// Read off the gain the receiver rides at, the robust gain of each
     /// quarter second — the median of its 5 ms frames, which a crash's own
-    /// duck cannot drag down but a sag behind it does. That used to be read
-    /// off the band's power instead, which through a 500 Hz filter is steady
-    /// enough to show a sag: the hiss through the default peaked 300 Hz
-    /// receiver, 163 Hz of noise bandwidth, is not. Its quarter seconds swing
-    /// on their own, and with the AGC switched off altogether 2.2% of them
-    /// read more than 1.5 dB under the median, so the power could no longer
-    /// tell a sag from the hiss.
+    /// duck cannot drag down but a sag behind it does — rather than off the
+    /// band's power. The hiss through the default peaked 300 Hz receiver,
+    /// 163 Hz of noise bandwidth, swings on its own from one quarter second to
+    /// the next: with the AGC switched off altogether 2.2% of them read more
+    /// than 1.5 dB under the median, so the power cannot tell a sag from the
+    /// hiss.
     #[test]
     fn the_floor_does_not_sag_behind_the_static() {
         for (qrn, length, most) in [(0.25, 600, 0.01), (0.5, 300, 0.03)] {

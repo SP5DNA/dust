@@ -718,14 +718,15 @@ impl Flash {
 }
 
 /// Everything the band puts into the receiver, before the receiver: the noise
-/// floor and the static. Both backends play this — the native player runs it
-/// through its filter sample by sample, the browser streams it in buffers into
-/// a filter made of nodes.
+/// floor, the static and the other stations. Both backends play this — the
+/// native player runs it through its filter sample by sample, the browser
+/// streams it in buffers into a filter made of nodes.
 #[derive(Clone, Debug)]
 pub struct BandSource {
     floor: NoiseFloor,
     atmospherics: Atmospherics,
-    activity: BandActivity,
+    /// None when the only station that may call is yours.
+    activity: Option<BandActivity>,
 }
 
 impl BandSource {
@@ -740,11 +741,17 @@ impl BandSource {
     /// A pile-up is calling with this many stations besides yours, and they
     /// count against how many of the band's own may key at once.
     pub fn reserve_stations(&mut self, callers: usize) {
-        self.activity.reserve(callers);
+        if let Some(activity) = &mut self.activity {
+            activity.reserve(callers);
+        }
     }
 
     pub fn next_sample(&mut self) -> f64 {
-        self.floor.next_sample() + self.atmospherics.next_sample() + self.activity.next_sample()
+        let stations = self
+            .activity
+            .as_mut()
+            .map_or(0.0, BandActivity::next_sample);
+        self.floor.next_sample() + self.atmospherics.next_sample() + stations
     }
 
     pub fn fill(&mut self, out: &mut [f32]) {
@@ -819,9 +826,9 @@ mod tests {
     /// Strokes about sixty milliseconds apart, in-cloud pulses every two or
     /// three: that spacing is what turns a crash from a few clicks into the
     /// continuous, ragged "krrsh" of a real one. Inside real crashes the
-    /// broadband impulses come every 1.3-5 ms; the old twelve-millisecond
-    /// spacing was only the big K-changes, and left the hiss showing between
-    /// them.
+    /// broadband impulses come every 1.3-5 ms; the twelve milliseconds often
+    /// quoted is the spacing of the big K-changes alone, and would leave the
+    /// hiss showing between them.
     #[test]
     fn strokes_and_k_changes_are_spaced_like_real_ones() {
         let mut sky = Atmospherics::new(SR, 0.5, 5);
@@ -876,8 +883,9 @@ mod tests {
     /// or more come within 100 ms of each other. Real crashes (KiwiSDR and
     /// Hermes-Lite 2 off-air IQ, 20 m) hold the band +5 to +9.5 dB up between
     /// their first and last events, over +6 dB for half their length or more,
-    /// with ten to twenty events across 150-350 ms. Sparse K-changes made
-    /// crashes a few ticks with hiss between them: +3 dB, and a third filled.
+    /// with ten to twenty events across 150-350 ms. Sparse K-changes would
+    /// make crashes a few ticks with hiss between them: +3 dB, and a third
+    /// filled.
     #[test]
     fn a_crash_is_a_continuous_rattle_rather_than_separate_ticks() {
         // The band is calibrated to sound the same at any rate, and this one
@@ -953,8 +961,7 @@ mod tests {
         // A millisecond's peak is a coarser envelope than the analytic one
         // the real crashes were measured with: it merges impulses closer
         // than a millisecond or two, so it counts fewer events and closes
-        // fewer gaps, and the lower bounds give that away. The old model
-        // read +4.0 dB, 0.39, 7 events over 169 ms, 0.08 of gaps.
+        // fewer gaps, and the lower bounds give that away.
         assert!((5.5..=9.5).contains(&body), "{report}");
         assert!((0.45..=0.7).contains(&fill), "{report}");
         assert!((9.0..=20.0).contains(&count), "{report}");

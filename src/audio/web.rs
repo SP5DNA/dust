@@ -185,13 +185,8 @@ impl ReceiverKey {
 /// native player's [`cw_core::band::ReceiverFilter`], node for resonator,
 /// from the same coefficients.
 ///
-/// It used to be a chain of `BiquadFilterNode`s of type `bandpass`, and those
-/// cannot be this filter. Their numerator is fixed — zeros at DC and Nyquist,
-/// unit peak at the pole — which is right for an audio band-pass and wrong for
-/// a low-pass moved up to the pitch: put the translated filter's own poles
-/// under it and a 500 Hz passband tilts by 25 dB from edge to edge
-/// (`a_chain_of_bandpass_biquads_cannot_be_the_translated_filter`). An
-/// `IIRFilterNode` takes the numerator the design asks for.
+/// `IIRFilterNode`s rather than `BiquadFilterNode`s, because only they take
+/// the numerator the design asks for: a band-pass biquad's is fixed.
 ///
 /// Its coefficients are fixed once it is made, so a retune builds a new bank
 /// and crossfades to it rather than moving the old one.

@@ -2,8 +2,8 @@
 //!
 //! Most of these listen the way an engineer would: render a few seconds,
 //! then look at the level, the spectrum and the statistics. They pin the
-//! properties that make a receiver sound like a receiver — and the ones whose
-//! absence made the old model sound like the wind.
+//! properties that make a receiver sound like a receiver — the ones whose
+//! absence makes a band sound like the wind.
 
 use std::f64::consts::{SQRT_2, TAU};
 
@@ -333,45 +333,6 @@ fn the_prototypes_are_butterworth_and_bessel() {
     }
 }
 
-/// The browser used to build the receiver from a chain of `bandpass`
-/// `BiquadFilterNode`s, and a node of that type cannot be this filter: its
-/// numerator is fixed at (1 − z⁻²), unit peak at its own pole. Put the
-/// translated filter's own pole pairs under that numerator and the passband
-/// tilts by tens of decibels — which is why the browser builds it from IIR
-/// nodes carrying the design's own numerators instead.
-#[test]
-fn a_chain_of_bandpass_biquads_cannot_be_the_translated_filter() {
-    let design = FilterDesign::new(600.0, 500.0, FilterShape::Sharp);
-    let sr = f64::from(SR);
-    let sections = design.sections(sr);
-    let chain_db = |hz: f64| {
-        let w = TAU * hz / sr;
-        sections
-            .iter()
-            .map(|section| {
-                let [_, a1, a2] = section.feedback;
-                let at = |w: f64| {
-                    let num = (1.0 - (2.0 * w).cos()).hypot((2.0 * w).sin());
-                    let den = (1.0 + a1 * w.cos() + a2 * (2.0 * w).cos())
-                        .hypot(a1 * w.sin() + a2 * (2.0 * w).sin());
-                    num / den
-                };
-                // Unit peak, as the node normalises it: at the pole's angle.
-                let angle = (-a1 / (2.0 * a2.sqrt())).clamp(-1.0, 1.0).acos();
-                20.0 * (at(w) / at(angle)).log10()
-            })
-            .sum::<f64>()
-    };
-    let tilt = chain_db(800.0) - chain_db(400.0);
-    println!("bandpass biquads on the translated poles: {tilt:+.1} dB from 400 to 800 Hz");
-    let ours = 20.0 * (design.response_at(800.0) / design.response_at(400.0)).log10();
-    assert!(ours.abs() < 0.01, "the translated filter itself is level");
-    assert!(
-        tilt.abs() > 20.0,
-        "biquads on the same poles tilted only {tilt:.1} dB across the passband"
-    );
-}
-
 /// Sharp is steep: between its 6 dB and 60 dB widths, about the factor of two
 /// a good eight-pole crystal filter has. Soft rolls off more gently, which is
 /// the point of it — but neither is the wide-skirted mush of a single tuned
@@ -538,8 +499,8 @@ fn a_degenerate_filter_still_produces_numbers() {
 
 /// The floor is Gaussian noise through the filter. Its sample values are
 /// normally distributed — kurtosis three — and so its envelope is Rayleigh:
-/// the restless, grainy hiss of a real receiver. Impulsive excitation, which
-/// is what the old model drove its resonators with, fails both.
+/// the restless, grainy hiss of a real receiver. Impulsive excitation fails
+/// both.
 #[test]
 fn the_noise_floor_is_gaussian() {
     for shape in SHAPES {
@@ -560,9 +521,8 @@ fn the_noise_floor_is_gaussian() {
 /// The regression test for the whistle. Band noise has no tones in it: its
 /// spectrum is the filter's shape and nothing else. Divide the measured
 /// spectrum by the filter's response and what is left is flat across the
-/// passband. A resonator a few hertz wide inside the passband — the old
-/// receiver model had three, sweeping about — stands out of this by a factor
-/// of several.
+/// passband. A resonator a few hertz wide inside the passband — the
+/// whistle — stands out of this by a factor of several.
 #[test]
 fn the_noise_floor_has_no_tones_in_it() {
     for shape in SHAPES {
@@ -737,8 +697,8 @@ fn envelope_crossings(x: &[f32], center: f64) -> f64 {
 /// Narrowband noise wanders at a rate set by its bandwidth — roughly 0.4 B
 /// times a second through its median. A 500 Hz filter's hiss churns a couple
 /// of hundred times a second; close the filter and it slows, towards the
-/// burble of a very narrow one. The old resonators were a few hertz wide and
-/// wandered a few times a second, which the ear hears as a whistle.
+/// burble of a very narrow one. Resonators a few hertz wide wander a few
+/// times a second, which the ear hears as a whistle.
 #[test]
 fn the_hiss_churns_at_a_rate_set_by_the_filter() {
     let rate = |bandwidth: f64| {
@@ -1364,8 +1324,8 @@ struct Floored {
 
 /// A real receiver is never silent outside its filter: its own audio stage
 /// hisses some thirty decibels under the band, from a couple of hundred
-/// hertz to the top of its audio. Ours was dead silent there — 80 dB down
-/// and more — which no recording of a radio is.
+/// hertz to the top of its audio. Without it the band is dead silent there —
+/// 80 dB down and more — which no recording of a radio is.
 ///
 /// Measured against the hiss at the note, where the receiver is unity, so the
 /// floor sits in the same place whatever width the filter is set to: 32 dB

@@ -828,8 +828,8 @@ fn the_noise_bandwidth_is_the_integral_of_the_response() {
     );
 }
 
-/// The reference filter the levels are measured through is the old receiver
-/// exactly: a sharp filter 500 Hz wide at 3 dB, which at 6 dB is 500·3^(1/16),
+/// The reference filter the levels are measured through is a sharp filter
+/// 500 Hz wide at 3 dB, which at 6 dB is 500·3^(1/16),
 /// 535.5 Hz — the same eight poles, so the same Butterworth response and the
 /// noise bandwidth an eight-pole Butterworth that wide has, 503.2 Hz.
 ///
@@ -996,11 +996,11 @@ fn if_shape(shape: FilterShape) -> FilterShape {
 ///
 /// A real receiver's hiss rings at the note. Its autocorrelation — how long
 /// the hiss remembers its own waveform — has an envelope that is still above
-/// 0.316 (−10 dB) 2.3 ms on and above 0.1 at 2.9 ms; the old 500 Hz default
-/// had let go by about 1.5 ms, which is what made it sound like rushing air. And it
-/// sits at the note, not under it: almost none of its power is below 0.7 of
-/// the pitch, where the old one had nearly a fifth of it as rumble, and most of it
-/// is inside the 6 dB width.
+/// 0.316 (−10 dB) 2.3 ms on and above 0.1 at 2.9 ms; a 500 Hz sharp filter's
+/// lets go by about 1.5 ms, which is what makes it sound like rushing air. And
+/// it sits at the note, not under it: almost none of its power is below 0.7
+/// of the pitch, where that filter's has nearly a fifth of it as rumble, and
+/// most of it is inside the 6 dB width.
 ///
 /// The default receiver is the peaked 300 Hz one, whose resonance holds the
 /// hiss to the note longer still: measured, the envelope is 0.58 at 2.3 ms and

@@ -24,10 +24,10 @@
 //!    quite silent outside the passband — as no real receiver is.
 //!
 //! What it deliberately does not do is invent a sound the receiver would not
-//! make. An earlier model fed sparse clicks into resonators a few hertz wide
-//! and swept their tuning, which is how a wind-whistle is synthesised, and it
-//! sounded like one. A real CW filter is hundreds of hertz wide, sits still,
-//! and is fed with continuous noise; this is that.
+//! make. Sparse clicks through resonators a few hertz wide, their tuning
+//! swept about, is how a wind-whistle is synthesised. A real CW filter is
+//! hundreds of hertz wide, sits still, and is fed with continuous noise; this
+//! is that.
 
 mod activity;
 mod agc;

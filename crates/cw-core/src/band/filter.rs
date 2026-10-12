@@ -17,10 +17,10 @@
 //! in hertz either side of the note. Measured off the air (KiwiSDR, Hermes-Lite
 //! 2 and contest-station captures of 20 m, and an RTL-SDR with its own
 //! filters) the hiss is centred on the note to within a few hertz and the
-//! skirts match to 1.00 at −40 dB. An earlier version moved the prototype to
-//! the pitch with the audio band-pass transform instead, which is
-//! geometrically symmetric: the hiss sat 56 Hz above the note and the upper
-//! skirt was twice as wide as the lower one at −40 dB.
+//! skirts match to 1.00 at −40 dB. The audio band-pass transform will not do
+//! for moving the prototype there: it is geometrically symmetric, which puts
+//! the hiss 56 Hz above the note and the upper skirt twice as wide as the
+//! lower one at −40 dB.
 //!
 //! So that is how it is built: an eight-pole low-pass prototype, Butterworth
 //! for [`FilterShape::Sharp`] and Bessel for [`FilterShape::Soft`], cut off so
@@ -845,12 +845,9 @@ pub fn mirror_hz(center_hz: f64, hz: f64) -> f64 {
 }
 
 /// The 6 dB width of the sharp filter that is [`REFERENCE_BANDWIDTH_HZ`] wide
-/// at 3 dB, about 535 Hz: the filter the receiver's levels were first set
-/// through, back when the width was quoted at 3 dB.
-///
-/// It is the same filter — the same poles, so the same noise bandwidth, about
-/// 503 Hz — which is what keeps anything measured through it, the AGC's
-/// knee among them, where it was.
+/// at 3 dB, about 535 Hz: the 500 Hz filter CW signal reports are quoted in,
+/// and the one the band's levels — the AGC's knee among them — are
+/// calibrated through. Its noise bandwidth is about 503 Hz.
 pub fn reference_width_hz() -> f64 {
     REFERENCE_BANDWIDTH_HZ * half_voltage(FilterShape::Sharp)
 }

@@ -19,18 +19,26 @@ const CENSUS_RATE: u32 = 200;
 const LISTEN_RATE: u32 = 6_000;
 const LISTEN_POINTS: usize = 1_024;
 
-/// The generator at a busy-ness level of its own, with no cap on how many
-/// may key at once: what the calibration is measured on.
-fn uncapped(sample_rate: u32, settings: &TrainingSettings, level: f64, seed: u64) -> BandActivity {
-    BandActivity::tuned(
-        sample_rate,
-        level,
-        ARRIVALS_NORMAL * 2.0 * level,
-        MAX_EMITTERS,
-        Tuning::from_settings(settings),
-        seed,
-    )
+/// The band with `others` stations besides yours allowed to call, but no cap
+/// on how many may key at once: what the bookkeeping is measured on, so that
+/// every station the band draws comes on the air.
+fn uncapped(sample_rate: u32, settings: &TrainingSettings, others: u32, seed: u64) -> BandActivity {
+    let profile = TrafficProfile {
+        cap: MAX_EMITTERS,
+        ..TrafficProfile::for_others(others).expect("a band with others on it")
+    };
+    BandActivity::new(sample_rate, profile, Tuning::from_settings(settings), seed)
 }
+
+/// The band `settings` describe, which has others calling on it.
+fn calling_band(sample_rate: u32, settings: &TrainingSettings, seed: u64) -> BandActivity {
+    BandActivity::from_settings(sample_rate, settings, seed).expect("a band with others on it")
+}
+
+/// An ordinary evening's band, and a contest's: one other station allowed to
+/// call, and the most the setting allows.
+const ORDINARY: u32 = 1;
+const CONTEST: u32 = STATIONS_MAX - STATIONS_MIN;
 
 /// The settings with up to `stations` calling at once, yours included.
 fn calling(stations: u32) -> TrainingSettings {
@@ -40,7 +48,7 @@ fn calling(stations: u32) -> TrainingSettings {
 }
 
 /// The same, through the receiver the off-air recordings were measured
-/// through: the old default, a sharp filter 500 Hz wide at 3 dB.
+/// through: the reference filter, a sharp one 500 Hz wide at 3 dB.
 fn calling_through_500_hz(stations: u32) -> TrainingSettings {
     let mut s = calling(stations);
     s.band.filter_width_hz = crate::band::filter::reference_width_hz();
@@ -65,8 +73,8 @@ fn wpm(emitter: &Emitter) -> f64 {
 /// Every transmitter that comes on during `seconds` of band, as it was when
 /// it came on — the ones already there when the band was switched on
 /// included.
-fn census(level: f64, seconds: f64, seed: u64) -> (BandActivity, Vec<Emitter>) {
-    let mut band = uncapped(CENSUS_RATE, &TrainingSettings::default(), level, seed);
+fn census(others: u32, seconds: f64, seed: u64) -> (BandActivity, Vec<Emitter>) {
+    let mut band = uncapped(CENSUS_RATE, &TrainingSettings::default(), others, seed);
     let mut seen: Vec<Emitter> = band
         .emitters
         .iter()
@@ -87,10 +95,10 @@ fn census(level: f64, seconds: f64, seed: u64) -> (BandActivity, Vec<Emitter>) {
     (band, seen)
 }
 
-/// `count` stations as they come on to a band at `level`, drawn straight from
-/// the generator at an ordinary sample rate.
-fn stations(level: f64, count: usize, seed: u64) -> (BandActivity, Vec<Emitter>) {
-    let mut band = uncapped(48_000, &TrainingSettings::default(), level, seed);
+/// `count` stations as they come on to a band with `others` calling, drawn
+/// straight from the generator at an ordinary sample rate.
+fn stations(others: u32, count: usize, seed: u64) -> (BandActivity, Vec<Emitter>) {
+    let mut band = uncapped(48_000, &TrainingSettings::default(), others, seed);
     let drawn = (0..count).map(|_| band.new_station()).collect();
     (band, drawn)
 }
@@ -132,14 +140,17 @@ fn overs(band: &BandActivity, mut station: Emitter) -> Vec<(f64, f64, f64)> {
 /// one out — sent by people at the speeds people send at.
 #[test]
 fn the_band_is_keyed_cw_at_real_speeds() {
-    for level in [0.5, 0.75, 1.0] {
-        let (_, seen) = census(level, 1_800.0, 3);
+    for others in ORDINARY..=CONTEST {
+        let (_, seen) = census(others, 1_800.0, 3);
         let keyed = seen.iter().filter(|e| e.kind == Kind::Keyed).count();
         let share = keyed as f64 / seen.len() as f64;
-        assert!(share >= 0.95, "level {level}: only {share:.3} of it keyed");
-        assert!(keyed > 15, "level {level}: {keyed} stations");
+        assert!(
+            share >= 0.95,
+            "{others} others: only {share:.3} of it keyed"
+        );
+        assert!(keyed > 15, "{others} others: {keyed} stations");
     }
-    let (_, keyed) = stations(0.5, 2_000, 5);
+    let (_, keyed) = stations(ORDINARY, 2_000, 5);
     let speeds: Vec<f64> = keyed.iter().map(wpm).collect();
     let (p10, p50, p90) = (
         percentile(&speeds, 0.1),
@@ -170,7 +181,7 @@ fn the_band_is_keyed_cw_at_real_speeds() {
             .all(|e| e.drift_hz_per_sec.abs() <= DRIFT_MAX_HZ_PER_SEC)
     );
     // A contest is faster.
-    let (_, contest) = stations(1.0, 2_000, 5);
+    let (_, contest) = stations(CONTEST, 2_000, 5);
     let contest: Vec<f64> = contest.iter().map(wpm).collect();
     assert!(percentile(&contest, 0.5) > p50 + 2.0);
 }
@@ -179,14 +190,14 @@ fn the_band_is_keyed_cw_at_real_speeds() {
 /// long loud tail, nothing under 10 or over 50 — and a contest louder.
 #[test]
 fn stations_are_as_loud_as_real_ones() {
-    let levels = |level: f64, seed: u64| {
-        let (band, drawn) = stations(level, 2_000, seed);
+    let levels = |others: u32, seed: u64| {
+        let (band, drawn) = stations(others, 2_000, seed);
         drawn
             .iter()
             .map(|e| level_db(&band, e))
             .collect::<Vec<f64>>()
     };
-    let normal = levels(0.5, 7);
+    let normal = levels(ORDINARY, 7);
     let (p10, p50, p90) = (
         percentile(&normal, 0.1),
         percentile(&normal, 0.5),
@@ -201,7 +212,7 @@ fn stations_are_as_loud_as_real_ones() {
             .iter()
             .all(|l| (low - 1e-9..=high + 1e-9).contains(l))
     );
-    let contest = percentile(&levels(1.0, 7), 0.5);
+    let contest = percentile(&levels(CONTEST, 7), 0.5);
     assert!(
         (5.0..11.0).contains(&(contest - p50)),
         "contest median {contest:.1} against {p50:.1}"
@@ -212,7 +223,7 @@ fn stations_are_as_loud_as_real_ones() {
 /// few seconds apart, and each back where the last one was.
 #[test]
 fn stations_send_overs_of_a_few_seconds() {
-    let mut band = uncapped(1_000, &TrainingSettings::default(), 0.5, 11);
+    let mut band = uncapped(1_000, &TrainingSettings::default(), ORDINARY, 11);
     let mut lengths = Vec::new();
     let mut counts = Vec::new();
     let mut gaps = Vec::new();
@@ -389,12 +400,12 @@ fn stations_only(mut band: BandActivity) -> BandActivity {
 /// `seconds` of the band's stations through the receiver's filter.
 fn through_filter(
     settings: &TrainingSettings,
-    level: f64,
+    others: u32,
     fs: u32,
     seconds: f64,
     seed: u64,
 ) -> Vec<f64> {
-    through_receiver(uncapped(fs, settings, level, seed), settings, fs, seconds)
+    through_receiver(uncapped(fs, settings, others, seed), settings, fs, seconds)
 }
 
 /// `seconds` of a band's stations through the receiver `settings` describe.
@@ -420,7 +431,7 @@ fn heard_with(settings: &TrainingSettings) -> (f64, f64) {
     let seeds = [21, 22, 23, 24, 25, 26];
     let (mut near, mut inside) = (0.0, 0.0);
     for seed in seeds {
-        let band = BandActivity::from_settings(LISTEN_RATE, settings, seed);
+        let band = calling_band(LISTEN_RATE, settings, seed);
         let x = through_receiver(band, settings, LISTEN_RATE, 600.0);
         let heard = listen(&x, LISTEN_RATE, LISTEN_POINTS, 0.1, center);
         near += heard.near / seeds.len() as f64;
@@ -490,7 +501,7 @@ fn a_wider_filter_lets_more_stations_in() {
         let mut total = 0.0;
         for seed in [31, 32] {
             // 12 kHz: the widest filter reaches past 3 kHz.
-            let x = through_filter(&settings, 0.5, 12_000, 300.0, seed);
+            let x = through_filter(&settings, ORDINARY, 12_000, 300.0, seed);
             total += listen(&x, 12_000, 2_048, 0.1, settings.side_tone_center()).tones;
         }
         total
@@ -525,9 +536,8 @@ fn keying_over(band: &mut BandActivity, seconds: f64) -> Vec<usize> {
 /// else on it at all.
 #[test]
 fn one_station_calling_is_an_empty_band() {
-    let mut band = BandActivity::from_settings(8_000, &calling(1), 1);
-    assert!(band.is_silent());
-    assert!((0..8_000).all(|_| band.next_sample() == 0.0));
+    assert!(BandActivity::from_settings(8_000, &calling(1), 1).is_none());
+    assert!(TrafficProfile::for_others(0).is_none());
 }
 
 /// However many may call, never more than the rest of them key at once
@@ -559,7 +569,7 @@ fn never_more_than_the_rest_of_the_count_key_at_once() {
             // of the setting from the next by more than chance.
             const SEEDS: u64 = 12;
             for seed in 41..41 + SEEDS {
-                let mut band = BandActivity::from_settings(CENSUS_RATE, &settings(stations), seed);
+                let mut band = calling_band(CENSUS_RATE, &settings(stations), seed);
                 let counts = keying_over(&mut band, 900.0);
                 most = most.max(counts.iter().copied().max().unwrap_or(0));
                 let n = counts.len() as f64 * SEEDS as f64;
@@ -590,7 +600,7 @@ fn never_more_than_the_rest_of_the_count_key_at_once() {
 /// is over, and then the band comes back.
 #[test]
 fn a_pile_up_holds_the_band_back_while_it_calls() {
-    let mut band = BandActivity::from_settings(CENSUS_RATE, &calling(3), 7);
+    let mut band = calling_band(CENSUS_RATE, &calling(3), 7);
     keying_over(&mut band, 60.0);
     band.reserve(2);
     // An over runs to the end of its word, 20 s at the very longest.
@@ -614,7 +624,7 @@ fn a_pile_up_and_the_band_together_stay_within_the_count() {
     const BREAK_OFF_SEC: f64 = 2.5;
     for stations in 2..=STATIONS_MAX {
         let others = (stations - 1) as usize;
-        let mut band = BandActivity::from_settings(CENSUS_RATE, &calling(stations), 13);
+        let mut band = calling_band(CENSUS_RATE, &calling(stations), 13);
         let block = CONTROL_SAMPLES as usize;
         let block_sec = block as f64 / f64::from(CENSUS_RATE);
         let mut worst = 0;
@@ -643,7 +653,7 @@ fn a_pile_up_and_the_band_together_stay_within_the_count() {
 /// rather than holding it for ever.
 #[test]
 fn a_station_that_finds_the_band_full_waits_and_then_gives_up() {
-    let mut band = BandActivity::from_settings(CENSUS_RATE, &calling(2), 9);
+    let mut band = calling_band(CENSUS_RATE, &calling(2), 9);
     // A pile-up as big as the count: nobody heard may start at all.
     band.reserve(1);
     let give_up = (GIVE_UP_SEC * f64::from(CENSUS_RATE)) as u32;
@@ -673,8 +683,8 @@ fn a_station_that_finds_the_band_full_waits_and_then_gives_up() {
 #[test]
 fn being_told_there_is_room_changes_nothing() {
     let settings = calling(3);
-    let mut told = BandActivity::from_settings(CENSUS_RATE, &settings, 17);
-    let mut left = BandActivity::from_settings(CENSUS_RATE, &settings, 17);
+    let mut told = calling_band(CENSUS_RATE, &settings, 17);
+    let mut left = calling_band(CENSUS_RATE, &settings, 17);
     for _ in 0..(600 * CENSUS_RATE) {
         told.reserve(0);
         assert_eq!(told.next_sample().to_bits(), left.next_sample().to_bits());
@@ -710,7 +720,7 @@ fn nothing_keyed_is_heard_near_the_station_you_want() {
             let wanted_heard = 20.0 * (SIGNAL_RMS * volume * weakest / reference_rms()).log10()
                 + bin_over_reference_db();
             let (band, drawn) = {
-                let mut band = BandActivity::from_settings(48_000, &settings, 23);
+                let mut band = calling_band(48_000, &settings, 23);
                 let drawn: Vec<Emitter> = (0..3_000).map(|_| band.new_station()).collect();
                 (band, drawn)
             };

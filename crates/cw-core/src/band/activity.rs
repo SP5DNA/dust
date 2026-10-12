@@ -14,8 +14,8 @@
 //!
 //! Everything is calibrated against off-air recordings of the 20 m CW band
 //! (KiwiSDR, Hermes-Lite 2 and contest captures), measured the way an
-//! operator would hear them through a 500 Hz filter — this receiver's old
-//! default, sharp and 500 Hz wide at 3 dB. A narrower receiver hears less of
+//! operator would hear them through a 500 Hz filter — the reference filter,
+//! sharp and 500 Hz wide at 3 dB. A narrower receiver hears less of
 //! the same band, as a real one does:
 //!
 //! - **How busy.** Another station is audible in 0.12-0.53 of all one-second
@@ -65,9 +65,9 @@ use crate::morse::morse_for;
 use crate::rng::{FastrandRng, Rng};
 use crate::settings::{BandSettings, STATIONS_MAX, STATIONS_MIN, TrainingSettings};
 
-/// Transmitters that can be on the air at once, carriers included. Busier
-/// than the busiest contest preset ever needs through the widest filter; a
-/// station that finds no room is simply not heard.
+/// Transmitters that can be on the air at once, carriers included: enough
+/// for the busiest band the stations setting makes, heard through the widest
+/// filter. A station that finds no room is simply not heard.
 const MAX_EMITTERS: usize = 16;
 
 /// How often the slow parts — fading, drift, a sweep — are brought up to
@@ -236,7 +236,6 @@ fn fade_rms() -> f64 {
 /// filter. Allocation-free per sample.
 #[derive(Clone, Debug)]
 pub struct BandActivity {
-    level: f64,
     sample_rate: f64,
     random: Draw,
     tuning: Tuning,
@@ -262,23 +261,39 @@ pub struct BandActivity {
 /// elsewhere, in seconds.
 const GIVE_UP_SEC: f64 = 20.0;
 
-/// What kind of band it is when `others` stations besides yours may call at
-/// once: an ordinary evening's traffic for one, a contest's — louder, faster,
-/// contest exchanges — for the most the setting allows, evenly in between.
-fn level_for(others: u32) -> f64 {
-    let most = STATIONS_MAX - STATIONS_MIN;
-    match others {
-        0 => 0.0,
-        n => 0.5 + 0.5 * f64::from(n.min(most) - 1) / f64::from((most - 1).max(1)),
-    }
+/// How busy the band is: what kind of traffic it carries, how much of it
+/// arrives, and how many of its stations may key at once within earshot.
+#[derive(Clone, Copy, Debug)]
+struct TrafficProfile {
+    /// How far towards a contest, from 0 to 1: an ordinary evening's traffic,
+    /// or a contest's — louder, faster, contest exchanges.
+    contest: f64,
+    /// Stations arriving per kHz of band per minute.
+    arrivals_per_khz_minute: f64,
+    /// The most that may be keying at once within earshot.
+    cap: usize,
 }
 
-/// How many stations arrive per kHz per minute when `others` may call at
-/// once: an ordinary band's worth for each of them, so every step of the
-/// setting is a band audibly busier than the last and the count is one the
-/// band actually reaches.
-fn arrivals_for(others: u32) -> f64 {
-    ARRIVALS_NORMAL * f64::from(others)
+impl TrafficProfile {
+    /// The band when `others` stations besides yours may call at once, or
+    /// none at all when that is nobody.
+    ///
+    /// One is an ordinary evening and the most the setting allows is a
+    /// contest, evenly in between. Each of them brings an ordinary band's
+    /// worth of arrivals, so every step of the setting is a band audibly
+    /// busier than the last and the count is one the band actually reaches.
+    fn for_others(others: u32) -> Option<Self> {
+        let most = STATIONS_MAX - STATIONS_MIN;
+        let others = others.min(most);
+        if others == 0 {
+            return None;
+        }
+        Some(Self {
+            contest: f64::from(others - 1) / f64::from((most - 1).max(1)),
+            arrivals_per_khz_minute: ARRIVALS_NORMAL * f64::from(others),
+            cap: others as usize,
+        })
+    }
 }
 
 /// Where the band is listened to from: which pitches stations may land on,
@@ -372,65 +387,42 @@ fn reference_rms() -> f64 {
 }
 
 impl BandActivity {
-    /// The band these settings describe: as busy as the number of stations
-    /// that may call at once allows, and empty when that is only yours.
-    pub fn from_settings(sample_rate: u32, settings: &TrainingSettings, seed: u64) -> Self {
+    /// The band these settings describe, as busy as the number of stations
+    /// that may call at once allows; none at all when that is only yours.
+    pub fn from_settings(sample_rate: u32, settings: &TrainingSettings, seed: u64) -> Option<Self> {
         let others = settings.band.stations_max.clamp(STATIONS_MIN, STATIONS_MAX) - STATIONS_MIN;
-        Self::tuned(
+        let profile = TrafficProfile::for_others(others)?;
+        Some(Self::new(
             sample_rate,
-            level_for(others),
-            arrivals_for(others),
-            others as usize,
+            profile,
             Tuning::from_settings(settings),
             seed,
-        )
+        ))
     }
 
-    /// The band at a busy-ness `level` (0 off, 0.5 an ordinary evening, 1 a
-    /// contest), with `per_khz_minute` stations arriving and at most `cap`
-    /// keying at once within earshot.
-    fn tuned(
-        sample_rate: u32,
-        level: f64,
-        per_khz_minute: f64,
-        cap: usize,
-        tuning: Tuning,
-        seed: u64,
-    ) -> Self {
-        let level = if level.is_finite() {
-            level.clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
+    /// A band carrying `profile`'s traffic, listened to from `tuning`. One
+    /// with no station on it at this moment is still a band — someone will
+    /// be along.
+    fn new(sample_rate: u32, profile: TrafficProfile, tuning: Tuning, seed: u64) -> Self {
         let fs = f64::from(sample_rate.max(1));
-        let contest = ((level - 0.5) / 0.5).clamp(0.0, 1.0);
-        let random = Draw(seed ^ 0xB4D5_AC71_7174_C0DE);
-        let per_khz_minute = if per_khz_minute.is_finite() {
-            per_khz_minute.max(0.0)
-        } else {
-            0.0
-        };
+        let contest = profile.contest.clamp(0.0, 1.0);
         let mut band = Self {
-            level,
             sample_rate: fs,
             tuning,
             unit: SQRT_2 * reference_rms() * 10f64.powf(-bin_over_reference_db() / 20.0),
             level_median_db: LEVEL_MEDIAN_DB + CONTEST_LEVEL_RISE_DB * contest,
             wpm_median: WPM_MEDIAN + CONTEST_WPM_RISE * contest,
-            station_rate: per_khz_minute * tuning.width_khz() / 60.0,
+            station_rate: profile.arrivals_per_khz_minute.max(0.0) * tuning.width_khz() / 60.0,
             chirp_rate: CHIRPS_PER_KHZ_MINUTE * tuning.width_khz() / 60.0,
             next_station: u64::MAX,
             next_chirp: u64::MAX,
             control_left: 0,
-            cap,
+            cap: profile.cap,
             reserved: 0,
             traffic: Traffic::default(),
             emitters: [Emitter::default(); MAX_EMITTERS],
-            random,
+            random: Draw(seed ^ 0xB4D5_AC71_7174_C0DE),
         };
-        if level <= 0.0 {
-            return band;
-        }
         let contest_share = CONTEST_SHARE.0 + (CONTEST_SHARE.1 - CONTEST_SHARE.0) * contest;
         band.traffic = Traffic::write(contest_share, &mut band.random);
         band.light_carriers();
@@ -438,12 +430,6 @@ impl BandActivity {
         band.next_station = band.random.wait(band.station_rate, fs);
         band.next_chirp = band.random.wait(band.chirp_rate, fs);
         band
-    }
-
-    /// Off, or something on the band. A band with no station on it at this
-    /// moment is still a band — someone will be along.
-    fn is_silent(&self) -> bool {
-        self.level <= 0.0
     }
 
     /// A pile-up is calling with `callers` stations besides yours: they come
@@ -477,9 +463,6 @@ impl BandActivity {
     }
 
     pub fn next_sample(&mut self) -> f64 {
-        if self.is_silent() {
-            return 0.0;
-        }
         if self.control_left == 0 {
             self.control();
             self.control_left = CONTROL_SAMPLES;
