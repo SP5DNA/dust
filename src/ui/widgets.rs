@@ -1,21 +1,11 @@
 use cw_core::{GroupResult, align_group};
 use dioxus::prelude::*;
 
-fn parse_number_input(raw: &str, min: f64, max: f64, commit: bool) -> Option<f64> {
-    let value: f64 = raw.parse().ok()?;
-    if !value.is_finite() {
-        return None;
-    }
-    if commit {
-        return Some(value.clamp(min, max));
-    }
-    if value > max {
-        Some(max)
-    } else if value < 0.0 && min >= 0.0 {
-        None
-    } else {
-        Some(value)
-    }
+/// What was typed into a number field, held inside its bounds. `None` for
+/// anything that is not a finite number, which leaves the value as it was.
+fn parse_number_input(raw: &str, min: f64, max: f64) -> Option<f64> {
+    let value: f64 = raw.trim().parse().ok()?;
+    value.is_finite().then(|| value.clamp(min, max))
 }
 
 /// Snap to the step grid so 0.1-steps do not drift into 0.30000000000000004.
@@ -398,6 +388,13 @@ pub fn SliderField(
     }
 }
 
+/// A number typed in, or stepped with − and +.
+///
+/// What is typed stays in the box, and reaches `onchange` only once it is
+/// committed — on Enter, or on leaving the field — inside its bounds. A number
+/// is typed through its prefixes: on the way to 30 the box holds 3, and a
+/// setting that took every key would take that too, which for one end of a
+/// range drags the other end down with it.
 #[component]
 pub fn NumberField(
     label: String,
@@ -412,6 +409,11 @@ pub fn NumberField(
     onchange: EventHandler<f64>,
 ) -> Element {
     let name = id.unwrap_or_else(|| control_id("number", &label));
+    // The text being typed, until it is committed. Reading it here is what
+    // puts the committed value back in the box afterwards, even when the
+    // value itself did not move — 999 into a field already at its top.
+    let mut typed = use_signal(|| None::<String>);
+    let shown = typed().unwrap_or_else(|| value.to_string());
     rsx! {
         div { class: "field",
             label { "{label}" }
@@ -432,14 +434,11 @@ pub fn NumberField(
                     min: "{min}",
                     max: "{max}",
                     step: "{step}",
-                    value: "{value}",
-                    oninput: move |e| {
-                        if let Some(v) = parse_number_input(&e.value(), min, max, false) {
-                            onchange.call(v);
-                        }
-                    },
+                    value: "{shown}",
+                    oninput: move |e| typed.set(Some(e.value())),
                     onchange: move |e| {
-                        if let Some(v) = parse_number_input(&e.value(), min, max, true) {
+                        typed.set(None);
+                        if let Some(v) = parse_number_input(&e.value(), min, max) {
                             onchange.call(v);
                         }
                     },
@@ -549,12 +548,7 @@ pub fn LinkedRange(
                         min: min_bound,
                         max: max_bound,
                         step,
-                        onchange: move |v: f64| {
-                            on_min.call(v);
-                            if v > max_value {
-                                on_max.call(v);
-                            }
-                        },
+                        onchange: move |v: f64| on_min.call(v),
                     }
                     NumberField {
                         label: format!("Max ({unit})"),
@@ -563,12 +557,7 @@ pub fn LinkedRange(
                         min: min_bound,
                         max: max_bound,
                         step,
-                        onchange: move |v: f64| {
-                            on_max.call(v);
-                            if v < min_value {
-                                on_min.call(v);
-                            }
-                        },
+                        onchange: move |v: f64| on_max.call(v),
                     }
                 }
             }
@@ -643,21 +632,20 @@ mod tests {
     use super::{control_id, html_bool, nudge, parse_number_input, pct_between, pretty_number};
 
     #[test]
-    fn typing_below_min_is_kept_until_commit() {
-        assert_eq!(parse_number_input("1", 5.0, 60.0, false), Some(1.0));
-        assert_eq!(parse_number_input("18", 5.0, 60.0, false), Some(18.0));
-        assert_eq!(parse_number_input("1", 5.0, 60.0, true), Some(5.0));
+    fn a_typed_number_is_held_inside_its_bounds() {
+        assert_eq!(parse_number_input("18", 5.0, 60.0), Some(18.0));
+        assert_eq!(parse_number_input(" 18 ", 5.0, 60.0), Some(18.0));
+        assert_eq!(parse_number_input("1", 5.0, 60.0), Some(5.0));
+        assert_eq!(parse_number_input("99", 5.0, 60.0), Some(60.0));
+        assert_eq!(parse_number_input("-1", 1.0, 100.0), Some(1.0));
     }
 
     #[test]
-    fn input_above_max_is_capped() {
-        assert_eq!(parse_number_input("99", 5.0, 60.0, false), Some(60.0));
-    }
-
-    #[test]
-    fn negative_values_are_ignored_when_min_is_non_negative() {
-        assert_eq!(parse_number_input("-1", 1.0, 100.0, false), None);
-        assert_eq!(parse_number_input("1e500", 1.0, 100.0, false), None);
+    fn anything_but_a_finite_number_is_ignored() {
+        assert_eq!(parse_number_input("", 1.0, 100.0), None);
+        assert_eq!(parse_number_input("-", 1.0, 100.0), None);
+        assert_eq!(parse_number_input("1e500", 1.0, 100.0), None);
+        assert_eq!(parse_number_input("NaN", 1.0, 100.0), None);
     }
 
     #[test]

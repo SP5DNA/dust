@@ -7,6 +7,37 @@ use dioxus::prelude::*;
 
 use crate::ui::widgets::{Icon, ModePill, NumberField, SectionReset, Seg, control_id};
 
+/// A list of characters, typed out.
+///
+/// What is typed stays as typed until it is committed — on Enter, or on
+/// leaving the field — and only then is it cleaned down to the characters
+/// that can be sent. Cleaned on every key, the box would move under the
+/// cursor whenever a key was dropped, and could never be emptied to start
+/// again: an empty unlock order is LCWO's, so clearing it would fill it
+/// straight back up.
+#[component]
+fn AlphabetField(label: &'static str, value: String, on_commit: EventHandler<String>) -> Element {
+    let mut typed = use_signal(|| None::<String>);
+    let shown = typed().unwrap_or(value);
+    rsx! {
+        div { class: "field",
+            label { "{label}" }
+            input {
+                id: control_id("field", label),
+                class: "mono",
+                value: "{shown}",
+                autocapitalize: "characters",
+                spellcheck: false,
+                oninput: move |e| typed.set(Some(e.value())),
+                onchange: move |e| {
+                    typed.set(None);
+                    on_commit.call(e.value());
+                },
+            }
+        }
+    }
+}
+
 #[component]
 pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
     let s = settings();
@@ -84,19 +115,10 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
                         onclick: move |_| settings.write().choose_sequence(SequenceChoice::Custom),
                     }
                 }
-                div { class: "field",
-                    label { "Sequence order" }
-                    input {
-                        id: control_id("field", "sequence order"),
-                        class: "mono",
-                        value: "{seq.iter().collect::<String>()}",
-                        oninput: move |e| {
-                            let w = &mut *settings.write();
-                            let typed: Vec<char> = e.value().chars().collect();
-                            w.curriculum.custom_sequence = TrainingSettings::unique_alphabet(&typed);
-                            w.curriculum.sequence_is_custom = !w.curriculum.custom_sequence.is_empty();
-                        }
-                    }
+                AlphabetField {
+                    label: "Sequence order",
+                    value: seq.iter().collect::<String>(),
+                    on_commit: move |typed: String| settings.write().type_sequence(&typed),
                 }
             }
             div { class: "field-grid",
@@ -143,19 +165,13 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
                 }
             }
             if s.curriculum.char_set_mode == CharSetMode::Custom {
-                div { class: "field",
-                    label { "Custom alphabet" }
-                    input {
-                        id: control_id("field", "custom alphabet"),
-                        class: "mono",
-                        value: "{s.curriculum.custom_set.iter().collect::<String>()}",
-                        oninput: move |e| {
-                            let w = &mut *settings.write();
-                            w.curriculum.custom_set = TrainingSettings::unique_alphabet(
-                                &e.value().chars().collect::<Vec<_>>(),
-                            );
-                        }
-                    }
+                AlphabetField {
+                    label: "Custom alphabet",
+                    value: s.curriculum.custom_set.iter().collect::<String>(),
+                    on_commit: move |typed: String| {
+                        settings.write().curriculum.custom_set =
+                            TrainingSettings::unique_alphabet(&typed.chars().collect::<Vec<_>>());
+                    },
                 }
                 p { class: "muted", style: "margin: 0;", "Level unlocks this list from the start. Leave it empty to use the sequence above." }
             }

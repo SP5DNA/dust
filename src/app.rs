@@ -961,9 +961,8 @@ mod ui_tests {
         });
     }
 
-    /// A sequence is shortened on its way to being retyped, a character at
-    /// a time. The level it carries is read inside it, and kept for when it
-    /// grows back.
+    /// A sequence can be cut shorter than the level it carries. The level is
+    /// read inside it, and kept for when it grows back.
     #[test]
     fn shortening_the_alphabet_keeps_the_level_for_when_it_grows_back() {
         run(|| async {
@@ -971,7 +970,7 @@ mod ui_tests {
             settings.curriculum.level = 9;
             let (mut ui, _recorder) = Ui::app_with_settings(settings);
             ui.click("nav-settings");
-            ui.type_into("field-sequence-order", "KM");
+            ui.commit("field-sequence-order", "KM");
             ui.advance(50).await;
             let stored = crate::persist::load_settings();
             assert_eq!(stored.curriculum.custom_sequence, vec!['K', 'M']);
@@ -979,7 +978,7 @@ mod ui_tests {
             assert_eq!(stored.active_level(), 1);
             assert_eq!(stored.clone().clamp(), stored);
 
-            ui.type_into("field-sequence-order", "KMURESNAPTL");
+            ui.commit("field-sequence-order", "KMURESNAPTL");
             ui.advance(50).await;
             assert_eq!(crate::persist::load_settings().active_level(), 9);
         });
