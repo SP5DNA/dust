@@ -17,7 +17,10 @@ use cw_core::{
 use dioxus::core::{ElementId, NoOpMutations};
 use dioxus::prelude::*;
 
+use crate::app::SETTINGS_SAVE_DELAY_MS;
 use crate::audio::fake::{Behaviour, Call, Recorder};
+use crate::persist::Store;
+use crate::persist::memory::MemoryStore;
 use crate::player::Lease;
 use crate::session_runtime::{send_event, start_session};
 use crate::state::{AppCtx, AppState, Screen};
@@ -42,6 +45,8 @@ pub struct Harness {
     /// What the app holds outside it: the player and the session.
     pub app: AppState,
     pub recorder: Rc<Recorder>,
+    /// What the app has stored.
+    pub store: Rc<MemoryStore>,
 }
 
 /// Hands a session the groups it is given, in order.
@@ -120,10 +125,10 @@ impl Harness {
     }
 
     pub fn with_settings(settings: TrainingSettings) -> Self {
-        crate::persist::memory::reset();
         let dom = VirtualDom::new(|| rsx! {});
         let recorder = Recorder::new();
-        let app = AppState::with_backend(recorder.factory());
+        let store = Rc::new(MemoryStore::default());
+        let app = AppState::with(recorder.factory(), store.clone());
         let ctx = dom.in_scope(ScopeId::ROOT, || {
             AppCtx::new(app.clone(), settings, Vec::new())
         });
@@ -132,6 +137,7 @@ impl Harness {
             ctx,
             app,
             recorder,
+            store,
         }
     }
 
@@ -307,6 +313,8 @@ pub struct Ui {
     ids: Vec<(String, ElementId)>,
     /// Mutations since the last time anybody asked.
     work: usize,
+    /// What the app on the page has stored.
+    pub store: Rc<MemoryStore>,
 }
 
 /// Ids and removals, as the renderer reports them.
@@ -371,7 +379,7 @@ impl Ui {
         component: impl dioxus::core::ComponentFunction<P, M>,
         props: P,
     ) -> Self {
-        Self::from_dom(VirtualDom::new_with_props(component, props))
+        Self::from_dom(VirtualDom::new_with_props(component, props), Rc::default())
     }
 
     /// The whole app, with a player that records instead of one that needs a
@@ -388,22 +396,27 @@ impl Ui {
         settings: TrainingSettings,
         sessions: &[SessionResult],
     ) -> (Self, Rc<Recorder>) {
-        crate::persist::memory::reset();
-        crate::persist::save_settings(&settings);
-        crate::persist::save_sessions(sessions);
+        let store = Rc::new(MemoryStore::default());
+        store.save_settings(&settings);
+        store.save_sessions(sessions);
+        store.settings_saves.set(0);
         let recorder = Recorder::new();
-        let state = AppState::with_backend(recorder.factory());
+        let state = AppState::with(recorder.factory(), store.clone());
         (
-            Self::from_dom(VirtualDom::new(crate::app::App).with_root_context(state)),
+            Self::from_dom(
+                VirtualDom::new(crate::app::App).with_root_context(state),
+                store,
+            ),
             recorder,
         )
     }
 
-    fn from_dom(dom: VirtualDom) -> Self {
+    fn from_dom(dom: VirtualDom, store: Rc<MemoryStore>) -> Self {
         let mut ui = Self {
             dom,
             ids: Vec::new(),
             work: 0,
+            store,
         };
         let mut log = IdLog::default();
         ui.dom.rebuild(&mut log);
@@ -452,6 +465,13 @@ impl Ui {
         let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
         let work = std::pin::pin!(self.dom.wait_for_work());
         work.poll(&mut cx).is_ready()
+    }
+
+    /// The settings as stored, once an edit has had time to be.
+    pub async fn stored_settings(&mut self) -> TrainingSettings {
+        self.advance(u64::from(SETTINGS_SAVE_DELAY_MS) + STEP_MS)
+            .await;
+        self.store.load_settings()
     }
 
     /// Move the clock forward, settling the page as it goes.

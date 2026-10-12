@@ -7,7 +7,7 @@
 use cw_core::{Paddle, SessionEvent, compute_char_pool, dit_ms_for_wpm};
 use dioxus::prelude::*;
 
-use crate::persist::current_auto_progress;
+use crate::persist::auto_progress;
 use crate::playback;
 use crate::session_runtime::{send_event, start_session};
 use crate::state::{AppCtx, Screen};
@@ -57,7 +57,7 @@ fn HomeRoute() -> Element {
             pool: compute_char_pool(&settings).into_iter().collect::<String>(),
             sessions: sessions.clone(),
             today: local_date_string(),
-            auto_progress: current_auto_progress(&settings),
+            auto_progress: auto_progress(&*ctx.app().store, &settings),
             on_start,
             on_listen,
         }

@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use cw_core::{GroupSession, SessionResult, TrainingSettings};
 use dioxus::prelude::*;
 
+use crate::persist::Store;
 use crate::playback::Preview;
 use crate::player::{AudioError, BackendFactory, Player};
 use crate::session_runtime::LiveSession;
@@ -37,22 +38,29 @@ impl Screen {
     }
 }
 
-/// What the app holds outside the reactive tree: the audio player, and the
-/// session being run on it. Cheap to clone; every clone is the same app.
+/// What the app holds outside the reactive tree: the audio player, the
+/// session being run on it, and where what it learns is kept. Cheap to
+/// clone; every clone is the same app.
 #[derive(Clone)]
 pub struct AppState {
     pub player: Player,
+    pub store: Rc<dyn Store>,
     pub session: Rc<RefCell<Option<LiveSession>>>,
 }
 
 impl AppState {
+    /// The app as it ships: this build's audio, this build's store.
     pub fn new() -> Self {
-        Self::with_backend(Rc::new(crate::audio::default_backend))
+        Self::with(
+            Rc::new(crate::audio::default_backend),
+            crate::persist::default_store(),
+        )
     }
 
-    pub fn with_backend(make_player: BackendFactory) -> Self {
+    pub fn with(make_player: BackendFactory, store: Rc<dyn Store>) -> Self {
         Self {
             player: Player::new(make_player),
+            store,
             session: Rc::new(RefCell::new(None)),
         }
     }

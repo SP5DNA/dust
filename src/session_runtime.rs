@@ -8,16 +8,13 @@
 //! how long they live.
 
 use cw_core::{
-    CharSamplingState, FastrandRng, MonoMs, Sampler, SessionEffect, SessionEvent, SessionId,
-    SessionMachine, Transmission, apply_auto_level, evaluate_auto_level, generate_training_group,
-    resolve_station,
+    CharSamplingState, CountersKey, CountersUpdate, FastrandRng, MonoMs, Sampler, SessionEffect,
+    SessionEvent, SessionId, SessionMachine, Transmission, complete_session,
+    generate_training_group, resolve_station,
 };
 use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
 
-use crate::persist::{
-    clear_auto_counters, load_auto_counters, save_auto_counters, save_sessions, save_settings,
-};
 use crate::playback::Preview;
 use crate::player::{AudioError, Lease};
 use crate::state::{AppCtx, Screen};
@@ -250,38 +247,49 @@ fn finish_session(ctx: AppCtx) {
         mut result,
         mut auto_message,
         mut sessions,
-        settings: mut settings_sig,
+        mut settings,
         toasts,
         ..
     } = ctx;
     let Some(live) = end_session(ctx) else {
         return;
     };
+    let store = ctx.app().store;
     let session = live.machine.session();
-    let settings = session.settings().clone();
+    let run = store.load_auto_counters(&CountersKey::of(session.settings()));
     // The machine only finishes a session it has scored something in.
-    let built = session.result(now_ms(), local_date_string());
-
-    let mut counters = load_auto_counters(&settings);
-    let mut next_settings = settings.clone();
-    if let Some(change) = evaluate_auto_level(&built, &settings, &mut counters) {
-        clear_auto_counters(&change.counters_cleared);
-        apply_auto_level(&mut next_settings, &change);
-        settings_sig.set(next_settings.clone());
-        save_settings(&next_settings);
-        let message = crate::ui::auto_level::change_message(&change);
-        auto_message.set(Some(message.clone()));
-        toasts.show(message);
-    } else {
-        save_auto_counters(&settings, counters);
-        auto_message.set(None);
+    let done = complete_session(session, run, now_ms(), local_date_string());
+    match &done.counters {
+        CountersUpdate::Keep(key, counters) => store.save_auto_counters(key, *counters),
+        CountersUpdate::Clear(keys) => store.clear_auto_counters(keys),
     }
+    let message = done
+        .change
+        .as_ref()
+        .map(crate::ui::auto_level::change_message);
+    if done.change.is_some() {
+        // Stored by the app's settings effect, once the results are up.
+        settings.set(done.settings);
+    }
+    if let Some(message) = &message {
+        toasts.show(message.clone());
+    }
+    auto_message.set(message);
 
-    let mut history = sessions();
-    history.push(built.clone());
-    save_sessions(&history);
-    sessions.set(history);
-    result.set(Some(built));
+    // The history grows by one where it is, and is stored from there.
+    sessions.write().push(done.result.clone());
+    let saved = store.save_sessions(&sessions.peek());
+    // What the screens show is what the store has.
+    if let Some(kept) = saved.kept() {
+        let extra = sessions.peek().len().saturating_sub(kept);
+        if extra > 0 {
+            sessions.write().drain(..extra);
+        }
+    }
+    if let Some(problem) = saved.problem() {
+        toasts.show(problem);
+    }
+    result.set(Some(done.result));
     runtime.set(None);
     screen.set(Screen::Results);
 }
@@ -290,6 +298,7 @@ fn finish_session(ctx: AppCtx) {
 mod tests {
     use super::*;
     use crate::audio::fake::{Behaviour, Call};
+    use crate::persist::Store;
     use crate::testing::{Harness, run, test_settings};
     use cw_core::AutoLevelCounters;
     use cw_core::CharSetMode;
@@ -317,7 +326,7 @@ mod tests {
             assert!(result.groups.iter().all(|g| g.correct));
             assert_eq!(result.accuracy, 1.0);
             assert_eq!(h.ctx.sessions.peek().len(), 1);
-            assert_eq!(crate::persist::load_sessions().len(), 1);
+            assert_eq!(h.store.load_sessions().len(), 1);
             // The machine is torn down, and the audio with it.
             assert!(h.app.session.borrow().is_none());
             assert!(h.calls().contains(&Call::Shutdown));
@@ -1192,7 +1201,8 @@ mod tests {
             assert_eq!(h.toast().as_deref(), Some(message.as_str()));
             // The level that was just left behind keeps no counters.
             assert_eq!(
-                crate::persist::load_auto_counters(&h.ctx.settings.peek().clone()),
+                h.store
+                    .load_auto_counters(&CountersKey::of(&h.ctx.settings.peek())),
                 AutoLevelCounters::default()
             );
         });
@@ -1210,12 +1220,66 @@ mod tests {
             h.play_through(60_000).await;
             assert!(h.ctx.auto_message.peek().is_none());
             assert_eq!(
-                crate::persist::load_auto_counters(&settings),
+                h.store.load_auto_counters(&CountersKey::of(&settings)),
                 AutoLevelCounters { above: 1, below: 0 }
             );
-            let progress = crate::persist::current_auto_progress(&settings).expect("progress");
+            let progress = crate::persist::auto_progress(&*h.store, &settings).expect("progress");
             assert_eq!(progress.above_count, 1);
             assert_eq!(progress.above_target, 5);
+        });
+    }
+
+    /// A store with room for fewer sessions than the history keeps the
+    /// newest, says so, and the screens show what it kept. A browser out of
+    /// room used to drop the oldest in silence, and the app went on showing
+    /// them until the next launch.
+    #[test]
+    fn a_history_too_big_to_store_keeps_its_newest_and_says_so() {
+        run(|| async {
+            let mut h = Harness::new();
+            h.ctx.sessions.set(vec![
+                crate::testing::stored_session("2026-09-01", &[("KM", "KM")]),
+                crate::testing::stored_session("2026-09-02", &[("KM", "KM")]),
+            ]);
+            h.store.room.set(Some(2));
+            h.start_training();
+            h.play_through(60_000).await;
+            assert_eq!(h.screen(), Screen::Results);
+            let shown: Vec<String> = h
+                .ctx
+                .sessions
+                .peek()
+                .iter()
+                .map(|s| s.date.clone())
+                .collect();
+            assert_eq!(shown.len(), 2);
+            assert_eq!(shown[0], "2026-09-02", "the oldest is the one let go");
+            assert_eq!(h.store.load_sessions().len(), 2);
+            assert!(
+                h.toast().is_some_and(|text| text.contains("newest 2")),
+                "{:?}",
+                h.toast()
+            );
+        });
+    }
+
+    /// A history the store could not read is not written over, and the user
+    /// is told the session was not kept.
+    #[test]
+    fn a_session_is_not_stored_over_a_history_that_could_not_be_read() {
+        run(|| async {
+            let mut h = Harness::new();
+            h.store.held.set(true);
+            h.start_training();
+            h.play_through(60_000).await;
+            assert_eq!(h.screen(), Screen::Results, "the results are still shown");
+            assert!(h.store.load_sessions().is_empty());
+            assert!(
+                h.toast()
+                    .is_some_and(|text| text.contains("could not be read")),
+                "{:?}",
+                h.toast()
+            );
         });
     }
 }

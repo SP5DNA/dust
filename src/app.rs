@@ -1,12 +1,12 @@
 //! The shell every screen sits in: the header, the navigation, the toasts,
 //! and the state they all share.
 
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use cw_core::SessionEvent;
 use dioxus::prelude::*;
 
-use crate::persist::{load_sessions, load_settings, load_theme, save_settings, save_theme};
 use crate::routes::{Paddles, Route};
 use crate::session_runtime::send_event;
 use crate::state::{AppCtx, AppState, Screen, TOAST_MS};
@@ -20,6 +20,10 @@ use crate::ui::widgets::{Icon, control_id};
 // twice. Mobile has neither, so it injects this string from AppHead.
 #[cfg(not(feature = "web"))]
 pub(crate) const STYLESHEET: &str = include_str!("../assets/styles.css");
+
+/// How long the settings have to sit still on their screen before they are
+/// stored: a slider being dragged changes them every frame.
+pub(crate) const SETTINGS_SAVE_DELAY_MS: u32 = 250;
 
 /// The type faces, from Google Fonts. Every build links the same sheet.
 pub(crate) const FONT_CSS_URL: &str = "https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;700&family=Figtree:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;700&display=optional";
@@ -95,42 +99,23 @@ pub fn App() -> Element {
     // whole app with a player that records instead of one that needs a device.
     let ctx = use_context_provider(|| {
         let app = try_consume_context::<AppState>().unwrap_or_else(AppState::new);
-        AppCtx::new(app, load_settings(), load_sessions())
+        let (settings, sessions) = (app.store.load_settings(), app.store.load_sessions());
+        AppCtx::new(app, settings, sessions)
     });
     let AppCtx {
         screen,
-        mut settings,
+        settings,
         toasts,
         ..
     } = ctx;
-    let mut theme = use_signal(|| Theme::from_key(&load_theme()));
+    let mut theme = use_signal(|| Theme::from_key(&ctx.app().store.load_theme()));
     let paddle = use_paddle_keys(settings, screen, Rc::new(ctx.app()));
     use_context_provider(|| Paddles {
         heard: paddle.heard,
         down: paddle.down,
         up: paddle.up,
     });
-
-    use_effect(move || {
-        let key = theme().key();
-        save_theme(key);
-        // Theme is a data-theme attribute on the app root, not a JS write to
-        // <html>. Both the desktop webview and the web build key CSS off that.
-    });
-
-    use_effect(move || {
-        if matches!(screen(), Screen::Training) {
-            return;
-        }
-        // On the settings screen the live values are left as typed, so a
-        // field part-way through a number is not snapped under the cursor;
-        // what is stored is always clamped.
-        let persist = settings().clamp();
-        if !matches!(screen(), Screen::Settings) && persist != settings() {
-            settings.set(persist.clone());
-        }
-        save_settings(&persist);
-    });
+    use_stored_settings(ctx);
 
     use_effect(move || {
         if let Some(shown) = toasts.current() {
@@ -176,9 +161,13 @@ pub fn App() -> Element {
                             class: "icon-btn",
                             title: "{theme().label()}",
                             aria_label: "{theme().label()}",
+                            // Theme is a data-theme attribute on the app root,
+                            // not a JS write to <html>. Both the desktop
+                            // webview and the web build key CSS off that.
                             onclick: move |_| {
                                 let next = theme().next();
                                 theme.set(next);
+                                ctx.app().store.save_theme(next.key());
                             },
                             Icon { name: theme().icon() }
                         }
@@ -235,6 +224,58 @@ pub fn App() -> Element {
     }
 }
 
+/// Keep the stored settings in step with the live ones.
+///
+/// What is stored is always clamped. On the settings screen the live values
+/// are left as typed, so a field part-way through a number is not snapped
+/// under the cursor, and they are stored once they have been still for a
+/// moment. Anywhere else they are clamped in place and stored at once, which
+/// is also what stores an edit the moment its screen is left. Settings that
+/// are stored already are not stored again: moving between screens writes
+/// nothing.
+fn use_stored_settings(ctx: AppCtx) {
+    let stored = use_hook(|| Rc::new(RefCell::new(ctx.settings.peek().clone().clamp())));
+    let edits = use_hook(|| Rc::new(Cell::new(0u64)));
+    use_effect(move || {
+        let AppCtx {
+            screen,
+            mut settings,
+            ..
+        } = ctx;
+        let screen = screen();
+        if screen == Screen::Training {
+            return;
+        }
+        let persist = settings.read().clone().clamp();
+        if screen != Screen::Settings && persist != *settings.peek() {
+            settings.set(persist.clone());
+        }
+        // Whatever edit was still waiting, this one replaces it.
+        let edit = edits.get() + 1;
+        edits.set(edit);
+        let store = {
+            let stored = stored.clone();
+            move || {
+                if *stored.borrow() != persist {
+                    ctx.app().store.save_settings(&persist);
+                    *stored.borrow_mut() = persist;
+                }
+            }
+        };
+        if screen == Screen::Settings {
+            let edits = edits.clone();
+            spawn(async move {
+                sleep_ms(SETTINGS_SAVE_DELAY_MS).await;
+                if edits.get() == edit {
+                    store();
+                }
+            });
+        } else {
+            store();
+        }
+    });
+}
+
 fn toggle_fullscreen() {
     #[cfg(feature = "desktop")]
     {
@@ -262,6 +303,7 @@ fn toggle_fullscreen() {
 
 #[cfg(test)]
 mod ui_tests {
+    use crate::persist::Store;
     use crate::testing::{Ui, run, stored_session, test_settings};
     use cw_core::{CharSetMode, PracticeWindow, TrainingSettings};
 
@@ -319,8 +361,42 @@ mod ui_tests {
             ] {
                 ui.click("btn-theme");
                 assert!(ui.has(shown));
-                assert_eq!(crate::persist::load_theme(), key);
+                assert_eq!(ui.store.load_theme(), key);
             }
+        });
+    }
+
+    /// Settings are written when they change, and no more often than that:
+    /// they used to be rewritten on every move between screens, and on
+    /// every frame of a slider being dragged.
+    #[test]
+    fn settings_are_stored_once_per_change() {
+        run(|| async {
+            let (mut ui, _recorder) = Ui::app_with_settings(test_settings());
+            let saves = |ui: &Ui| ui.store.settings_saves.get();
+            for nav in ["nav-stats", "nav-settings", "nav-practice", "nav-settings"] {
+                ui.click(nav);
+            }
+            ui.open_disclosures();
+            ui.advance(1_000).await;
+            assert_eq!(saves(&ui), 0, "nothing changed, and something was written");
+
+            // A drag across a slider is one change, stored once it stops.
+            for step in 1..=20 {
+                ui.type_into("slider-rise-time", &format!("{}", 10 + step));
+                ui.advance(16).await;
+            }
+            assert_eq!(saves(&ui), 0, "stored while still moving");
+            assert_eq!(ui.stored_settings().await.band.steepness, 30.0);
+            assert_eq!(saves(&ui), 1);
+
+            // Leaving the screen stores an edit at once.
+            ui.type_into("slider-rise-time", "12");
+            ui.click("nav-practice");
+            assert_eq!(saves(&ui), 2);
+            assert_eq!(ui.store.load_settings().band.steepness, 12.0);
+            ui.advance(1_000).await;
+            assert_eq!(saves(&ui), 2, "the waiting edit was stored twice");
         });
     }
 
@@ -340,7 +416,7 @@ mod ui_tests {
             assert!(ui.run_until(5_000, |ui| ui.screen() == "results").await);
             assert!(ui.has("Session complete"));
             assert!(ui.has("Clean copy"));
-            assert_eq!(crate::persist::load_sessions().len(), 1);
+            assert_eq!(ui.store.load_sessions().len(), 1);
         });
     }
 
@@ -436,7 +512,7 @@ mod ui_tests {
                     ui.run_until(2_000, |ui| ui.screen() == "home").await,
                     "{button} should have left the session"
                 );
-                assert!(crate::persist::load_sessions().is_empty());
+                assert!(ui.store.load_sessions().is_empty());
             }
         });
     }
@@ -452,7 +528,7 @@ mod ui_tests {
             assert!(ui.run_until(5_000, |ui| ui.has("group done")).await);
             ui.click("btn-end-session");
             assert!(ui.run_until(2_000, |ui| ui.screen() == "results").await);
-            assert_eq!(crate::persist::load_sessions().len(), 1);
+            assert_eq!(ui.store.load_sessions().len(), 1);
             assert!(ui.has("Group by group"));
         });
     }
@@ -475,7 +551,7 @@ mod ui_tests {
                     ui.run_until(2_000, |ui| ui.screen() == "results").await,
                     "{button} threw the answer away"
                 );
-                assert_eq!(crate::persist::load_sessions().len(), 1, "{button}");
+                assert_eq!(ui.store.load_sessions().len(), 1, "{button}");
             }
         });
     }
@@ -565,7 +641,7 @@ mod ui_tests {
             assert!(ui.has("Play all"));
             assert!(ui.has("Stream groups"));
             assert_eq!(ui.screen(), "listen");
-            assert!(crate::persist::load_sessions().is_empty());
+            assert!(ui.store.load_sessions().is_empty());
         });
     }
 
@@ -603,10 +679,7 @@ mod ui_tests {
             ] {
                 ui.click(button);
                 assert!(ui.has(note), "{button} should say {note}");
-                assert_eq!(
-                    crate::persist::load_settings().curriculum.char_set_mode,
-                    mode
-                );
+                assert_eq!(ui.stored_settings().await.curriculum.char_set_mode, mode);
             }
             assert!(ui.has("Share of letters"));
         });
@@ -618,7 +691,7 @@ mod ui_tests {
             let (mut ui, _recorder) = Ui::app();
             ui.click("nav-settings");
             ui.click("pill-cw-academy");
-            let stored = crate::persist::load_settings();
+            let stored = ui.stored_settings().await;
             assert_eq!(
                 stored.sequence_choice(),
                 cw_core::SequenceChoice::Preset(cw_core::PresetId::CwAcademy)
@@ -627,7 +700,8 @@ mod ui_tests {
             assert!(stored.progress_alphabet().starts_with(&['E', 'T', 'A']));
             ui.click("pill-lcwo");
             assert!(
-                crate::persist::load_settings()
+                ui.stored_settings()
+                    .await
                     .curriculum
                     .custom_sequence
                     .is_empty()
@@ -648,7 +722,7 @@ mod ui_tests {
                 ("pill-everything", PracticeWindow::All, 10),
             ] {
                 ui.click(button);
-                let stored = crate::persist::load_settings();
+                let stored = ui.stored_settings().await;
                 assert_eq!(stored.curriculum.practice_window, window);
                 assert_eq!(cw_core::compute_char_pool(&stored).len(), pool);
             }
@@ -667,7 +741,7 @@ mod ui_tests {
             ui.click("nav-settings");
             ui.type_into("field-sequence-order", "KM");
             ui.advance(50).await;
-            let stored = crate::persist::load_settings();
+            let stored = ui.stored_settings().await;
             assert_eq!(stored.curriculum.custom_sequence, vec!['K', 'M']);
             // Two characters can only carry level 1.
             assert_eq!(stored.active_level(), 1);
@@ -675,7 +749,7 @@ mod ui_tests {
 
             ui.type_into("field-sequence-order", "KMURESNAPTL");
             ui.advance(50).await;
-            assert_eq!(crate::persist::load_settings().active_level(), 9);
+            assert_eq!(ui.stored_settings().await.active_level(), 9);
         });
     }
 
@@ -795,7 +869,7 @@ mod ui_tests {
             ui.type_into("slider-rise-time", "23");
             ui.advance(50).await;
 
-            let changed = crate::persist::load_settings();
+            let changed = ui.stored_settings().await;
             assert_eq!(changed.band.stations_max, 4);
             assert_eq!(changed.band.filter_shape, cw_core::FilterShape::Soft);
             assert!((changed.band.steepness - 23.0).abs() < 0.5);
@@ -803,7 +877,7 @@ mod ui_tests {
             // Reset the keying envelope only.
             ui.click("reset-keying-envelope");
             ui.advance(50).await;
-            let after = crate::persist::load_settings();
+            let after = ui.stored_settings().await;
             let fresh = cw_core::TrainingSettings::default();
             assert!(
                 (after.band.steepness - fresh.band.steepness).abs() < 0.001,
@@ -818,7 +892,7 @@ mod ui_tests {
             // And now the band conditions, which owns the stations.
             ui.click("reset-band-conditions");
             ui.advance(50).await;
-            let after = crate::persist::load_settings();
+            let after = ui.stored_settings().await;
             assert_eq!(after.band.stations_max, fresh.band.stations_max);
             assert!((after.band.qrn_level - fresh.band.qrn_level).abs() < 0.001);
         });
@@ -835,7 +909,7 @@ mod ui_tests {
             assert!(ui.has("Fixed"));
             ui.commit("fixed-stations-calling", "4");
             ui.advance(50).await;
-            let stored = crate::persist::load_settings();
+            let stored = ui.stored_settings().await;
             assert_eq!((stored.band.stations_min, stored.band.stations_max), (4, 4));
             assert!(
                 ui.has("Pile-up spread"),
@@ -849,7 +923,7 @@ mod ui_tests {
             ui.advance(50).await;
             ui.commit("to-stations-calling", "5");
             ui.advance(50).await;
-            let stored = crate::persist::load_settings();
+            let stored = ui.stored_settings().await;
             assert_eq!((stored.band.stations_min, stored.band.stations_max), (2, 5));
             assert!(ui.has("2–5 at once"), "the range should read back");
 
@@ -864,7 +938,7 @@ mod ui_tests {
                     "{slider} should read {reads}"
                 );
             }
-            let stored = crate::persist::load_settings();
+            let stored = ui.stored_settings().await;
             assert_eq!(stored.band.pileup_spread_hz, 260.0);
             assert_eq!(stored.band.pileup_level_db, 20.0);
             assert_eq!(stored.clone().clamp(), stored);
@@ -874,7 +948,7 @@ mod ui_tests {
             ui.advance(50).await;
             ui.commit("fixed-stations-calling", "1");
             ui.advance(50).await;
-            let stored = crate::persist::load_settings();
+            let stored = ui.stored_settings().await;
             assert_eq!((stored.band.stations_min, stored.band.stations_max), (1, 1));
             assert_eq!(stored.band.filter_shape, test_settings().band.filter_shape);
             assert!(!ui.has("Pile-up spread"));
@@ -1112,7 +1186,7 @@ mod ui_tests {
                     ui.commit(&control, value);
                 }
                 ui.advance(50).await;
-                let stored = crate::persist::load_settings();
+                let stored = ui.stored_settings().await;
                 assert_eq!(stored.clone().clamp(), stored, "{value:?} into {control}");
                 assert!(!ui.html().is_empty());
                 ui.character_boxes_hold_single_characters();
@@ -1175,7 +1249,7 @@ mod ui_tests {
             ui.commit("field-level", "6");
             ui.advance(50).await;
             assert_ne!(before, ui.html(), "the preview should follow the tier");
-            assert_eq!(crate::persist::load_settings().curriculum.callsign_level, 6);
+            assert_eq!(ui.stored_settings().await.curriculum.callsign_level, 6);
         });
     }
 
@@ -1191,13 +1265,13 @@ mod ui_tests {
             ui.click("seg-callsigns");
             ui.commit("field-level", "5");
             ui.advance(50).await;
-            let stored = crate::persist::load_settings();
+            let stored = ui.stored_settings().await;
             assert_eq!(stored.curriculum.callsign_level, 5);
             assert_eq!(stored.curriculum.level, 9, "the Koch level is untouched");
 
             ui.click("seg-koch");
             ui.advance(50).await;
-            let stored = crate::persist::load_settings();
+            let stored = ui.stored_settings().await;
             assert_eq!(stored.curriculum.level, 9);
             assert_eq!(stored.curriculum.callsign_level, 5);
         });
