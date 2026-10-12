@@ -17,10 +17,12 @@ pub fn ResultsView(
     } else {
         "—".into()
     };
+    // About the copy, not the level: whether the level moves is the
+    // learner's own rule, and the banner below says so when it does.
     let verdict = if result.accuracy >= 0.95 {
         "Clean copy — that pace is yours."
     } else if result.accuracy >= 0.9 {
-        "Solid session. One more and the level moves."
+        "Solid session — a few slips, nothing that stuck."
     } else if result.accuracy >= 0.7 {
         "Getting there — the weak letters come round more often now."
     } else {

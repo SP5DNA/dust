@@ -1,7 +1,10 @@
 //! Keying-envelope scope: draws the exact attack/decay shape the audio backends
 //! apply, and sends short test samples with the current settings.
 
-use cw_core::{EnvelopeShape, SettingsSection, TrainingSettings, envelope_shape};
+use cw_core::{
+    EnvelopeShape, STEEPNESS_MAX_MS, STEEPNESS_MIN_MS, SettingsSection, TrainingSettings,
+    envelope_shape,
+};
 use dioxus::prelude::*;
 
 use crate::ui::widgets::{Icon, SectionReset, SliderField, control_id, pretty_number};
@@ -184,8 +187,8 @@ pub fn EnvelopeCard(
                     label: "Rise time".to_string(),
                     value_label: format!("{} ms", pretty_number(s.band.steepness)),
                     value: s.band.steepness,
-                    min: 1.0,
-                    max: 40.0,
+                    min: STEEPNESS_MIN_MS,
+                    max: STEEPNESS_MAX_MS,
                     step: 1.0,
                     disabled: false,
                     onchange: move |v| settings.write().band.steepness = v,

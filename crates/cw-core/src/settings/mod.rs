@@ -46,6 +46,10 @@ pub const QSB_RATE_MIN_HZ: f64 = 0.03;
 pub const QSB_RATE_MAX_HZ: f64 = 1.5;
 /// Sessions above or below the threshold before the level moves.
 pub const ADJUST_COUNT_MAX: u32 = 20;
+/// The session accuracy, in percent, that counts as above the threshold.
+/// Below half right is not a level anyone has mastered.
+pub const ADJUST_THRESHOLD_MIN_PCT: f64 = 50.0;
+pub const ADJUST_THRESHOLD_MAX_PCT: f64 = 100.0;
 /// How hard the sampler leans on characters you get wrong, and on
 /// characters it has not sent yet this session.
 pub const ERROR_WEIGHT_MAX: f64 = 10.0;

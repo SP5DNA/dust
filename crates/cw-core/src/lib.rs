@@ -40,7 +40,9 @@ pub use machine::{
     AUTO_CONFIRM_DELAY_MS, GroupSource, SessionEffect, SessionEvent, SessionMachine,
 };
 pub use morse::{MAX_DIGITS_LEVEL, morse_for};
-pub use pool::{compute_char_pool, current_practice_window, unlocked_practice_count};
+pub use pool::{
+    compute_char_pool, current_practice_window, newest_unlocked, unlocked_practice_count,
+};
 pub use rng::{FastrandRng, Rng};
 pub use sampling::{CharSamplingState, Sampler, generate_training_group};
 pub use sequences::{PresetId, SEQUENCE_PRESETS, SequenceChoice, SequencePreset};
@@ -49,15 +51,16 @@ pub use session::{
     SessionTiming, SessionView, answer_length_matches,
 };
 pub use settings::{
-    ADJUST_COUNT_MAX, AutoLevelSettings, BandSettings, COVERAGE_STRENGTH_MAX, CharSetMode,
-    CurriculumSettings, DEFAULT_FILTER_WIDTH_HZ, ERROR_WEIGHT_MAX, EXTRA_WORD_SPACE_MAX,
-    EXTRA_WORD_SPACE_MIN, FILTER_WIDTH_MAX, FILTER_WIDTH_MIN, FilterShape, GROUP_PAUSE_MAX_SEC,
-    GROUP_REPEAT_MAX, GROUP_REPEAT_MIN, GROUP_SIZE_MAX, GROUP_SIZE_MIN, GROUP_TIMEOUT_MAX_SEC,
-    LevelAxis, MixedAutoLevelAxis, NUM_GROUPS_MAX, NUM_GROUPS_MIN, PILEUP_LEVEL_MAX_DB,
-    PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN, PlaybackSettings, PracticeWindow,
-    QSB_RATE_MAX_HZ, QSB_RATE_MIN_HZ, RangeSetting, RangeValues, SIDE_TONE_MAX_HZ,
-    SIDE_TONE_MIN_HZ, STATIONS_MAX, STATIONS_MIN, STEEPNESS_MAX_MS, STEEPNESS_MIN_MS,
-    SettingsSection, TrainingSettings, VOLUME_MAX, VOLUME_MIN, WPM_MAX, WPM_MIN,
+    ADJUST_COUNT_MAX, ADJUST_THRESHOLD_MAX_PCT, ADJUST_THRESHOLD_MIN_PCT, AutoLevelSettings,
+    BandSettings, COVERAGE_STRENGTH_MAX, CharSetMode, CurriculumSettings, DEFAULT_FILTER_WIDTH_HZ,
+    ERROR_WEIGHT_MAX, EXTRA_WORD_SPACE_MAX, EXTRA_WORD_SPACE_MIN, FILTER_WIDTH_MAX,
+    FILTER_WIDTH_MIN, FilterShape, GROUP_PAUSE_MAX_SEC, GROUP_REPEAT_MAX, GROUP_REPEAT_MIN,
+    GROUP_SIZE_MAX, GROUP_SIZE_MIN, GROUP_TIMEOUT_MAX_SEC, LevelAxis, MixedAutoLevelAxis,
+    NUM_GROUPS_MAX, NUM_GROUPS_MIN, PILEUP_LEVEL_MAX_DB, PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX,
+    PILEUP_SPREAD_MIN, PlaybackSettings, PracticeWindow, QSB_RATE_MAX_HZ, QSB_RATE_MIN_HZ,
+    RangeSetting, RangeValues, SIDE_TONE_MAX_HZ, SIDE_TONE_MIN_HZ, STATIONS_MAX, STATIONS_MIN,
+    STEEPNESS_MAX_MS, STEEPNESS_MIN_MS, SettingsSection, TrainingSettings, VOLUME_MAX, VOLUME_MIN,
+    WPM_MAX, WPM_MIN,
 };
 pub use stats::{
     AccuracyPoint, BigramHeatmap, CharacterDiagnostic, ConfusionEntry, GROUP_START_BIGRAM_TOKEN,

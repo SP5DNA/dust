@@ -1,7 +1,10 @@
 //! Automatic level adjustment after a session.
 
 use crate::session::SessionResult;
-use crate::settings::{CharSetMode, LevelAxis, MixedAutoLevelAxis, TrainingSettings};
+use crate::settings::{
+    ADJUST_THRESHOLD_MAX_PCT, ADJUST_THRESHOLD_MIN_PCT, CharSetMode, LevelAxis, MixedAutoLevelAxis,
+    TrainingSettings,
+};
 
 /// Where one run of auto-level counters is kept.
 ///
@@ -120,7 +123,10 @@ pub fn evaluate_auto_level(
     if !settings.auto_level.auto_adjust_level || !counts_toward_level(result, settings) {
         return None;
     }
-    let threshold_pct = settings.auto_level.auto_adjust_threshold.clamp(0.0, 100.0);
+    let threshold_pct = settings
+        .auto_level
+        .auto_adjust_threshold
+        .clamp(ADJUST_THRESHOLD_MIN_PCT, ADJUST_THRESHOLD_MAX_PCT);
     let accuracy_pct = result.accuracy * 100.0;
     // Counters come back from storage, so they are not trusted to be small.
     if accuracy_pct >= threshold_pct {
@@ -231,7 +237,10 @@ pub fn auto_level_progress(
     let above_target = settings.auto_level.auto_adjust_above_threshold_count;
     let below_target = settings.auto_level.auto_adjust_below_threshold_count;
     Some(AutoLevelProgress {
-        threshold: settings.auto_level.auto_adjust_threshold.clamp(0.0, 100.0),
+        threshold: settings
+            .auto_level
+            .auto_adjust_threshold
+            .clamp(ADJUST_THRESHOLD_MIN_PCT, ADJUST_THRESHOLD_MAX_PCT),
         above_count: counters.above,
         below_count: counters.below,
         above_target,

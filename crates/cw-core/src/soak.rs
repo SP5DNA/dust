@@ -522,7 +522,10 @@ fn auto_levelling_never_walks_the_settings_out_of_range() {
         settings.auto_level.auto_adjust_level = true;
         settings.auto_level.auto_adjust_above_threshold_count = rng.usize_in(0, 5) as u32;
         settings.auto_level.auto_adjust_below_threshold_count = rng.usize_in(0, 5) as u32;
-        settings.auto_level.auto_adjust_threshold = rng.pick_in_range(0.0, 100.0);
+        settings.auto_level.auto_adjust_threshold = rng.pick_in_range(
+            crate::ADJUST_THRESHOLD_MIN_PCT,
+            crate::ADJUST_THRESHOLD_MAX_PCT,
+        );
         let mut counters = AutoLevelCounters::default();
 
         for round in 0..30 {

@@ -98,9 +98,76 @@ pub fn current_practice_window(settings: &TrainingSettings) -> PracticeWindow {
     }
 }
 
+/// The character the latest level brought in: the one the learner has had
+/// least time with. Mixed answers for the axis that moved last, while it is
+/// being practised. A callsign tier brings in a shape, not a character, so
+/// it has none.
+pub fn newest_unlocked(settings: &TrainingSettings) -> Option<char> {
+    let newest = |axis: LevelAxis| unlocked(settings, axis).last().copied();
+    match settings.curriculum.char_set_mode {
+        CharSetMode::Callsign => None,
+        CharSetMode::Mixed => {
+            let moved_last = settings.auto_level.mixed_auto_level_next_axis.flip();
+            [moved_last, moved_last.flip()]
+                .into_iter()
+                .filter(|axis| settings.mixed_axis_practised(*axis))
+                .find_map(|axis| newest(axis.into()))
+                // A share that leaves its axis nothing to send draws from
+                // the other one, and so does the newest character.
+                .or_else(|| compute_char_pool(settings).last().copied())
+        }
+        mode => newest(mode.axis()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn at_level_3(mode: CharSetMode) -> TrainingSettings {
+        let mut settings = TrainingSettings::default();
+        settings.curriculum.char_set_mode = mode;
+        settings.curriculum.level = 3;
+        settings.curriculum.digits_level = 3;
+        settings
+    }
+
+    #[test]
+    fn the_newest_character_is_the_one_the_level_brought_in() {
+        let koch = at_level_3(CharSetMode::Koch);
+        assert_eq!(
+            newest_unlocked(&koch),
+            compute_char_pool(&koch).last().copied()
+        );
+        assert_eq!(newest_unlocked(&at_level_3(CharSetMode::Digits)), Some('3'));
+        // However narrow the window, the newest is in it.
+        let mut newest_three = koch.clone();
+        newest_three.curriculum.practice_window = PracticeWindow::Last3;
+        assert_eq!(newest_unlocked(&newest_three), newest_unlocked(&koch));
+        // Level 1 brings in its two characters at once; the second is newest.
+        let mut first = koch;
+        first.curriculum.level = 1;
+        assert_eq!(newest_unlocked(&first), Some('M'));
+    }
+
+    #[test]
+    fn mixed_points_at_the_axis_that_moved_last() {
+        let mut mixed = at_level_3(CharSetMode::Mixed);
+        // The next move is the letters', so the digits moved last.
+        mixed.auto_level.mixed_auto_level_next_axis = MixedAutoLevelAxis::Letters;
+        assert_eq!(newest_unlocked(&mixed), Some('3'));
+        mixed.auto_level.mixed_auto_level_next_axis = MixedAutoLevelAxis::Digits;
+        assert!(newest_unlocked(&mixed).is_some_and(|ch| !ch.is_ascii_digit()));
+        // All letters: the digits are not practised, whatever moved last.
+        mixed.curriculum.mixed_letters_percent = 100;
+        mixed.auto_level.mixed_auto_level_next_axis = MixedAutoLevelAxis::Letters;
+        assert!(newest_unlocked(&mixed).is_some_and(|ch| !ch.is_ascii_digit()));
+    }
+
+    #[test]
+    fn a_callsign_tier_has_no_newest_character() {
+        assert_eq!(newest_unlocked(&at_level_3(CharSetMode::Callsign)), None);
+    }
 
     #[test]
     fn koch_level_1_is_k_and_m() {

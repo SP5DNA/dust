@@ -1,8 +1,8 @@
 use cw_core::band::{FilterDesign, heard_snr_db};
 use cw_core::{
     FILTER_WIDTH_MAX, FILTER_WIDTH_MIN, FilterShape, PILEUP_LEVEL_MAX_DB, PILEUP_LEVEL_MIN_DB,
-    PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN, RangeSetting, STATIONS_MAX, STATIONS_MIN,
-    SettingsSection, TrainingSettings,
+    PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN, QSB_RATE_MAX_HZ, QSB_RATE_MIN_HZ, RangeSetting,
+    STATIONS_MAX, STATIONS_MIN, SettingsSection, TrainingSettings,
 };
 use dioxus::prelude::*;
 
@@ -24,7 +24,7 @@ pub fn BandConditionsCard(
     let receiver = FilterDesign::from_settings(&s);
     // As heard through the filter you have set, so narrowing it visibly buys
     // signal-to-noise — which is the whole reason to reach for it.
-    let noise_reading = if s.band.noise_level > 0.0 {
+    let noise_reading = if s.band.noise_enabled && s.band.noise_level > 0.0 {
         format!(
             "S/N {:.0} dB",
             heard_snr_db(s.band.noise_level, receiver.noise_bandwidth_hz())
@@ -200,8 +200,8 @@ pub fn BandConditionsCard(
                     label: "Rate".to_string(),
                     value_label: format!("{:.2} Hz", s.band.qsb_rate_hz),
                     value: s.band.qsb_rate_hz,
-                    min: 0.03,
-                    max: 1.5,
+                    min: QSB_RATE_MIN_HZ,
+                    max: QSB_RATE_MAX_HZ,
                     step: 0.01,
                     disabled: !s.band.qsb_enabled,
                     onchange: move |v| settings.write().band.qsb_rate_hz = v,

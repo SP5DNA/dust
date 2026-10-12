@@ -208,6 +208,35 @@ fn home_renders_the_hero_and_stats() {
     );
 }
 
+/// A callsign tier brings in no new character, and a callsign has no group
+/// size: Home claims neither.
+#[test]
+fn home_in_callsign_mode_points_at_no_character_and_counts_calls() {
+    let html = render(|| {
+        let mut settings = TrainingSettings::default();
+        settings.curriculum.char_set_mode = CharSetMode::Callsign;
+        settings.curriculum.num_groups = 12;
+        rsx! {
+            Home {
+                settings,
+                last_accuracy: None,
+                session_count: 0,
+                pool: String::new(),
+                sessions: Vec::new(),
+                today: "2026-09-03".to_string(),
+                auto_progress: None,
+                on_start: move |_| {},
+                on_listen: move |_| {},
+            }
+        }
+    });
+    assert!(html.contains("pool-chip"), "{html}");
+    assert!(!html.contains("pool-chip fresh"), "{html}");
+    assert!(!html.contains("Newest character"));
+    assert!(html.contains(">12<") && html.contains("Calls"), "{html}");
+    assert!(html.contains("Callsign tier 1"));
+}
+
 #[test]
 fn home_without_history_invites_a_first_session() {
     let html = render(|| {
@@ -547,6 +576,53 @@ fn listen_renders_the_selected_character() {
     assert!(html.contains("Stream groups"));
 }
 
+/// Punctuation used to slug to a bare `chip`, so five chips shared an id.
+#[test]
+fn every_listen_chip_has_an_id_of_its_own() {
+    #[component]
+    fn Everything() -> Element {
+        let mut settings = TrainingSettings::default();
+        settings.curriculum.char_set_mode = CharSetMode::Koch;
+        settings.curriculum.level = 40;
+        rsx! {
+            ListenView {
+                settings,
+                playing: false,
+                on_play: move |_: String| {},
+                on_stop: move |_| {},
+                on_back: move |_| {},
+            }
+        }
+    }
+    let ui = crate::testing::Ui::new(Everything, ());
+    let chips = ui
+        .page_ids()
+        .into_iter()
+        .filter(|id| id.starts_with("chip-"))
+        .count();
+    assert!(chips > 36, "{chips} chips");
+}
+
+#[test]
+fn listen_in_callsign_mode_calls_no_character_the_newest() {
+    let html = render(|| {
+        let mut settings = TrainingSettings::default();
+        settings.curriculum.char_set_mode = CharSetMode::Callsign;
+        rsx! {
+            ListenView {
+                settings,
+                playing: false,
+                on_play: move |_: String| {},
+                on_stop: move |_| {},
+                on_back: move |_| {},
+            }
+        }
+    });
+    assert!(!html.contains("letter-chip newest"), "{html}");
+    assert!(!html.contains("Newest unlocked character"));
+    assert!(html.contains("From your current pool"));
+}
+
 #[test]
 fn training_shows_the_send_counter_while_repeating() {
     let html = render(|| {
@@ -839,9 +915,11 @@ mod interactions {
 
         // The noise reads as a signal-to-noise ratio through the filter you
         // have set, so the readout follows both controls. The test settings
-        // start with the noise switched off; switch it on first.
-        ui.click("switch-band-noise");
+        // start with the noise switched off, which reads as off whatever the
+        // level; switch it on first.
         ui.type_into("slider-noise-level", "0.5");
+        assert!(ui.has("class=\"slider-value\">Off<"), "switched off");
+        ui.commit("switch-band-noise", "true");
         assert!(
             ui.has("class=\"slider-value\">S/N 23 dB<"),
             "sharp, 300 Hz, at half level"
