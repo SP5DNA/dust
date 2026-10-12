@@ -142,7 +142,7 @@ fn check_clamped(s: &TrainingSettings, seed: u64) {
     );
     // And what is built from it passes the whole side-tone range, however
     // the two were set, without ever going wider than a receiver is built.
-    let built = crate::band::receiver_width_hz(&once);
+    let built = crate::band::FilterDesign::from_settings(&once).width_hz();
     assert!(
         built >= b.filter_width_hz && built <= crate::band::MAX_RECEIVER_WIDTH_HZ,
         "seed {seed}: asked for {} Hz, built {built} Hz",

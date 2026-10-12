@@ -4,8 +4,8 @@
 //! left alone, and above it the gain comes down half a decibel for every
 //! decibel of excess, never more than [`AGC_MAX_DUCK_DB`]. The native player
 //! runs that law sample by sample in [`Agc`], with a hang; the browser can only
-//! run it through a `DynamicsCompressorNode`, which [`compressor_curve_db`]
-//! describes so the two can be held to the same curve.
+//! run it through a `DynamicsCompressorNode`, set by [`agc_compressor`] from
+//! that node's own curve so the two land on the same law.
 //!
 //! What it is tuned to is what operators hear and what MorseRunner — the
 //! benchmark contesters train on — does with its AGC on:
@@ -17,11 +17,13 @@
 //! - A crash pulls the gain for a moment and lets go; it does not dig a hole
 //!   in the band for the next second.
 //!
-//! An earlier version learned the band's level over a second and a half, and
-//! learned the station with it: every over started 8 dB ducked and swelled up
-//! as the receiver got used to it, and every crash left the floor sagging for
-//! most of a second. Real AGC-off recordings show neither, and no AGC with a
-//! fixed reference can produce the first.
+//! The knee is fixed, set from the band's floor, rather than learned from
+//! what is heard: an AGC that learns the band's level learns the station with
+//! it, starts every over ducked and swells up as it gets used to it, and
+//! leaves the floor sagging for most of a second after every crash. Real
+//! receivers do neither.
+
+use super::dsp::{db_to_gain, gain_to_db};
 
 /// How far above the floor's own peaks the knee sits: a level has to stand
 /// 2.2 times (about 7 dB) above the highest the hiss ordinarily reaches before
@@ -82,6 +84,9 @@ pub const AGC_LOOKAHEAD_SEC: f64 = 0.002;
 /// How fast the ceiling closes: a fifth of the look-ahead, so it has finished
 /// before the crest it saw coming is played.
 const AGC_CEILING_ATTACK_SEC: f64 = AGC_LOOKAHEAD_SEC / 5.0;
+/// Where the detector's power counts as nothing: a tone 300 dB under full
+/// scale, far below any knee.
+const SETTLED_POWER: f64 = 1e-30;
 
 /// The knee width of the browser's compressor, in decibels. Web Audio's knee
 /// starts at the threshold and is fully on six decibels later, so the
@@ -92,20 +97,10 @@ pub const AGC_COMPRESSOR_KNEE_DB: f64 = 6.0;
 /// in above the knee.
 pub const AGC_COMPRESSOR_RATIO: f64 = 1.0 / (1.0 - AGC_SLOPE);
 
-/// The static law, in decibels: how far the gain comes down for a level
-/// `over_db` above the knee. Zero at or below the knee.
-pub fn agc_law_db(over_db: f64) -> f64 {
-    if over_db > 0.0 {
-        -(AGC_SLOPE * over_db).min(AGC_MAX_DUCK_DB)
-    } else {
-        0.0
-    }
-}
-
 /// Where the browser's compressor threshold goes for a native `knee` (an
 /// amplitude): half the compressor's soft knee below it, so the compressor's
 /// curve straddles the native corner rather than starting at it.
-pub fn agc_compressor_threshold_db(knee: f64) -> f64 {
+fn agc_compressor_threshold_db(knee: f64) -> f64 {
     20.0 * knee.max(1e-12).log10() - AGC_COMPRESSOR_KNEE_DB / 2.0
 }
 
@@ -137,29 +132,23 @@ pub fn agc_compressor(knee: Option<f64>) -> CompressorSetting {
     }
 }
 
+/// The make-up gain a `DynamicsCompressorNode` adds on its own, in decibels:
+/// the reduction its curve applies at full scale, to the power 0.6. Every
+/// browser applies it, so a compressor that should only ever turn things
+/// down has to be followed by its inverse.
+fn compressor_makeup_db(threshold_db: f64, knee_db: f64, ratio: f64) -> f64 {
+    -0.6 * CompressorCurve::new(threshold_db, knee_db, ratio).gain_db(0.0)
+}
+
 /// The static curve of a Web Audio `DynamicsCompressorNode`, as the
 /// specification's reference implementation (Chromium's, which Firefox and
 /// WebKit share) computes it: the gain in decibels it applies to a steady
-/// input at `input_db`, leaving out its automatic make-up gain (see
-/// [`compressor_makeup_db`]).
+/// input, leaving out its automatic make-up gain ([`compressor_makeup_db`]).
 ///
 /// Linear below the threshold; between the threshold and `threshold + knee` an
 /// exponential knee in the amplitude domain whose decibel slope falls from one
 /// to `1 / ratio`; a straight line of slope `1 / ratio` above. The browser
 /// cannot run the native AGC, so this is what holds the two to one law.
-pub fn compressor_curve_db(input_db: f64, threshold_db: f64, knee_db: f64, ratio: f64) -> f64 {
-    CompressorCurve::new(threshold_db, knee_db, ratio).gain_db(input_db)
-}
-
-/// The make-up gain a `DynamicsCompressorNode` adds on its own, in decibels:
-/// the reduction its curve applies at full scale, to the power 0.6. Every
-/// browser applies it, so a compressor that should only ever turn things
-/// down has to be followed by its inverse.
-pub fn compressor_makeup_db(threshold_db: f64, knee_db: f64, ratio: f64) -> f64 {
-    -0.6 * CompressorCurve::new(threshold_db, knee_db, ratio).gain_db(0.0)
-}
-
-/// The arithmetic behind [`compressor_curve_db`].
 struct CompressorCurve {
     threshold: f64,
     knee_end_db: f64,
@@ -170,10 +159,10 @@ struct CompressorCurve {
 
 impl CompressorCurve {
     fn new(threshold_db: f64, knee_db: f64, ratio: f64) -> Self {
-        let threshold = db_to_amplitude(threshold_db);
+        let threshold = db_to_gain(threshold_db);
         let slope = 1.0 / ratio.max(1.0);
         let knee_end_db = threshold_db + knee_db.max(0.0);
-        let knee_end = db_to_amplitude(knee_end_db);
+        let knee_end = db_to_gain(knee_end_db);
         // The knee's sharpness, found the way the reference implementation
         // finds it: fifteen geometric bisections for the k that makes the
         // knee's decibel slope at its far end equal the ratio's.
@@ -197,11 +186,7 @@ impl CompressorCurve {
 
     fn gain_db(&self, input_db: f64) -> f64 {
         let output_db = if input_db < self.knee_end_db {
-            amplitude_to_db(knee_curve(
-                self.threshold,
-                db_to_amplitude(input_db),
-                self.k,
-            ))
+            amplitude_to_db(knee_curve(self.threshold, db_to_gain(input_db), self.k))
         } else {
             self.knee_end_out_db + self.slope * (input_db - self.knee_end_db)
         };
@@ -227,12 +212,10 @@ fn knee_slope(threshold: f64, x: f64, k: f64) -> f64 {
     rise / (amplitude_to_db(x2) - amplitude_to_db(x))
 }
 
-fn db_to_amplitude(db: f64) -> f64 {
-    10f64.powf(db / 20.0)
-}
-
+/// Decibels from an amplitude, with silence held at −600 dB rather than
+/// minus infinity, so the knee's arithmetic stays finite.
 fn amplitude_to_db(amplitude: f64) -> f64 {
-    20.0 * amplitude.max(1e-30).log10()
+    gain_to_db(amplitude.max(1e-30))
 }
 
 /// The receiver's automatic gain control.
@@ -324,7 +307,7 @@ impl Agc {
             limited: 1.0,
             ceiling: 1.0,
             gain: 1.0,
-            deepest: db_to_amplitude(-AGC_MAX_DUCK_DB),
+            deepest: db_to_gain(-AGC_MAX_DUCK_DB),
             attack: coefficient(AGC_ATTACK_SEC),
             release: coefficient(AGC_RELEASE_SEC),
             limit_release: coefficient(AGC_LIMIT_RELEASE_SEC),
@@ -376,6 +359,13 @@ impl Agc {
         let input = (2.0 * heard * heard).max(send_peak * send_peak);
         let input = if input.is_finite() { input } else { 0.0 };
         self.power = input + (self.power - input) * self.smoothing;
+        // In silence the average dies away towards zero for ever; brought to
+        // rest once it is nothing, rather than left to sink into the
+        // subnormal range, where it and the square root below would take a
+        // microcode assist on every sample.
+        if self.power < SETTLED_POWER {
+            self.power = 0.0;
+        }
         let level = self.power.sqrt();
         let wanted = self.law(level);
 
@@ -443,12 +433,9 @@ impl Agc {
         self.gain
     }
 
-    /// The knee, as the amplitude of a steady tone; `None` when off.
-    pub fn knee(&self) -> Option<f64> {
-        (!self.is_off()).then_some(self.knee)
-    }
-
-    /// [`agc_law_db`] as a gain, for a detector reading of `level`.
+    /// The static law as a gain, for a detector reading of `level`: nothing
+    /// at or below the knee, [`AGC_SLOPE`] decibels down for every decibel
+    /// above it, never more than [`AGC_MAX_DUCK_DB`].
     fn law(&self, level: f64) -> f64 {
         let over = level / self.knee;
         if over > 1.0 {
@@ -459,10 +446,28 @@ impl Agc {
     }
 }
 
+/// The static law in decibels, written out from its definition rather than
+/// taken from [`Agc`]: how far the gain comes down for a level `over_db`
+/// above the knee. What both backends are held to.
+#[cfg(test)]
+pub(super) fn agc_law_db(over_db: f64) -> f64 {
+    if over_db > 0.0 {
+        -(AGC_SLOPE * over_db).min(AGC_MAX_DUCK_DB)
+    } else {
+        0.0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::band::{BandMixer, NoiseFloor, ReceiverFilter, agc_knee, noise_floor_rms};
+    use std::f64::consts::TAU;
+
+    use crate::band::BandMixer;
+    use crate::band::calibration::reference_floor_rms;
+    use crate::band::knee::{FLOOR_MEASURE_RATE, band_standing_level, reference_floor_level};
+    use crate::band::noise::NoiseFloor;
+    use crate::band::test_support::{knee_for, receiver_for, rms};
     use crate::settings::{FILTER_WIDTH_MAX, FilterShape, TrainingSettings};
     use crate::timing::{StationVoice, plan_morse_playback_for};
 
@@ -476,6 +481,12 @@ mod tests {
         20.0 * gain.log10()
     }
 
+    /// The gain the browser's compressor applies to a steady input at
+    /// `input_db`, leaving its make-up gain out.
+    fn compressor_curve_db(input_db: f64, threshold_db: f64, knee_db: f64, ratio: f64) -> f64 {
+        CompressorCurve::new(threshold_db, knee_db, ratio).gain_db(input_db)
+    }
+
     /// The default band with nothing on it but the floor, at a fixed pitch.
     fn floor_only() -> TrainingSettings {
         let mut s = TrainingSettings::default();
@@ -487,7 +498,7 @@ mod tests {
     }
 
     /// The same, through the receiver the static and the knee are calibrated
-    /// through: the old default, a sharp filter 500 Hz wide at 3 dB.
+    /// through: the reference filter, a sharp one 500 Hz wide at 3 dB.
     fn floor_through_500_hz() -> TrainingSettings {
         let mut s = floor_only();
         s.band.filter_width_hz = crate::band::filter::reference_width_hz();
@@ -540,12 +551,12 @@ mod tests {
                     let frac = pos - k as f64;
                     let env = f64::from(event.envelope[k]) * (1.0 - frac)
                         + f64::from(event.envelope[k + 1]) * frac;
-                    let phase = std::f64::consts::TAU * event.frequency_hz * i as f64 / sr;
+                    let phase = TAU * event.frequency_hz * i as f64 / sr;
                     samples[first + i] += (env * phase.sin()) as f32;
                 }
             }
         }
-        ReceiverFilter::from_settings(SR, settings).apply(&mut samples);
+        receiver_for(SR, settings).apply(&mut samples);
         Keyed { samples, downs }
     }
 
@@ -591,10 +602,6 @@ mod tests {
         db(sum / count as f64)
     }
 
-    fn rms(x: &[f32]) -> f64 {
-        (x.iter().map(|s| f64::from(*s).powi(2)).sum::<f64>() / x.len().max(1) as f64).sqrt()
-    }
-
     fn seconds(t: f64) -> usize {
         (t * f64::from(SR)) as usize
     }
@@ -617,7 +624,7 @@ mod tests {
             let (mut heard, mut sent) = (Agc::new(SR, knee), Agc::new(SR, knee));
             let (mut in_band, mut as_send) = (1.0, 1.0);
             for i in 0..SR / 2 {
-                let phase = std::f64::consts::TAU * 600.0 * f64::from(i) / f64::from(SR);
+                let phase = TAU * 600.0 * f64::from(i) / f64::from(SR);
                 in_band = heard.next_gain(amplitude * phase.sin(), 0.0);
                 as_send = sent.next_gain(0.0, amplitude);
             }
@@ -707,8 +714,7 @@ mod tests {
     }
 
     /// (7): sending groups with pauses between them, every group is ducked
-    /// the same from its first letter to its last. The old receiver started
-    /// each group a few decibels deeper and let go halfway through.
+    /// the same from its first letter to its last.
     #[test]
     fn every_group_is_ducked_the_same_from_start_to_finish() {
         let settings = floor_only();
@@ -760,10 +766,10 @@ mod tests {
                 "{:?} {:.0} Hz",
                 settings.band.filter_shape, settings.band.filter_width_hz
             );
-            let knee = agc_knee(&settings).unwrap();
+            let knee = knee_for(&settings).unwrap();
             let mut agc = Agc::new(SR, knee);
-            let mut floor = NoiseFloor::new(SR, noise_floor_rms(0.5), 3);
-            let mut receiver = ReceiverFilter::from_settings(SR, &settings);
+            let mut floor = NoiseFloor::new(SR, reference_floor_rms(), 3);
+            let mut receiver = receiver_for(SR, &settings);
             // An impulse whose peak through a 500 Hz filter is the default
             // floor's RMS, the way the static is calibrated; this cluster is
             // five of them twenty decibels louder, across five milliseconds.
@@ -771,7 +777,7 @@ mod tests {
             // are a comb with a null at every multiple of 200 Hz, the 600 Hz
             // pitch included, and the receiver would rightly hear next to
             // nothing of them.
-            let unit = noise_floor_rms(0.5) * f64::from(SR) / 1_000.0;
+            let unit = reference_floor_rms() * f64::from(SR) / 1_000.0;
             let ms = |t: f64| seconds(t / 1_000.0);
             let hits = [0.0, 0.8, 1.9, 3.1, 4.6].map(|t| ms(1_000.0 + t));
             let mut gains = Vec::new();
@@ -828,11 +834,11 @@ mod tests {
                 "{:?} {:.0} Hz",
                 settings.band.filter_shape, settings.band.filter_width_hz
             );
-            let mut agc = Agc::new(SR, agc_knee(&settings).unwrap());
-            let mut receiver = ReceiverFilter::from_settings(SR, &settings);
-            // A return stroke sixty decibels over the default floor: ten
+            let mut agc = Agc::new(SR, knee_for(&settings).unwrap());
+            let mut receiver = receiver_for(SR, &settings);
+            // A return stroke sixty decibels over the reference floor: ten
             // impulses across three milliseconds.
-            let unit = noise_floor_rms(0.5) * f64::from(SR) / 1_000.0;
+            let unit = reference_floor_rms() * f64::from(SR) / 1_000.0;
             let (mut loudest_in, mut loudest_out) = (0.0f64, 0.0f64);
             for i in 0..SR / 10 {
                 let kick = if (1_000..1_150).contains(&i) && i % 15 == 0 {
@@ -873,18 +879,16 @@ mod tests {
     }
 
     /// (4): ten minutes of the default band, crashes and all, and the floor
-    /// never sags behind them. The old receiver left 5% of the band's quarter
-    /// seconds more than 1.5 dB under its own median, 12% at QRN 0.5.
+    /// never sags behind them.
     ///
     /// Read off the gain the receiver rides at, the robust gain of each
     /// quarter second — the median of its 5 ms frames, which a crash's own
-    /// duck cannot drag down but a sag behind it does. That used to be read
-    /// off the band's power instead, which through a 500 Hz filter is steady
-    /// enough to show a sag: the hiss through the default peaked 300 Hz
-    /// receiver, 163 Hz of noise bandwidth, is not. Its quarter seconds swing
-    /// on their own, and with the AGC switched off altogether 2.2% of them
-    /// read more than 1.5 dB under the median, so the power could no longer
-    /// tell a sag from the hiss.
+    /// duck cannot drag down but a sag behind it does — rather than off the
+    /// band's power. The hiss through the default peaked 300 Hz receiver,
+    /// 163 Hz of noise bandwidth, swings on its own from one quarter second to
+    /// the next: with the AGC switched off altogether 2.2% of them read more
+    /// than 1.5 dB under the median, so the power cannot tell a sag from the
+    /// hiss.
     #[test]
     fn the_floor_does_not_sag_behind_the_static() {
         for (qrn, length, most) in [(0.25, 600, 0.01), (0.5, 300, 0.03)] {
@@ -893,7 +897,7 @@ mod tests {
             settings.band.qrn_level = qrn;
             // The band sounds the same at any rate, and this one keeps ten
             // minutes of it quick.
-            let rate = crate::band::FLOOR_MEASURE_RATE;
+            let rate = FLOOR_MEASURE_RATE;
             let mut mixer = BandMixer::new(rate, &settings, 0xC0FFEE);
             let frame = rate as usize / 200;
             let gains: Vec<f64> = (0..length * 200)
@@ -985,13 +989,72 @@ mod tests {
         settings.band.qrn_enabled = true;
         settings.band.qrn_level = 1.0;
         settings.band.noise_level = 1.0;
-        assert_eq!(agc_knee(&settings), None);
+        assert_eq!(knee_for(&settings), None);
         let keyed = station(&settings, &["TEST"], 0.2, 0.0);
         let (_, gain) = ride(&settings, &keyed.samples, 3.0);
         assert!(gain.iter().all(|g| *g == 1.0));
         let mut agc = Agc::off();
-        assert!(agc.is_off() && agc.knee().is_none());
+        assert!(agc.is_off());
         assert_eq!(agc.next_gain(10.0, 10.0), 1.0);
+    }
+
+    /// A crash has to duck the band — the AGC catching it within a couple of
+    /// milliseconds — and then let it straight back up. A crash is a few
+    /// milliseconds of ringing; a receiver that held the band down for most of a
+    /// second after each one dug holes in the floor that real ones do not.
+    #[test]
+    fn a_crash_ducks_the_band_and_it_comes_back() {
+        // The knee a band at 0.05 would have: its peaks, 2.2 times over.
+        let mut agc = Agc::new(SR, 0.05 * AGC_TRIGGER);
+        let tone =
+            |amplitude: f64, i: u32| amplitude * (TAU * 600.0 * f64::from(i) / f64::from(SR)).sin();
+        let mut steady = 1.0;
+        for i in 0..SR {
+            steady = agc.next_gain(tone(0.05, i), 0.0);
+        }
+        assert!(
+            steady == 1.0,
+            "a steady band should be left alone, gain {steady:.2}"
+        );
+
+        let mut ducked = 1.0_f64;
+        for i in 0..SR / 100 {
+            ducked = ducked.min(agc.next_gain(tone(1.0, i), 0.0));
+        }
+        assert!(
+            ducked < 0.5,
+            "the crash should have pulled the band down, gain {ducked:.2}"
+        );
+
+        let mut back = 0.0;
+        for i in 0..SR / 10 {
+            back = agc.next_gain(tone(0.05, i), 0.0);
+        }
+        assert!(
+            back > 0.9,
+            "a tenth of a second on the band was still down at {back:.2}"
+        );
+    }
+
+    /// The detector's average dies away after the last sound, and has to reach
+    /// zero rather than hang on in the subnormal range, where every multiply
+    /// and the square root after it take a microcode assist on every sample
+    /// of a silent band.
+    #[test]
+    fn the_detector_comes_to_rest_in_silence() {
+        let mut agc = Agc::new(SR, 0.1);
+        for i in 0..SR / 10 {
+            let phase = TAU * 600.0 * f64::from(i) / f64::from(SR);
+            agc.next_gain(0.5 * phase.sin(), 0.0);
+        }
+        for n in 0..SR * 10 {
+            agc.next_gain(0.0, 0.0);
+            assert!(
+                !agc.power.is_subnormal(),
+                "the detector went subnormal {n} samples into the silence"
+            );
+        }
+        assert_eq!(agc.power, 0.0);
     }
 
     /// The knee follows a louder floor up, so plain hiss never pumps the
@@ -1014,9 +1077,9 @@ mod tests {
         let knee = |edit: fn(&mut TrainingSettings)| {
             let mut s = floor_only();
             edit(&mut s);
-            agc_knee(&s.clamp()).unwrap()
+            knee_for(&s.clamp()).unwrap()
         };
-        let held = AGC_TRIGGER * crate::band::reference_floor_level();
+        let held = AGC_TRIGGER * reference_floor_level();
         let reference = knee(|_| {});
         let loud = knee(|s| s.band.noise_level = 0.8);
         let wide = knee(|s| s.band.filter_width_hz = FILTER_WIDTH_MAX);
@@ -1029,8 +1092,10 @@ mod tests {
         let silent = knee(|s| s.band.noise_enabled = false);
         // The default band is under the reference floor, by about what the
         // noise bandwidths say.
-        let under = db(crate::band::reference_floor_level()
-            / crate::band::band_standing_level(crate::band::FLOOR_MEASURE_RATE, &floor_only()));
+        let floor = floor_only();
+        let receiver = crate::band::FilterDesign::from_settings(&floor);
+        let under = db(reference_floor_level()
+            / band_standing_level(FLOOR_MEASURE_RATE, &floor.band, &receiver));
         assert!(
             (4.5..7.0).contains(&under),
             "the default floor is {under:.2} dB under"

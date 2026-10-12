@@ -176,30 +176,6 @@ impl TrainingSettings {
         let range = self.side_tone_range();
         range.start() + (range.end() - range.start()) / 2.0
     }
-
-    /// Everything the background layers are built from. Two settings with
-    /// the same signature sound the same, so a player only rebuilds its band
-    /// when this changes.
-    pub fn band_signature(&self) -> String {
-        let band = &self.band;
-        format!(
-            "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{:?}",
-            band.side_tone_min,
-            band.side_tone_max,
-            band.volume_min,
-            band.qsb_enabled,
-            band.qsb_depth,
-            band.qsb_rate_hz,
-            band.qrn_enabled,
-            band.qrn_level,
-            band.noise_enabled,
-            band.noise_level,
-            band.stations_max,
-            band.agc_enabled,
-            band.filter_width_hz,
-            band.filter_shape,
-        )
-    }
 }
 
 /// `value` held to `low..=high`, or `low` when it is not a number at all.
