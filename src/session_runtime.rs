@@ -3,8 +3,8 @@
 use cw_core::{
     CharSamplingState, FastrandRng, SessionEffect, SessionEvent, SessionMachine, SessionPhase,
     StationVoice, TrainingSettings, Transmission, apply_auto_level, build_session_result,
-    evaluate_auto_level, fit_settings_to_alphabet, generate_training_group, resolve_group_repeats,
-    resolve_pileup, resolve_station,
+    evaluate_auto_level, generate_training_group, resolve_group_repeats, resolve_pileup,
+    resolve_station,
 };
 use dioxus::prelude::*;
 
@@ -412,15 +412,14 @@ pub fn finish_session(app: AppState, signals: SessionSignals) {
 
     let mut counters = load_auto_counters(&settings);
     let mut next_settings = settings.clone();
-    if let Some(adj) = evaluate_auto_level(built.accuracy, &settings, &mut counters) {
-        clear_auto_counters(&adj.counters_cleared_keys);
-        apply_auto_level(&mut next_settings, &adj);
-        fit_settings_to_alphabet(&mut next_settings);
-        next_settings = next_settings.clamp();
+    if let Some(change) = evaluate_auto_level(&built, &settings, &mut counters) {
+        clear_auto_counters(&change.counters_cleared);
+        apply_auto_level(&mut next_settings, &change);
         settings_sig.set(next_settings.clone());
         save_settings(&next_settings);
-        auto_message.set(Some(adj.message.clone()));
-        toast.set(Some(adj.message));
+        let message = crate::ui::auto_level::change_message(&change);
+        auto_message.set(Some(message.clone()));
+        toast.set(Some(message));
     } else {
         save_auto_counters(&settings, counters);
         auto_message.set(None);

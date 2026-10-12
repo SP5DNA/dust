@@ -406,7 +406,7 @@ impl GroupSession {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GroupResult {
     pub sent: String,
@@ -590,6 +590,32 @@ impl SessionResult {
         }
         self.alphabet_fingerprint.is_empty()
             || self.alphabet_fingerprint == settings.alphabet_fingerprint()
+    }
+
+    /// A Koch session with nothing in it, for tests to fill in.
+    #[cfg(test)]
+    pub(crate) fn empty_for_test() -> Self {
+        Self {
+            date: "2026-09-01".into(),
+            timestamp: 0,
+            started_at: 0,
+            finished_at: 0,
+            groups: Vec::new(),
+            group_timings: Vec::new(),
+            accuracy: 0.0,
+            tally: CopyTally::default(),
+            alphabet_size: 1,
+            avg_response_ms: 0.0,
+            total_chars: 1,
+            effective_alphabet_size: 1.0,
+            score: 0.0,
+            level: 1,
+            digits_level: 1,
+            char_set_mode: CharSetMode::Koch,
+            char_wpm: 18.0,
+            effective_wpm: 18.0,
+            alphabet_fingerprint: String::new(),
+        }
     }
 }
 

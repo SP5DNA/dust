@@ -63,30 +63,23 @@ impl Rng for FastrandRng {
     }
 }
 
-pub fn weighted_random_pick(pool: &[char], weights: &[f64], rng: &mut impl Rng) -> char {
-    if pool.is_empty() {
-        return '\0';
-    }
-    if pool.len() == 1 || weights.is_empty() {
-        let idx = rng.usize_in(0, pool.len() - 1);
-        return pool.get(idx).copied().unwrap_or('\0');
-    }
-    let mut total = 0.0;
-    for i in 0..pool.len() {
-        total += weights.get(i).copied().unwrap_or(1.0);
-    }
-    if total <= 0.0 {
-        let idx = rng.usize_in(0, pool.len() - 1);
-        return pool.get(idx).copied().unwrap_or('\0');
+/// One of `pool`, each as likely as its weight; a missing weight counts as
+/// one. `None` only for an empty pool.
+pub fn weighted_random_pick(pool: &[char], weights: &[f64], rng: &mut impl Rng) -> Option<char> {
+    let last = pool.len().checked_sub(1)?;
+    let weight = |i: usize| weights.get(i).copied().unwrap_or(1.0);
+    let total: f64 = (0..pool.len()).map(weight).sum();
+    if pool.len() == 1 || weights.is_empty() || total <= 0.0 {
+        return pool.get(rng.usize_in(0, last)).copied();
     }
     let mut r = rng.f64() * total;
-    for i in 0..pool.len() {
-        r -= weights.get(i).copied().unwrap_or(1.0);
+    for (i, ch) in pool.iter().enumerate() {
+        r -= weight(i);
         if r <= 0.0 {
-            return pool.get(i).copied().unwrap_or('\0');
+            return Some(*ch);
         }
     }
-    pool.last().copied().unwrap_or('\0')
+    pool.last().copied()
 }
 
 #[cfg(test)]
@@ -94,15 +87,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn empty_pool_returns_nul() {
+    fn an_empty_pool_has_nothing_to_pick() {
         let mut rng = FastrandRng::default();
-        assert_eq!(weighted_random_pick(&[], &[], &mut rng), '\0');
+        assert_eq!(weighted_random_pick(&[], &[], &mut rng), None);
     }
 
     #[test]
     fn single_element() {
         let mut rng = FastrandRng::default();
-        assert_eq!(weighted_random_pick(&['A'], &[1.0], &mut rng), 'A');
+        assert_eq!(weighted_random_pick(&['A'], &[1.0], &mut rng), Some('A'));
     }
 
     #[test]
@@ -112,7 +105,7 @@ mod tests {
         let weights = [100.0, 0.01];
         let mut a = 0;
         for _ in 0..1000 {
-            if weighted_random_pick(&pool, &weights, &mut rng) == 'A' {
+            if weighted_random_pick(&pool, &weights, &mut rng) == Some('A') {
                 a += 1;
             }
         }
@@ -165,14 +158,20 @@ mod range_tests {
         let mut rng = Fixed(0.75);
         assert_eq!(
             weighted_random_pick(&['A', 'B', 'C', 'D'], &[0.0; 4], &mut rng),
-            'D'
+            Some('D')
         );
         // Fewer weights than characters: the missing ones count as one each,
         // so the total is positive and the walk starts at the first character.
         let mut rng = Fixed(0.0);
-        assert_eq!(weighted_random_pick(&['A', 'B'], &[0.0], &mut rng), 'A');
+        assert_eq!(
+            weighted_random_pick(&['A', 'B'], &[0.0], &mut rng),
+            Some('A')
+        );
         let mut rng = Fixed(0.99);
-        assert_eq!(weighted_random_pick(&['A', 'B'], &[0.0], &mut rng), 'B');
+        assert_eq!(
+            weighted_random_pick(&['A', 'B'], &[0.0], &mut rng),
+            Some('B')
+        );
     }
 
     /// A generator that hands back exactly 1.0 breaks the `[0, 1)` contract,
@@ -196,7 +195,7 @@ mod range_tests {
         let mut rng = Fixed(1.0);
         assert_eq!(
             weighted_random_pick(&['A', 'B'], &[1.0, 1.0], &mut rng),
-            'B'
+            Some('B')
         );
     }
 

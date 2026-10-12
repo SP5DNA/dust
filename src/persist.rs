@@ -1,6 +1,6 @@
 use cw_core::{
-    AutoAdjustMode, AutoLevelCounters, AutoLevelProgress, SessionResult, TrainingSettings,
-    auto_level_progress, fit_settings_to_alphabet,
+    AutoLevelCounters, AutoLevelProgress, CountersKey, SessionResult, TrainingSettings,
+    auto_level_progress,
 };
 
 /// How much history is kept. Sessions are a few KB each, so this stays well
@@ -16,7 +16,7 @@ pub trait Store {
     fn save_sessions(&self, sessions: &[SessionResult]);
     fn load_auto_counters(&self, settings: &TrainingSettings) -> AutoLevelCounters;
     fn save_auto_counters(&self, settings: &TrainingSettings, counters: AutoLevelCounters);
-    fn clear_auto_counters(&self, keys: &[String]);
+    fn clear_auto_counters(&self, keys: &[CountersKey]);
 }
 
 /// Read a stored history, keeping every session that still parses.
@@ -78,10 +78,8 @@ fn upgrade_receiver(stored: &mut serde_json::Map<String, serde_json::Value>) {
     }
 }
 
-fn finalize_settings(mut settings: TrainingSettings) -> TrainingSettings {
-    settings = settings.clamp();
-    fit_settings_to_alphabet(&mut settings);
-    settings
+fn finalize_settings(settings: TrainingSettings) -> TrainingSettings {
+    settings.clamp()
 }
 
 fn trim_sessions(sessions: &[SessionResult]) -> Vec<SessionResult> {
@@ -163,8 +161,7 @@ impl Store for WebStore {
         let Some(store) = storage() else {
             return AutoLevelCounters::default();
         };
-        let mode = AutoAdjustMode::from_char_set(settings.curriculum.char_set_mode);
-        let key = format!("{AUTO_PREFIX}{}", mode.storage_key_for(settings));
+        let key = format!("{AUTO_PREFIX}{}", CountersKey::of(settings).as_str());
         let Ok(Some(raw)) = store.get_item(&key) else {
             return AutoLevelCounters::default();
         };
@@ -175,19 +172,18 @@ impl Store for WebStore {
         let Some(store) = storage() else {
             return;
         };
-        let mode = AutoAdjustMode::from_char_set(settings.curriculum.char_set_mode);
-        let key = format!("{AUTO_PREFIX}{}", mode.storage_key_for(settings));
+        let key = format!("{AUTO_PREFIX}{}", CountersKey::of(settings).as_str());
         if let Ok(raw) = serde_json::to_string(&counters) {
             let _ = store.set_item(&key, &raw);
         }
     }
 
-    fn clear_auto_counters(&self, keys: &[String]) {
+    fn clear_auto_counters(&self, keys: &[CountersKey]) {
         let Some(store) = storage() else {
             return;
         };
         for key in keys {
-            let _ = store.remove_item(&format!("{AUTO_PREFIX}{key}"));
+            let _ = store.remove_item(&format!("{AUTO_PREFIX}{}", key.as_str()));
         }
     }
 }
@@ -306,24 +302,22 @@ impl Store for DesktopStore {
     }
 
     fn load_auto_counters(&self, settings: &TrainingSettings) -> AutoLevelCounters {
-        let mode = AutoAdjustMode::from_char_set(settings.curriculum.char_set_mode);
         self.load_all_counters()
-            .get(&mode.storage_key_for(settings))
+            .get(CountersKey::of(settings).as_str())
             .copied()
             .unwrap_or_default()
     }
 
     fn save_auto_counters(&self, settings: &TrainingSettings, counters: AutoLevelCounters) {
         let mut map = self.load_all_counters();
-        let mode = AutoAdjustMode::from_char_set(settings.curriculum.char_set_mode);
-        map.insert(mode.storage_key_for(settings), counters);
+        map.insert(CountersKey::of(settings).as_str().to_string(), counters);
         self.write_json("auto_adjust.json", &map);
     }
 
-    fn clear_auto_counters(&self, keys: &[String]) {
+    fn clear_auto_counters(&self, keys: &[CountersKey]) {
         let mut map = self.load_all_counters();
         for key in keys {
-            map.remove(key);
+            map.remove(key.as_str());
         }
         self.write_json("auto_adjust.json", &map);
     }
@@ -427,7 +421,7 @@ pub fn save_auto_counters(settings: &TrainingSettings, counters: AutoLevelCounte
     default_store().save_auto_counters(settings, counters)
 }
 
-pub fn clear_auto_counters(keys: &[String]) {
+pub fn clear_auto_counters(keys: &[CountersKey]) {
     default_store().clear_auto_counters(keys)
 }
 
@@ -447,7 +441,7 @@ pub mod memory {
         theme: String,
         settings: Option<TrainingSettings>,
         sessions: Vec<SessionResult>,
-        counters: BTreeMap<String, AutoLevelCounters>,
+        counters: BTreeMap<CountersKey, AutoLevelCounters>,
     }
 
     thread_local! {
@@ -488,18 +482,16 @@ pub mod memory {
         }
 
         fn load_auto_counters(&self, settings: &TrainingSettings) -> AutoLevelCounters {
-            let mode = AutoAdjustMode::from_char_set(settings.curriculum.char_set_mode);
-            let key = mode.storage_key_for(settings);
+            let key = CountersKey::of(settings);
             CONTENTS.with(|c| c.borrow().counters.get(&key).copied().unwrap_or_default())
         }
 
         fn save_auto_counters(&self, settings: &TrainingSettings, counters: AutoLevelCounters) {
-            let mode = AutoAdjustMode::from_char_set(settings.curriculum.char_set_mode);
-            let key = mode.storage_key_for(settings);
+            let key = CountersKey::of(settings);
             CONTENTS.with(|c| c.borrow_mut().counters.insert(key, counters));
         }
 
-        fn clear_auto_counters(&self, keys: &[String]) {
+        fn clear_auto_counters(&self, keys: &[CountersKey]) {
             CONTENTS.with(|c| {
                 let mut contents = c.borrow_mut();
                 for key in keys {
@@ -781,14 +773,15 @@ mod tests {
             AutoLevelCounters::default()
         );
 
-        let mode = AutoAdjustMode::from_char_set(settings.curriculum.char_set_mode);
-        store.clear_auto_counters(&[mode.storage_key_for(&settings)]);
+        store.clear_auto_counters(&[CountersKey::of(&settings)]);
         assert_eq!(
             store.load_auto_counters(&settings),
             AutoLevelCounters::default()
         );
         // Clearing a key that was never written is harmless.
-        store.clear_auto_counters(&["nothing".to_string()]);
+        let mut never = settings;
+        never.curriculum.level += 7;
+        store.clear_auto_counters(&[CountersKey::of(&never)]);
     }
 
     #[test]
@@ -917,8 +910,7 @@ mod tests {
         let counters = AutoLevelCounters { above: 2, below: 0 };
         save_auto_counters(&settings, counters);
         assert_eq!(load_auto_counters(&settings), counters);
-        let mode = AutoAdjustMode::from_char_set(settings.curriculum.char_set_mode);
-        clear_auto_counters(&[mode.storage_key_for(&settings)]);
+        clear_auto_counters(&[CountersKey::of(&settings)]);
         assert_eq!(load_auto_counters(&settings), AutoLevelCounters::default());
 
         memory::reset();

@@ -8,12 +8,48 @@ use serde::{Deserialize, Serialize};
 
 use crate::keyer::KeyerMode;
 use crate::level::LEVEL_MIN;
-use crate::morse::{DEFAULT_SLIDING_WINDOW_END, DEFAULT_SLIDING_WINDOW_START};
 
+// The range each setting is kept in, declared once: `clamp` holds the
+// settings to them and the settings screen draws its controls from them.
+
+/// Groups in one session.
+pub const NUM_GROUPS_MIN: u32 = 1;
+pub const NUM_GROUPS_MAX: u32 = 200;
+/// Characters in one group.
+pub const GROUP_SIZE_MIN: u32 = 1;
+pub const GROUP_SIZE_MAX: u32 = 20;
 /// A group is always sent at least once.
 pub const GROUP_REPEAT_MIN: u32 = 1;
 /// Upper bound for "send the group N times before the answer window opens".
 pub const GROUP_REPEAT_MAX: u32 = 8;
+/// Speeds, in words a minute: character, effective and the paddles' own.
+pub const WPM_MIN: f64 = 5.0;
+pub const WPM_MAX: f64 = 80.0;
+/// How far the word space is stretched beyond seven units.
+pub const EXTRA_WORD_SPACE_MIN: f64 = 0.1;
+pub const EXTRA_WORD_SPACE_MAX: f64 = 8.0;
+/// The longest the answer window stays open; zero leaves it open.
+pub const GROUP_TIMEOUT_MAX_SEC: f64 = 120.0;
+/// The longest pause after a group before the next one.
+pub const GROUP_PAUSE_MAX_SEC: f64 = 15.0;
+/// The side tone: where on the dial a station can be heard.
+pub const SIDE_TONE_MIN_HZ: f64 = 200.0;
+pub const SIDE_TONE_MAX_HZ: f64 = 1_200.0;
+/// A station's level, as a share of full scale.
+pub const VOLUME_MIN: f64 = 0.1;
+pub const VOLUME_MAX: f64 = 1.0;
+/// The keying envelope's rise and fall, in milliseconds.
+pub const STEEPNESS_MIN_MS: f64 = 1.0;
+pub const STEEPNESS_MAX_MS: f64 = 50.0;
+/// How fast the band fades, in fades a second.
+pub const QSB_RATE_MIN_HZ: f64 = 0.03;
+pub const QSB_RATE_MAX_HZ: f64 = 1.5;
+/// Sessions above or below the threshold before the level moves.
+pub const ADJUST_COUNT_MAX: u32 = 20;
+/// How hard the sampler leans on characters you get wrong, and on
+/// characters it has not sent yet this session.
+pub const ERROR_WEIGHT_MAX: f64 = 10.0;
+pub const COVERAGE_STRENGTH_MAX: f64 = 8.0;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -84,9 +120,12 @@ pub enum CharSetMode {
     Callsign,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// How much of what is unlocked a session draws from: all of it, or only
+/// the newest few characters.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum PracticeWindow {
+    #[default]
     All,
     Last3,
     Last5,
@@ -95,8 +134,9 @@ pub enum PracticeWindow {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct CurriculumSettings {
-    /// Progress through the current letter/custom alphabet (level 1 unlocks two characters).
-    #[serde(alias = "kochLevel", default = "defaults::level")]
+    /// Progress through the letter alphabet (level 1 unlocks two characters).
+    /// Saves from the first versions called it the Koch level.
+    #[serde(alias = "kochLevel")]
     pub level: u32,
     pub char_set_mode: CharSetMode,
     pub digits_level: u32,
@@ -105,17 +145,11 @@ pub struct CurriculumSettings {
     pub custom_set: Vec<char>,
     pub custom_sequence: Vec<char>,
     /// True when the user chose Sequence → Custom, even if the order still matches a preset.
-    #[serde(default)]
     pub sequence_is_custom: bool,
-    /// Named practice window. `None` means infer from the saved start/end (old saves).
-    #[serde(default)]
-    pub practice_window: Option<PracticeWindow>,
-    pub sliding_window_start: u32,
-    pub sliding_window_end: u32,
+    pub practice_window: PracticeWindow,
     /// Callsign structure tier, the level of the callsign character set. Its own
     /// field, the way digits have one, so switching modes never reinterprets a
     /// number that meant something else.
-    #[serde(default = "defaults::level")]
     pub callsign_level: u32,
     pub num_groups: u32,
     pub min_group_size: u32,
@@ -133,10 +167,8 @@ impl Default for CurriculumSettings {
             custom_set: Vec::new(),
             custom_sequence: Vec::new(),
             sequence_is_custom: false,
-            practice_window: Some(PracticeWindow::All),
+            practice_window: PracticeWindow::All,
             callsign_level: LEVEL_MIN,
-            sliding_window_start: DEFAULT_SLIDING_WINDOW_START,
-            sliding_window_end: DEFAULT_SLIDING_WINDOW_END,
             num_groups: 20,
             min_group_size: 3,
             max_group_size: 5,
@@ -160,30 +192,22 @@ pub struct PlaybackSettings {
     /// Seconds to sit on the last group after it is sent, so the card can be
     /// read before the next one starts. Zero is contest pace. This is not
     /// Morse spacing — repeats of the same group still use a word space.
-    #[serde(default = "defaults::group_pause_sec")]
     pub group_pause_sec: f64,
     pub lock_input_during_group_playback: bool,
     /// `[` is dit and `]` is dah on a USB keyer. Set when the paddles are wired the other way.
-    #[serde(default)]
     pub paddle_swap: bool,
     /// How the `[` / `]` paddles time elements. Older saves have no field and
     /// load as Iambic A — finish the element you were on, then stop.
-    #[serde(default)]
     pub keyer_mode: KeyerMode,
     /// Speed the paddles send at. Independent of the station's character
     /// speed, which can be a random range.
-    #[serde(default = "defaults::keyer_wpm")]
     pub keyer_wpm: f64,
     /// How far operators' fists stray from a keyer's. Zero is a band of
     /// machines, which is what this was before there was a setting.
-    #[serde(default = "defaults::fist_variation")]
     pub fist_variation: f64,
     /// Lowest number of times a group is sent before the answer window opens.
-    #[serde(default = "defaults::group_repeat")]
     pub group_repeat_min: u32,
-    #[serde(default = "defaults::group_repeat")]
     pub group_repeat_max: u32,
-    #[serde(default = "defaults::enabled")]
     pub link_group_repeat: bool,
 }
 
@@ -199,11 +223,11 @@ impl Default for PlaybackSettings {
             link_char_to_effective: true,
             extra_word_space_multiplier: 1.0,
             group_timeout: 10.0,
-            group_pause_sec: defaults::group_pause_sec(),
+            group_pause_sec: 2.0,
             lock_input_during_group_playback: true,
             paddle_swap: false,
             keyer_mode: KeyerMode::IambicA,
-            keyer_wpm: defaults::keyer_wpm(),
+            keyer_wpm: 20.0,
             fist_variation: 0.35,
             group_repeat_min: 1,
             group_repeat_max: 1,
@@ -252,33 +276,22 @@ pub struct BandSettings {
     pub link_volume: bool,
     pub steepness: f64,
     pub envelope_smoothing: f64,
-    #[serde(default = "defaults::enabled")]
     pub qsb_enabled: bool,
-    #[serde(default = "defaults::qsb_depth")]
     pub qsb_depth: f64,
-    #[serde(default = "defaults::qsb_rate_hz")]
     pub qsb_rate_hz: f64,
-    #[serde(default = "defaults::enabled")]
     pub qrn_enabled: bool,
-    #[serde(default = "defaults::qrn_level")]
     pub qrn_level: f64,
     /// The band's noise floor: the steady hiss every receiver hears through
     /// its filter. Saves from before it was a noise floor called the same
     /// switch the receiver background, and before that `qrm`.
-    #[serde(
-        default = "defaults::enabled",
-        alias = "receiverEnabled",
-        alias = "qrmEnabled"
-    )]
+    #[serde(alias = "receiverEnabled", alias = "qrmEnabled")]
     pub noise_enabled: bool,
     /// How loud the noise floor is. Deliberately not read from the old
     /// receiver-background level: that drove a different sound entirely, and
     /// its value says nothing about how much hiss someone wants.
-    #[serde(default = "defaults::noise_level")]
     pub noise_level: f64,
     /// The receiver's automatic gain control. Off is a receiver run on its
     /// RF gain, the way contesters often do.
-    #[serde(default = "defaults::enabled")]
     pub agc_enabled: bool,
     /// The receiver's selectivity: its width in hertz between its 6 dB
     /// points, the way a rig quotes a CW filter. Everything you hear goes
@@ -292,28 +305,22 @@ pub struct BandSettings {
     /// deliberately not read: almost every one of them is the old default
     /// rather than a choice, and its number meant something else, so they
     /// come back at the new default.
-    #[serde(default = "defaults::filter_width_hz")]
     pub filter_width_hz: f64,
     /// Sharp or soft shoulders on that filter, which is what sets how much it
     /// rings — or sharp with the audio peak filter behind it, ringing at the
     /// note.
-    #[serde(default)]
     pub filter_shape: FilterShape,
     /// The fewest stations that can call at once, counting the one you want.
     ///
     /// Saves written before the pile-up became a range said only "up to this
     /// many", which is this floor left at one.
-    #[serde(default = "defaults::stations_min")]
     pub stations_min: u32,
     /// The most that can call at once. With both ends at 1 there is no
     /// pile-up, which is where this starts.
-    #[serde(default = "defaults::stations_max")]
     pub stations_max: u32,
     /// How far either side of the wanted station the others can land.
-    #[serde(default = "defaults::pileup_spread_hz")]
     pub pileup_spread_hz: f64,
     /// How far below the wanted station the others sit.
-    #[serde(default = "defaults::pileup_level_db")]
     pub pileup_level_db: f64,
 }
 
@@ -333,7 +340,7 @@ impl Default for BandSettings {
             qrn_enabled: true,
             qrn_level: 0.25,
             noise_enabled: true,
-            noise_level: defaults::noise_level(),
+            noise_level: 0.5,
             agc_enabled: true,
             filter_width_hz: DEFAULT_FILTER_WIDTH_HZ,
             filter_shape: FilterShape::default(),
@@ -349,14 +356,14 @@ impl Default for BandSettings {
 #[serde(rename_all = "camelCase", default)]
 pub struct AutoLevelSettings {
     pub mixed_auto_level_next_axis: MixedAutoLevelAxis,
-    #[serde(alias = "autoAdjustKoch", default = "defaults::enabled")]
+    /// Saves from the first versions called it adjusting the Koch level.
+    #[serde(alias = "autoAdjustKoch")]
     pub auto_adjust_level: bool,
     pub auto_adjust_threshold: f64,
     pub auto_adjust_below_threshold_count: u32,
     pub auto_adjust_above_threshold_count: u32,
     pub error_weight_strength: f64,
     pub char_sampling_coverage_strength: f64,
-    #[serde(default)]
     pub char_sampling_thompson: bool,
 }
 
@@ -443,8 +450,10 @@ pub struct RangeValues {
     pub linked: bool,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", default = "TrainingSettings::default")]
+/// Everything the trainer can be set to. Read back from a save through
+/// [`save`], which also reads the older ones.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TrainingSettings {
     #[serde(flatten)]
     pub curriculum: CurriculumSettings,
@@ -456,58 +465,14 @@ pub struct TrainingSettings {
     pub auto_level: AutoLevelSettings,
 }
 
-mod alphabet;
 mod clamp;
+mod curriculum;
 mod ranges;
 mod reset;
+mod save;
 
-mod defaults {
-    pub fn enabled() -> bool {
-        true
-    }
-    pub fn group_repeat() -> u32 {
-        1
-    }
-    pub fn level() -> u32 {
-        crate::level::LEVEL_MIN
-    }
-    pub fn qsb_depth() -> f64 {
-        0.35
-    }
-    pub fn qsb_rate_hz() -> f64 {
-        0.12
-    }
-    pub fn qrn_level() -> f64 {
-        0.25
-    }
-    pub fn noise_level() -> f64 {
-        0.5
-    }
-    pub fn filter_width_hz() -> f64 {
-        super::DEFAULT_FILTER_WIDTH_HZ
-    }
-    pub fn stations_max() -> u32 {
-        super::STATIONS_MIN
-    }
-    pub fn stations_min() -> u32 {
-        super::STATIONS_MIN
-    }
-    pub fn fist_variation() -> f64 {
-        0.35
-    }
-    pub fn keyer_wpm() -> f64 {
-        20.0
-    }
-    pub fn group_pause_sec() -> f64 {
-        2.0
-    }
-    pub fn pileup_spread_hz() -> f64 {
-        350.0
-    }
-    pub fn pileup_level_db() -> f64 {
-        7.0
-    }
-}
+pub(crate) use curriculum::LETTER_LEVEL_CEILING;
+pub use curriculum::LevelAxis;
 
 #[cfg(test)]
 mod tests {
@@ -531,7 +496,7 @@ mod tests {
         assert_eq!(s.playback.effective_wpm_max, 5.0);
         assert_eq!(s.curriculum.min_group_size, 8);
         assert_eq!(s.curriculum.max_group_size, 8);
-        assert_eq!(s.curriculum.level, s.max_letter_level());
+        assert_eq!(s.level(LevelAxis::Letters), s.max_level(LevelAxis::Letters));
     }
 
     #[test]
@@ -614,48 +579,6 @@ mod tests {
     }
 
     #[test]
-    fn character_speed_drags_effective_speed_when_tied() {
-        let mut s = TrainingSettings::default();
-        s.playback.link_char_to_effective = true;
-        s.playback.link_char_wpm = false;
-        s.set_range_min(RangeSetting::CharWpm, 15.0);
-        s.set_range_max(RangeSetting::CharWpm, 28.0);
-        assert_eq!(s.range(RangeSetting::EffectiveWpm).min, 15.0);
-        assert_eq!(s.range(RangeSetting::EffectiveWpm).max, 28.0);
-
-        // Untied, effective speed is independent again.
-        s.playback.link_char_to_effective = false;
-        s.set_range_min(RangeSetting::EffectiveWpm, 9.0);
-        s.set_range_max(RangeSetting::CharWpm, 30.0);
-        assert_eq!(s.range(RangeSetting::EffectiveWpm).min, 9.0);
-    }
-
-    #[test]
-    fn the_side_tone_is_fixed_when_both_ends_match() {
-        let mut s = TrainingSettings::default();
-        assert!(!s.range(RangeSetting::SideTone).linked);
-
-        s.set_range_linked(RangeSetting::SideTone, true);
-        let range = s.range(RangeSetting::SideTone);
-        assert!(range.linked);
-        assert_eq!(range.min, range.max);
-
-        // Opening it back up spreads the bounds without leaving the band.
-        s.set_range_linked(RangeSetting::SideTone, false);
-        let range = s.range(RangeSetting::SideTone);
-        assert!(!range.linked);
-        assert_eq!(range.max - range.min, 200.0);
-        assert!(range.min >= 200.0 && range.max <= 1200.0);
-
-        // Even at the top of the band the spread stays inside it.
-        s.band.side_tone_min = 1200.0;
-        s.band.side_tone_max = 1200.0;
-        s.set_range_linked(RangeSetting::SideTone, false);
-        let range = s.range(RangeSetting::SideTone);
-        assert_eq!((range.min, range.max), (1000.0, 1200.0));
-    }
-
-    #[test]
     fn group_sizes_round_to_whole_characters() {
         let mut s = TrainingSettings::default();
         s.set_range_min(RangeSetting::GroupSize, 4.0);
@@ -684,23 +607,79 @@ mod tests {
     }
 
     #[test]
-    fn switching_mode_resets_the_practice_window() {
-        let mut s = TrainingSettings::default();
-        s.curriculum.practice_window = Some(PracticeWindow::Last3);
-        s.set_char_set_mode(CharSetMode::Digits);
-        assert_eq!(s.curriculum.char_set_mode, CharSetMode::Digits);
-        assert_eq!(s.curriculum.practice_window, Some(PracticeWindow::All));
-    }
-
-    #[test]
-    fn custom_level_clamps_to_alphabet_length() {
+    fn a_level_is_read_inside_its_alphabet() {
         let mut s = TrainingSettings::default();
         s.curriculum.char_set_mode = CharSetMode::Custom;
         s.curriculum.custom_set = vec!['A', 'B', 'C', 'D'];
         s.curriculum.level = 99;
         let s = s.clamp();
-        assert_eq!(s.curriculum.level, 3);
+        assert_eq!(s.active_level(), 3);
+        assert_eq!(s.max_active_level(), 3);
         assert_eq!(s.progress_alphabet(), vec!['A', 'B', 'C', 'D']);
+    }
+
+    /// Koch, Custom and Mixed's letters share one level, and Mixed's
+    /// alphabet is shorter by its digits. Every switch used to clamp the
+    /// stored level to the alphabet of the moment, so one look at Mixed, or
+    /// at a short custom alphabet, cost the Koch level for good.
+    #[test]
+    fn a_shorter_alphabet_does_not_cost_the_level_a_longer_one_reached() {
+        let mut s = TrainingSettings::default();
+        s.curriculum.char_set_mode = CharSetMode::Koch;
+        s.curriculum.level = 38;
+        let mut s = s.clamp();
+        s.set_char_set_mode(CharSetMode::Mixed);
+        let mut s = s.clamp();
+        assert!(s.active_level() < 38, "Mixed has fewer letters to unlock");
+        s.set_char_set_mode(CharSetMode::Koch);
+        let mut s = s.clamp();
+        assert_eq!(s.active_level(), 38);
+
+        s.curriculum.custom_set = vec!['A', 'B', 'C'];
+        s.set_char_set_mode(CharSetMode::Custom);
+        let mut s = s.clamp();
+        assert_eq!(s.active_level(), 2);
+        s.set_char_set_mode(CharSetMode::Koch);
+        assert_eq!(s.clamp().active_level(), 38);
+
+        // A sequence shortened while it is being typed keeps it too.
+        let mut s = TrainingSettings::default();
+        s.curriculum.level = 9;
+        s.curriculum.custom_sequence = vec!['K', 'M'];
+        let s = s.clamp();
+        assert_eq!(s.active_level(), 1);
+        assert_eq!(s.curriculum.level, 9);
+    }
+
+    /// Putting the character set back is clamped with it: a level stored
+    /// above what the default alphabet carries is read inside it at once,
+    /// rather than waiting for the next pass to repair it.
+    #[test]
+    fn resetting_a_section_leaves_nothing_to_repair() {
+        let mut s = TrainingSettings::default();
+        s.curriculum.char_set_mode = CharSetMode::Koch;
+        s.curriculum.custom_sequence = crate::sequences::ALPHABETICAL_SEQUENCE.to_vec();
+        s.curriculum.level = 39;
+        s.curriculum.practice_window = PracticeWindow::Last3;
+        s.reset_section(SettingsSection::CharacterSet);
+        assert_eq!(s.clone().clamp(), s);
+        assert_eq!(s.curriculum.char_set_mode, CharSetMode::Mixed);
+        assert_eq!(s.active_level(), s.max_active_level());
+        assert_eq!(s.curriculum.practice_window, PracticeWindow::All);
+    }
+
+    #[test]
+    fn clamping_cleans_the_alphabets_down_to_sendable_characters() {
+        let mut s = TrainingSettings::default();
+        s.curriculum.char_set_mode = CharSetMode::Custom;
+        // Duplicates, lower case, spaces and unsendable characters all go.
+        s.curriculum.custom_set = vec!['k', 'K', ' ', '#', 'm'];
+        s.curriculum.custom_sequence = vec!['u', 'u', 'r'];
+        s.curriculum.digits_level = 99;
+        let s = s.clamp();
+        assert_eq!(s.curriculum.custom_set, vec!['K', 'M']);
+        assert_eq!(s.curriculum.custom_sequence, vec!['U', 'R']);
+        assert_eq!(s.curriculum.digits_level, crate::morse::MAX_DIGITS_LEVEL);
     }
 
     #[test]
@@ -749,12 +728,6 @@ mod tests {
         let back: TrainingSettings = serde_json::from_value(json).unwrap();
         assert_eq!(back, TrainingSettings::default());
     }
-}
-
-#[cfg(test)]
-mod invariant_tests {
-    use super::*;
-    use crate::pool::fit_settings_to_alphabet;
 
     /// Every field pushed past both ends of its range, so one pass of `clamp`
     /// has something to do everywhere.
@@ -768,8 +741,7 @@ mod invariant_tests {
         s.curriculum.max_group_size = 0;
         s.curriculum.custom_sequence = vec!['k', 'k', ' ', 'm'];
         s.curriculum.custom_set = vec!['#'];
-        s.curriculum.sliding_window_start = 900;
-        s.curriculum.sliding_window_end = 0;
+        s.curriculum.callsign_level = 999;
         s.playback.char_wpm_min = 900.0;
         s.playback.char_wpm_max = -5.0;
         s.playback.keyer_wpm = 900.0;
@@ -794,19 +766,22 @@ mod invariant_tests {
         s.auto_level.auto_adjust_threshold = 900.0;
         s.auto_level.error_weight_strength = -1.0;
         s.auto_level.char_sampling_coverage_strength = -1.0;
+        s.auto_level.auto_adjust_above_threshold_count = 900;
+        s.auto_level.auto_adjust_below_threshold_count = 900;
         s
     }
 
-    /// The app re-runs clamp + fit on every settings change and writes the
-    /// result back into the same signal. A second pass that moved anything
-    /// would make that effect loop forever.
+    /// The app re-runs clamp on every settings change and writes the result
+    /// back into the same signal. A second pass that moved anything would
+    /// make that effect loop forever.
     #[test]
-    fn clamping_and_fitting_reach_a_fixed_point_in_one_pass() {
+    fn clamping_reaches_a_fixed_point_in_one_pass() {
         for mode in [
             CharSetMode::Koch,
             CharSetMode::Digits,
             CharSetMode::Mixed,
             CharSetMode::Custom,
+            CharSetMode::Callsign,
         ] {
             for linked in [false, true] {
                 let mut first = wild();
@@ -817,10 +792,8 @@ mod invariant_tests {
                 first.playback.link_char_to_effective = linked;
                 first.playback.link_group_repeat = linked;
                 first.band.link_volume = linked;
-                let mut first = first.clamp();
-                fit_settings_to_alphabet(&mut first);
-                let mut second = first.clone().clamp();
-                fit_settings_to_alphabet(&mut second);
+                let first = first.clamp();
+                let second = first.clone().clamp();
                 assert_eq!(first, second, "mode {mode:?}, linked {linked}");
             }
         }
@@ -865,10 +838,7 @@ mod invariant_tests {
                     assert!(number.is_finite(), "{key} came out {number} from {bad}");
                 }
                 // serde_json writes a non-finite float as null.
-                assert!(
-                    !value.is_null() || key == "practiceWindow",
-                    "{key} came out null from {bad}"
-                );
+                assert!(!value.is_null(), "{key} came out null from {bad}");
             }
             assert_eq!(s.clone().clamp(), s, "and it still settles in one pass");
         }
@@ -892,10 +862,35 @@ mod invariant_tests {
         assert_eq!(s.band.envelope_smoothing, 1.0);
         assert_eq!(s.band.noise_level, 1.0);
         assert_eq!(s.band.filter_width_hz, FILTER_WIDTH_MAX);
-        assert_eq!(s.playback.extra_word_space_multiplier, 0.1);
+        assert_eq!(s.playback.extra_word_space_multiplier, EXTRA_WORD_SPACE_MIN);
         assert_eq!(s.auto_level.auto_adjust_threshold, 100.0);
         assert_eq!(s.auto_level.error_weight_strength, 0.0);
         assert_eq!(s.auto_level.char_sampling_coverage_strength, 0.0);
+        assert_eq!(
+            s.auto_level.auto_adjust_above_threshold_count,
+            ADJUST_COUNT_MAX
+        );
+        assert_eq!(
+            s.curriculum.callsign_level,
+            crate::callsign::CALLSIGN_TIER_MAX
+        );
+
+        // The strengths have tops as well as bottoms, the ones the settings
+        // screen offers.
+        let mut strong = TrainingSettings::default();
+        strong.playback.extra_word_space_multiplier = 90.0;
+        strong.auto_level.error_weight_strength = 90.0;
+        strong.auto_level.char_sampling_coverage_strength = 90.0;
+        let strong = strong.clamp();
+        assert_eq!(
+            strong.playback.extra_word_space_multiplier,
+            EXTRA_WORD_SPACE_MAX
+        );
+        assert_eq!(strong.auto_level.error_weight_strength, ERROR_WEIGHT_MAX);
+        assert_eq!(
+            strong.auto_level.char_sampling_coverage_strength,
+            COVERAGE_STRENGTH_MAX
+        );
     }
 
     #[test]
@@ -975,7 +970,7 @@ mod invariant_tests {
 
         s.curriculum.char_set_mode = CharSetMode::Digits;
         assert_eq!(s.active_level(), 6);
-        assert_eq!(s.active_alphabet(), crate::morse::DIGITS.to_vec());
+        assert_eq!(s.alphabet(LevelAxis::Digits), crate::morse::DIGITS.to_vec());
         assert_eq!(s.max_active_level(), 9);
         s.set_active_level(3);
         assert_eq!(s.curriculum.digits_level, 3);
@@ -983,8 +978,8 @@ mod invariant_tests {
 
         s.curriculum.char_set_mode = CharSetMode::Koch;
         assert_eq!(s.active_level(), 4);
-        assert_eq!(s.max_active_level(), s.max_letter_level());
-        assert_eq!(s.active_alphabet(), s.progress_alphabet());
+        assert_eq!(s.max_active_level(), s.max_level(LevelAxis::Letters));
+        assert_eq!(s.alphabet(LevelAxis::Letters), s.progress_alphabet());
         s.set_active_level(7);
         assert_eq!(s.curriculum.level, 7);
     }
@@ -1129,10 +1124,10 @@ mod invariant_tests {
     #[test]
     fn switching_the_character_set_resets_the_practice_window() {
         let mut s = TrainingSettings::default();
-        s.curriculum.practice_window = Some(PracticeWindow::Last3);
+        s.curriculum.practice_window = PracticeWindow::Last3;
         s.set_char_set_mode(CharSetMode::Digits);
         assert_eq!(s.curriculum.char_set_mode, CharSetMode::Digits);
-        assert_eq!(s.curriculum.practice_window, Some(PracticeWindow::All));
+        assert_eq!(s.curriculum.practice_window, PracticeWindow::All);
     }
 
     /// Every save written before the pile-up became a range carries
@@ -1313,9 +1308,7 @@ mod invariant_tests {
         s.curriculum.custom_set = vec!['Q', 'Z'];
         s.curriculum.custom_sequence = vec!['Z', 'Q'];
         s.curriculum.sequence_is_custom = true;
-        s.curriculum.practice_window = Some(PracticeWindow::Last3);
-        s.curriculum.sliding_window_start = 3;
-        s.curriculum.sliding_window_end = 9;
+        s.curriculum.practice_window = PracticeWindow::Last3;
         s.playback.char_wpm_min = 31.0;
         s.playback.char_wpm_max = 33.0;
         s.playback.link_char_wpm = true;

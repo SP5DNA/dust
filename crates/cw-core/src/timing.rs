@@ -2,16 +2,20 @@
 
 use crate::morse::morse_for;
 use crate::rng::Rng;
-use crate::settings::TrainingSettings;
+use crate::settings::{EXTRA_WORD_SPACE_MAX, EXTRA_WORD_SPACE_MIN, TrainingSettings};
 
 pub const DEFAULT_TARGET_GAIN: f64 = 0.3;
 /// Envelope curve resolution. High enough that a 10 ms rise is a real curve and
 /// not a two-point straight line at the speeds the trainer sends.
 pub const ENVELOPE_SAMPLE_RATE: u32 = 1200;
-pub const EXTRA_SPACING_MULTIPLIER_MIN: f64 = 0.1;
 
-pub fn clamp_extra_spacing(value: f64) -> f64 {
-    value.max(EXTRA_SPACING_MULTIPLIER_MIN)
+/// The word-space stretch, inside its range whatever is set.
+fn clamp_extra_spacing(value: f64) -> f64 {
+    if value.is_finite() {
+        value.clamp(EXTRA_WORD_SPACE_MIN, EXTRA_WORD_SPACE_MAX)
+    } else {
+        1.0
+    }
 }
 
 /// PARIS-style dot duration in seconds from character WPM.
@@ -120,23 +124,13 @@ pub fn resolve_group_repeats(settings: &TrainingSettings, rng: &mut impl Rng) ->
 }
 
 fn resolve_volume(settings: &TrainingSettings, rng: &mut impl Rng) -> f64 {
-    let min = settings.band.volume_min.clamp(0.1, 1.0);
-    let max = settings.band.volume_max.clamp(0.1, 1.0);
-    if settings.band.link_volume || (min - max).abs() < f64::EPSILON {
-        min
-    } else {
-        rng.pick_in_range(min, max)
-    }
+    let range = settings.volume_range();
+    rng.pick_in_range(*range.start(), *range.end())
 }
 
 fn resolve_tone_hz(settings: &TrainingSettings, rng: &mut impl Rng) -> f64 {
-    let min = settings.band.side_tone_min.max(100.0);
-    let max = settings.band.side_tone_max.max(min);
-    if (min - max).abs() < f64::EPSILON {
-        min
-    } else {
-        rng.pick_in_range_inclusive_int(min, max)
-    }
+    let range = settings.side_tone_range();
+    rng.pick_in_range_inclusive_int(*range.start(), *range.end())
 }
 
 pub fn build_envelope_curve(
@@ -1067,7 +1061,8 @@ mod plan_tests {
         assert_eq!(compute_group_gap_for_wpm(20.0, 40.0, 1.0), fast);
         // Nonsense speeds do not divide by zero.
         assert!(compute_group_gap_for_wpm(0.0, 0.0, 0.0) > 0);
-        assert_eq!(clamp_extra_spacing(-1.0), EXTRA_SPACING_MULTIPLIER_MIN);
+        assert_eq!(clamp_extra_spacing(-1.0), EXTRA_WORD_SPACE_MIN);
+        assert_eq!(clamp_extra_spacing(f64::NAN), 1.0);
     }
 
     #[test]

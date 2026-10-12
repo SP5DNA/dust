@@ -1,6 +1,6 @@
 use std::rc::Rc;
 
-use cw_core::{GroupSession, SessionEvent, fit_settings_to_alphabet};
+use cw_core::{GroupSession, SessionEvent};
 use dioxus::prelude::*;
 
 use crate::persist::{load_sessions, load_settings, load_theme, save_settings, save_theme};
@@ -175,14 +175,11 @@ pub fn App() -> Element {
         if matches!(screen(), Screen::Training) {
             return;
         }
-        let mut snapshot = settings();
-        fit_settings_to_alphabet(&mut snapshot);
-        let persist = snapshot.clone().clamp();
-        if matches!(screen(), Screen::Settings) {
-            if snapshot != settings() {
-                settings.set(snapshot);
-            }
-        } else if persist != settings() {
+        // On the settings screen the live values are left as typed, so a
+        // field part-way through a number is not snapped under the cursor;
+        // what is stored is always clamped.
+        let persist = settings().clamp();
+        if !matches!(screen(), Screen::Settings) && persist != settings() {
             settings.set(persist.clone());
         }
         save_settings(&persist);
@@ -247,8 +244,7 @@ pub fn App() -> Element {
             // Starting a session first settles the alphabet, and stores the
             // result, so the session and the screen agree on what is being
             // practised before anything sounds.
-            let mut fitted = settings().clamp();
-            fit_settings_to_alphabet(&mut fitted);
+            let fitted = settings().clamp();
             if settings.peek().clone() != fitted {
                 settings.set(fitted);
             }
@@ -929,7 +925,10 @@ mod ui_tests {
             ui.click("nav-settings");
             ui.click("pill-cw-academy");
             let stored = crate::persist::load_settings();
-            assert_eq!(cw_core::sequence_preset_id(&stored), "cw-academy");
+            assert_eq!(
+                stored.sequence_choice(),
+                cw_core::SequenceChoice::Preset(cw_core::PresetId::CwAcademy)
+            );
             assert!(!stored.curriculum.sequence_is_custom);
             assert!(stored.progress_alphabet().starts_with(&['E', 'T', 'A']));
             ui.click("pill-lcwo");
@@ -949,21 +948,24 @@ mod ui_tests {
             settings.curriculum.level = 9;
             let (mut ui, _recorder) = Ui::app_with_settings(settings);
             ui.click("nav-settings");
-            for (button, window, start) in [
-                ("pill-newest-3", PracticeWindow::Last3, 8),
-                ("pill-newest-5", PracticeWindow::Last5, 6),
-                ("pill-everything", PracticeWindow::All, 1),
+            for (button, window, pool) in [
+                ("pill-newest-3", PracticeWindow::Last3, 3),
+                ("pill-newest-5", PracticeWindow::Last5, 5),
+                ("pill-everything", PracticeWindow::All, 10),
             ] {
                 ui.click(button);
                 let stored = crate::persist::load_settings();
-                assert_eq!(stored.curriculum.practice_window, Some(window));
-                assert_eq!(stored.curriculum.sliding_window_start, start);
+                assert_eq!(stored.curriculum.practice_window, window);
+                assert_eq!(cw_core::compute_char_pool(&stored).len(), pool);
             }
         });
     }
 
+    /// A sequence is shortened on its way to being retyped, a character at
+    /// a time. The level it carries is read inside it, and kept for when it
+    /// grows back.
     #[test]
-    fn shortening_the_alphabet_pulls_the_level_back_with_it() {
+    fn shortening_the_alphabet_keeps_the_level_for_when_it_grows_back() {
         run(|| async {
             let mut settings = test_settings();
             settings.curriculum.level = 9;
@@ -974,8 +976,12 @@ mod ui_tests {
             let stored = crate::persist::load_settings();
             assert_eq!(stored.curriculum.custom_sequence, vec!['K', 'M']);
             // Two characters can only carry level 1.
-            assert_eq!(stored.curriculum.level, 1);
+            assert_eq!(stored.active_level(), 1);
             assert_eq!(stored.clone().clamp(), stored);
+
+            ui.type_into("field-sequence-order", "KMURESNAPTL");
+            ui.advance(50).await;
+            assert_eq!(crate::persist::load_settings().active_level(), 9);
         });
     }
 

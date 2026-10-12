@@ -346,6 +346,7 @@ pub fn confusion_entries(sessions: &[SessionResult], limit: usize) -> Vec<Confus
 fn callsign_character_shares(
     settings: &TrainingSettings,
     state: &crate::sampling::CharSamplingState,
+    config: &crate::sampling::CharSamplingConfig,
     pool: &[char],
     rng: &mut impl crate::rng::Rng,
 ) -> BTreeMap<char, f64> {
@@ -354,7 +355,8 @@ fn callsign_character_shares(
     let mut total = 0.0;
     let mut sampling = state.clone();
     for _ in 0..DRAWS {
-        let (call, next) = crate::sampling::generate_callsign_group(settings, &sampling, rng);
+        let (call, next) =
+            crate::sampling::generate_callsign_group(settings, &sampling, config, rng);
         sampling = next;
         for ch in call.chars() {
             if let Some(count) = counts.get_mut(&ch) {
@@ -387,7 +389,7 @@ pub fn sampling_rows(settings: &TrainingSettings, sessions: &[SessionResult]) ->
     let probs = if settings.curriculum.char_set_mode == CharSetMode::Callsign {
         // Callsigns are not drawn character by character, so a per-character
         // weight would not describe them. Ask the real generator instead.
-        callsign_character_shares(settings, &state, &pool, &mut rng)
+        callsign_character_shares(settings, &state, &config, &pool, &mut rng)
     } else {
         let weights = compute_raw_sampling_weights(&pool, &state, &config, &mut rng);
         normalize_weights(&pool, &weights)
@@ -658,13 +660,15 @@ mod tests {
     }
 
     #[test]
-    fn sampling_rows_are_empty_when_the_pool_is() {
+    fn sampling_rows_follow_the_pool_it_falls_back_to() {
         let mut settings = TrainingSettings::default();
         settings.curriculum.char_set_mode = CharSetMode::Mixed;
         settings.curriculum.mixed_letters_percent = 100;
         settings.curriculum.custom_sequence = vec!['0'];
-        // A letters-only mixed pool over a digits-only sequence has nothing in it.
-        assert!(sampling_rows(&settings, &[]).is_empty());
+        // A letters-only mixed pool over a digits-only sequence sends digits.
+        let rows = sampling_rows(&settings, &[]);
+        assert!(!rows.is_empty());
+        assert!(rows.iter().all(|row| !row.is_letter));
     }
 
     #[test]

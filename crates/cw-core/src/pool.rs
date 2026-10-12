@@ -1,214 +1,101 @@
 //! Character pool selection from a leveled alphabet (Koch, digits, mixed, custom).
 
-use crate::level::{LEVEL_MIN, max_level_for_len, unlocked_prefix};
-use crate::morse::{DIGITS, is_digit};
-use crate::settings::{CharSetMode, PracticeWindow, TrainingSettings};
+use crate::level::unlocked_prefix;
+use crate::settings::{
+    CharSetMode, LevelAxis, MixedAutoLevelAxis, PracticeWindow, TrainingSettings,
+};
 
-pub fn compute_char_pool(settings: &TrainingSettings) -> Vec<char> {
-    match settings.curriculum.char_set_mode {
-        // Callsigns need every character from the first tier, so there is no
-        // prefix to unlock and no practice window to narrow: this is the pool.
-        CharSetMode::Callsign => crate::callsign::callsign_pool(settings.curriculum.callsign_level),
-        CharSetMode::Mixed => mixed_pool(settings),
-        CharSetMode::Digits => leveled_pool(
-            &settings.active_alphabet(),
-            settings.active_level(),
-            settings,
-        ),
-        CharSetMode::Custom | CharSetMode::Koch => leveled_pool(
-            &settings.progress_alphabet(),
-            settings.curriculum.level,
-            settings,
-        ),
+/// What `axis` has unlocked so far. A callsign tier is all of its
+/// characters at once: there is no prefix to unlock.
+fn unlocked(settings: &TrainingSettings, axis: LevelAxis) -> Vec<char> {
+    let alphabet = settings.alphabet(axis);
+    match axis {
+        LevelAxis::Callsign => alphabet,
+        LevelAxis::Letters | LevelAxis::Digits => unlocked_prefix(&alphabet, settings.level(axis)),
     }
 }
 
-pub fn unlocked_practice_count(settings: &TrainingSettings) -> usize {
-    match settings.curriculum.char_set_mode {
-        CharSetMode::Callsign => {
-            crate::callsign::callsign_pool(settings.curriculum.callsign_level).len()
-        }
-        CharSetMode::Digits => unlocked_prefix(DIGITS, settings.curriculum.digits_level).len(),
-        CharSetMode::Mixed => {
-            let pct = settings.curriculum.mixed_letters_percent.min(100);
-            let letters = if pct == 0 {
-                0
-            } else {
-                unlocked_prefix(&settings.progress_alphabet(), settings.curriculum.level).len()
-            };
-            let digits = if pct == 100 {
-                0
-            } else {
-                unlocked_prefix(DIGITS, settings.curriculum.digits_level).len()
-            };
-            letters.max(digits)
-        }
-        _ => unlocked_prefix(&settings.progress_alphabet(), settings.curriculum.level).len(),
+/// What each axis the mode draws from has unlocked.
+///
+/// Mixed draws from whichever of its two axes the share of letters leaves
+/// in play — unless that leaves nothing, as a sequence of only digits with
+/// letters at 100% would. Then the other axis sends: a session of silent
+/// groups is not a choice anyone made.
+fn unlocked_axes(settings: &TrainingSettings) -> Vec<Vec<char>> {
+    let mode = settings.curriculum.char_set_mode;
+    if mode != CharSetMode::Mixed {
+        return vec![unlocked(settings, mode.axis())];
+    }
+    let axes = [MixedAutoLevelAxis::Letters, MixedAutoLevelAxis::Digits].map(|axis| {
+        (
+            settings.mixed_axis_practised(axis),
+            unlocked(settings, axis.into()),
+        )
+    });
+    let practised: Vec<Vec<char>> = axes
+        .iter()
+        .filter(|(practised, chars)| *practised && !chars.is_empty())
+        .map(|(_, chars)| chars.clone())
+        .collect();
+    if practised.is_empty() {
+        axes.into_iter().map(|(_, chars)| chars).collect()
+    } else {
+        practised
     }
 }
 
-fn apply_window_range(settings: &mut TrainingSettings, window: PracticeWindow) {
-    let n = unlocked_practice_count(settings).max(1) as u32;
+/// How many of the newest `unlocked` characters `window` keeps. A window
+/// wider than what is unlocked keeps all of it.
+fn window_len(unlocked: usize, window: PracticeWindow) -> usize {
     match window {
-        PracticeWindow::All => {
-            settings.curriculum.sliding_window_start = 1;
-            settings.curriculum.sliding_window_end = n;
-        }
-        PracticeWindow::Last3 => {
-            settings.curriculum.sliding_window_start = n.saturating_sub(2).max(1);
-            settings.curriculum.sliding_window_end = n;
-        }
-        PracticeWindow::Last5 => {
-            settings.curriculum.sliding_window_start = n.saturating_sub(4).max(1);
-            settings.curriculum.sliding_window_end = n;
-        }
+        PracticeWindow::All => unlocked,
+        PracticeWindow::Last3 => unlocked.min(3),
+        PracticeWindow::Last5 => unlocked.min(5),
     }
 }
 
-/// Remember the named window and retarget start/end to the current alphabet.
-pub fn apply_practice_window(settings: &mut TrainingSettings, window: PracticeWindow) {
-    settings.curriculum.practice_window = Some(window);
-    apply_window_range(settings, resolved_practice_window(settings));
-}
-
-fn infer_practice_window(settings: &TrainingSettings) -> Option<PracticeWindow> {
-    let n = unlocked_practice_count(settings).max(1) as u32;
-    let start = settings.curriculum.sliding_window_start.max(1).min(n);
-    let end = settings.curriculum.sliding_window_end.max(1).min(n);
-    let start_idx = start.min(end);
-    let end_idx = start.max(end);
-    if start_idx == 1 && end_idx >= n {
-        Some(PracticeWindow::All)
-    } else if n >= 3 && start_idx == n.saturating_sub(2) && end_idx == n {
-        Some(PracticeWindow::Last3)
-    } else if n >= 5 && start_idx == n.saturating_sub(4) && end_idx == n {
-        Some(PracticeWindow::Last5)
-    } else {
-        None
+/// The characters a group is drawn from: what is unlocked, narrowed to the
+/// practice window — each axis by its own length, so Mixed's newest three are
+/// three letters and three digits. A callsign tier is never narrowed.
+pub fn compute_char_pool(settings: &TrainingSettings) -> Vec<char> {
+    let callsigns = settings.curriculum.char_set_mode == CharSetMode::Callsign;
+    let window = settings.curriculum.practice_window;
+    let mut pool: Vec<char> = Vec::new();
+    for chars in unlocked_axes(settings) {
+        let keep = if callsigns {
+            chars.len()
+        } else {
+            window_len(chars.len(), window)
+        };
+        for ch in &chars[chars.len() - keep..] {
+            if !pool.contains(ch) {
+                pool.push(*ch);
+            }
+        }
     }
+    pool
 }
 
-fn named_practice_window(settings: &TrainingSettings) -> PracticeWindow {
-    settings
-        .curriculum
-        .practice_window
-        .or_else(|| infer_practice_window(settings))
-        .unwrap_or(PracticeWindow::All)
+/// How many characters are unlocked, on the wider axis for Mixed: what the
+/// practice window is measured against.
+pub fn unlocked_practice_count(settings: &TrainingSettings) -> usize {
+    unlocked_axes(settings)
+        .iter()
+        .map(Vec::len)
+        .max()
+        .unwrap_or(0)
 }
 
-/// Window actually used for the current unlocked count. Last5 stays Last5 in
-/// settings even while fewer than five characters are unlocked.
-pub fn resolved_practice_window(settings: &TrainingSettings) -> PracticeWindow {
-    let n = unlocked_practice_count(settings);
-    match named_practice_window(settings) {
-        PracticeWindow::Last5 if n >= 5 => PracticeWindow::Last5,
-        PracticeWindow::Last3 if n >= 3 => PracticeWindow::Last3,
+/// The window in force: the one chosen, or everything while fewer characters
+/// are unlocked than it would keep. The choice itself stays stored, so Last5
+/// comes back by itself once five characters are in.
+pub fn current_practice_window(settings: &TrainingSettings) -> PracticeWindow {
+    let unlocked = unlocked_practice_count(settings);
+    match settings.curriculum.practice_window {
+        PracticeWindow::Last5 if unlocked >= 5 => PracticeWindow::Last5,
+        PracticeWindow::Last3 if unlocked >= 3 => PracticeWindow::Last3,
         _ => PracticeWindow::All,
     }
-}
-
-/// Cap levels to the current alphabets and retarget All/Last3/Last5.
-pub fn fit_settings_to_alphabet(settings: &mut TrainingSettings) {
-    settings.curriculum.custom_sequence =
-        TrainingSettings::unique_alphabet(&settings.curriculum.custom_sequence);
-    settings.curriculum.custom_set =
-        TrainingSettings::unique_alphabet(&settings.curriculum.custom_set);
-    settings.curriculum.level = settings
-        .curriculum
-        .level
-        .clamp(LEVEL_MIN, settings.max_letter_level());
-    settings.curriculum.digits_level = settings
-        .curriculum
-        .digits_level
-        .clamp(LEVEL_MIN, max_level_for_len(DIGITS.len()));
-    settings.curriculum.callsign_level = settings.curriculum.callsign_level.clamp(
-        crate::callsign::CALLSIGN_TIER_MIN,
-        crate::callsign::CALLSIGN_TIER_MAX,
-    );
-    if settings.curriculum.practice_window.is_none() {
-        settings.curriculum.practice_window = Some(named_practice_window(settings));
-    }
-    apply_window_range(settings, resolved_practice_window(settings));
-}
-
-pub fn current_practice_window(settings: &TrainingSettings) -> Option<PracticeWindow> {
-    Some(resolved_practice_window(settings))
-}
-
-fn window_for_len(n: usize, named: PracticeWindow) -> PracticeWindow {
-    match named {
-        PracticeWindow::Last5 if n >= 5 => PracticeWindow::Last5,
-        PracticeWindow::Last3 if n >= 3 => PracticeWindow::Last3,
-        _ => PracticeWindow::All,
-    }
-}
-
-/// Slice an unlocked prefix by All/Last3/Last5 using that slice's own length.
-fn window_unlocked(unlocked: &[char], named: PracticeWindow) -> Vec<char> {
-    let n = unlocked.len();
-    if n == 0 {
-        return Vec::new();
-    }
-    let (start, end) = match window_for_len(n, named) {
-        PracticeWindow::All => (1, n),
-        PracticeWindow::Last3 => (n.saturating_sub(2).max(1), n),
-        PracticeWindow::Last5 => (n.saturating_sub(4).max(1), n),
-    };
-    let pool = unlocked[start.saturating_sub(1)..end].to_vec();
-    if pool.len() >= 2 {
-        pool
-    } else {
-        unlocked[n.saturating_sub(2)..].to_vec()
-    }
-}
-
-fn mixed_pool(settings: &TrainingSettings) -> Vec<char> {
-    let named = named_practice_window(settings);
-    let pct = settings.curriculum.mixed_letters_percent.min(100);
-    let letters = if pct == 0 {
-        Vec::new()
-    } else {
-        window_unlocked(
-            &unlocked_prefix(&settings.progress_alphabet(), settings.curriculum.level),
-            named,
-        )
-    };
-    let digits = if pct == 100 {
-        Vec::new()
-    } else {
-        window_unlocked(
-            &unlocked_prefix(DIGITS, settings.curriculum.digits_level),
-            named,
-        )
-    };
-    let mut union = letters.clone();
-    for d in digits {
-        if !union.contains(&d) {
-            union.push(d);
-        }
-    }
-    if union.len() >= 2 {
-        union
-    } else if letters.len() >= 2 {
-        letters
-    } else {
-        union
-    }
-}
-
-fn leveled_pool(alphabet: &[char], level: u32, settings: &TrainingSettings) -> Vec<char> {
-    window_unlocked(
-        &unlocked_prefix(alphabet, level),
-        named_practice_window(settings),
-    )
-}
-
-pub fn letters_subset(pool: &[char]) -> Vec<char> {
-    pool.iter().copied().filter(|c| !is_digit(*c)).collect()
-}
-
-pub fn digits_subset(pool: &[char]) -> Vec<char> {
-    pool.iter().copied().filter(|c| is_digit(*c)).collect()
 }
 
 #[cfg(test)]
@@ -220,8 +107,6 @@ mod tests {
         let mut s = TrainingSettings::default();
         s.curriculum.char_set_mode = CharSetMode::Koch;
         s.curriculum.level = 1;
-        s.curriculum.sliding_window_start = 1;
-        s.curriculum.sliding_window_end = 41;
         let pool = compute_char_pool(&s);
         assert_eq!(pool, vec!['K', 'M']);
     }
@@ -231,8 +116,6 @@ mod tests {
         let mut s = TrainingSettings::default();
         s.curriculum.char_set_mode = CharSetMode::Digits;
         s.curriculum.digits_level = 1;
-        s.curriculum.sliding_window_start = 1;
-        s.curriculum.sliding_window_end = 10;
         let pool = compute_char_pool(&s);
         assert_eq!(pool, vec!['0', '1']);
     }
@@ -255,10 +138,10 @@ mod tests {
         let mut s = TrainingSettings::default();
         s.curriculum.char_set_mode = CharSetMode::Koch;
         s.curriculum.level = 10;
-        apply_practice_window(&mut s, PracticeWindow::Last3);
+        s.curriculum.practice_window = PracticeWindow::Last3;
         let pool = compute_char_pool(&s);
         assert_eq!(pool.len(), 3);
-        assert_eq!(current_practice_window(&s), Some(PracticeWindow::Last3));
+        assert_eq!(current_practice_window(&s), PracticeWindow::Last3);
     }
 
     #[test]
@@ -266,13 +149,13 @@ mod tests {
         let mut s = TrainingSettings::default();
         s.curriculum.char_set_mode = CharSetMode::Koch;
         s.curriculum.level = 10;
-        apply_practice_window(&mut s, PracticeWindow::Last3);
+        s.curriculum.practice_window = PracticeWindow::Last3;
         s.curriculum.level = 11;
         let newest = s.progress_alphabet()[crate::level::unlocked_count_for_level(11) - 1];
         let pool = compute_char_pool(&s);
         assert!(pool.contains(&newest));
         assert_eq!(pool.len(), 3);
-        assert_eq!(current_practice_window(&s), Some(PracticeWindow::Last3));
+        assert_eq!(current_practice_window(&s), PracticeWindow::Last3);
     }
 
     #[test]
@@ -291,8 +174,6 @@ mod tests {
         s.curriculum.char_set_mode = CharSetMode::Custom;
         s.curriculum.custom_set = vec!['Q', 'R', 'S', 'T', 'U'];
         s.curriculum.level = 1;
-        s.curriculum.sliding_window_start = 1;
-        s.curriculum.sliding_window_end = 40;
         assert_eq!(compute_char_pool(&s), vec!['Q', 'R']);
         s.curriculum.level = 3;
         assert_eq!(compute_char_pool(&s), vec!['Q', 'R', 'S', 'T']);
@@ -302,9 +183,7 @@ mod tests {
     fn digits_max_level_unlocks_all_ten() {
         let mut s = TrainingSettings::default();
         s.curriculum.char_set_mode = CharSetMode::Digits;
-        s.curriculum.digits_level = max_level_for_len(DIGITS.len());
-        s.curriculum.sliding_window_start = 1;
-        s.curriculum.sliding_window_end = 10;
+        s.curriculum.digits_level = crate::morse::MAX_DIGITS_LEVEL;
         let pool = compute_char_pool(&s);
         assert_eq!(pool.len(), 10);
         s.curriculum.digits_level = 10;
@@ -318,13 +197,13 @@ mod tests {
         let mut s = TrainingSettings::default();
         s.curriculum.char_set_mode = CharSetMode::Koch;
         s.curriculum.level = 10;
-        apply_practice_window(&mut s, PracticeWindow::Last3);
+        s.curriculum.practice_window = PracticeWindow::Last3;
         s.curriculum.char_set_mode = CharSetMode::Digits;
         s.curriculum.digits_level = 1;
-        fit_settings_to_alphabet(&mut s);
+        s = s.clamp();
         let pool = compute_char_pool(&s);
         assert_eq!(pool, vec!['0', '1']);
-        assert_eq!(current_practice_window(&s), Some(PracticeWindow::All));
+        assert_eq!(current_practice_window(&s), PracticeWindow::All);
     }
 
     #[test]
@@ -332,12 +211,12 @@ mod tests {
         let mut s = TrainingSettings::default();
         s.curriculum.char_set_mode = CharSetMode::Koch;
         s.curriculum.level = 4;
-        apply_practice_window(&mut s, PracticeWindow::Last5);
+        s.curriculum.practice_window = PracticeWindow::Last5;
         assert_eq!(unlocked_practice_count(&s), 5);
-        assert_eq!(current_practice_window(&s), Some(PracticeWindow::Last5));
+        assert_eq!(current_practice_window(&s), PracticeWindow::Last5);
         s.curriculum.level = 5;
-        fit_settings_to_alphabet(&mut s);
-        assert_eq!(current_practice_window(&s), Some(PracticeWindow::Last5));
+        s = s.clamp();
+        assert_eq!(current_practice_window(&s), PracticeWindow::Last5);
         assert_eq!(compute_char_pool(&s).len(), 5);
         let newest = s.progress_alphabet()[crate::level::unlocked_count_for_level(5) - 1];
         assert!(compute_char_pool(&s).contains(&newest));
@@ -348,10 +227,10 @@ mod tests {
         let mut s = TrainingSettings::default();
         s.curriculum.char_set_mode = CharSetMode::Koch;
         s.curriculum.level = 10;
-        apply_practice_window(&mut s, PracticeWindow::Last3);
+        s.curriculum.practice_window = PracticeWindow::Last3;
         s.curriculum.level = 11;
-        fit_settings_to_alphabet(&mut s);
-        assert_eq!(current_practice_window(&s), Some(PracticeWindow::Last3));
+        s = s.clamp();
+        assert_eq!(current_practice_window(&s), PracticeWindow::Last3);
         let newest = s.progress_alphabet()[crate::level::unlocked_count_for_level(11) - 1];
         assert!(compute_char_pool(&s).contains(&newest));
     }
@@ -360,12 +239,12 @@ mod tests {
     fn mixed_letter_pool_excludes_sequence_digits() {
         let mut s = TrainingSettings::default();
         s.curriculum.char_set_mode = CharSetMode::Koch;
-        s.curriculum.level = s.max_letter_level();
-        apply_practice_window(&mut s, PracticeWindow::All);
+        s.curriculum.level = s.max_level(LevelAxis::Letters);
+        s.curriculum.practice_window = PracticeWindow::All;
         assert!(compute_char_pool(&s).contains(&'5'));
         s.curriculum.char_set_mode = CharSetMode::Mixed;
         s.curriculum.digits_level = 1;
-        fit_settings_to_alphabet(&mut s);
+        s = s.clamp();
         let pool = compute_char_pool(&s);
         assert!(!pool.contains(&'5'));
         assert!(pool.contains(&'0'));
@@ -383,7 +262,7 @@ mod tests {
         s.curriculum.char_set_mode = CharSetMode::Custom;
         s.curriculum.custom_set = vec!['A', '*', 'B'];
         s.curriculum.level = 1;
-        apply_practice_window(&mut s, PracticeWindow::All);
+        s.curriculum.practice_window = PracticeWindow::All;
         assert_eq!(compute_char_pool(&s), vec!['A', 'B']);
     }
 
@@ -392,8 +271,8 @@ mod tests {
         let mut s = TrainingSettings::default();
         s.curriculum.char_set_mode = CharSetMode::Mixed;
         s.curriculum.level = 10;
-        s.curriculum.digits_level = max_level_for_len(DIGITS.len());
-        apply_practice_window(&mut s, PracticeWindow::Last3);
+        s.curriculum.digits_level = crate::morse::MAX_DIGITS_LEVEL;
+        s.curriculum.practice_window = PracticeWindow::Last3;
         let pool = compute_char_pool(&s);
         let letters: Vec<char> = pool
             .iter()
@@ -414,9 +293,9 @@ mod tests {
         let mut s = TrainingSettings::default();
         s.curriculum.char_set_mode = CharSetMode::Mixed;
         s.curriculum.level = 5;
-        s.curriculum.digits_level = max_level_for_len(DIGITS.len());
+        s.curriculum.digits_level = crate::morse::MAX_DIGITS_LEVEL;
         s.curriculum.mixed_letters_percent = 100;
-        apply_practice_window(&mut s, PracticeWindow::All);
+        s.curriculum.practice_window = PracticeWindow::All;
         let pool = compute_char_pool(&s);
         assert!(!pool.is_empty());
         assert!(pool.iter().all(|c| !c.is_ascii_digit()));
@@ -429,7 +308,7 @@ mod tests {
         s.curriculum.level = 10;
         s.curriculum.digits_level = 3;
         s.curriculum.mixed_letters_percent = 0;
-        apply_practice_window(&mut s, PracticeWindow::All);
+        s.curriculum.practice_window = PracticeWindow::All;
         let pool = compute_char_pool(&s);
         assert!(!pool.is_empty());
         assert!(pool.iter().all(|c| c.is_ascii_digit()));
@@ -440,19 +319,14 @@ mod tests {
         let mut s = TrainingSettings::default();
         s.curriculum.char_set_mode = CharSetMode::Mixed;
         s.curriculum.level = 1;
-        s.curriculum.digits_level = max_level_for_len(DIGITS.len());
+        s.curriculum.digits_level = crate::morse::MAX_DIGITS_LEVEL;
         s.curriculum.mixed_letters_percent = 0;
-        apply_practice_window(&mut s, PracticeWindow::Last3);
+        s.curriculum.practice_window = PracticeWindow::Last3;
         assert!(unlocked_practice_count(&s) >= 3);
-        assert_eq!(current_practice_window(&s), Some(PracticeWindow::Last3));
+        assert_eq!(current_practice_window(&s), PracticeWindow::Last3);
         let pool = compute_char_pool(&s);
         assert_eq!(pool, vec!['7', '8', '9']);
     }
-}
-
-#[cfg(test)]
-mod window_tests {
-    use super::*;
 
     fn koch(level: u32) -> TrainingSettings {
         let mut s = TrainingSettings::default();
@@ -462,66 +336,20 @@ mod window_tests {
     }
 
     #[test]
-    fn an_old_save_without_a_named_window_is_read_from_its_bounds() {
-        // Level 5 unlocks six characters.
-        let mut s = koch(5);
-        s.curriculum.practice_window = None;
-        s.curriculum.sliding_window_start = 4;
-        s.curriculum.sliding_window_end = 6;
-        assert_eq!(resolved_practice_window(&s), PracticeWindow::Last3);
-
-        s.curriculum.sliding_window_start = 2;
-        s.curriculum.sliding_window_end = 6;
-        assert_eq!(resolved_practice_window(&s), PracticeWindow::Last5);
-
-        s.curriculum.sliding_window_start = 1;
-        s.curriculum.sliding_window_end = 6;
-        assert_eq!(resolved_practice_window(&s), PracticeWindow::All);
-
-        // Bounds that match no named window fall back to everything.
-        s.curriculum.sliding_window_start = 3;
-        s.curriculum.sliding_window_end = 5;
-        assert_eq!(resolved_practice_window(&s), PracticeWindow::All);
-    }
-
-    #[test]
-    fn reversed_bounds_are_read_in_the_right_order() {
-        let mut s = koch(5);
-        s.curriculum.practice_window = None;
-        s.curriculum.sliding_window_start = 6;
-        s.curriculum.sliding_window_end = 4;
-        assert_eq!(resolved_practice_window(&s), PracticeWindow::Last3);
-    }
-
-    #[test]
     fn a_named_window_narrower_than_the_pool_relaxes_to_everything() {
         // Last5 stays stored, but only three characters are unlocked.
         let mut s = koch(2);
-        s.curriculum.practice_window = Some(PracticeWindow::Last5);
-        assert_eq!(resolved_practice_window(&s), PracticeWindow::All);
-        assert_eq!(s.curriculum.practice_window, Some(PracticeWindow::Last5));
+        s.curriculum.practice_window = PracticeWindow::Last5;
+        assert_eq!(current_practice_window(&s), PracticeWindow::All);
+        assert_eq!(s.curriculum.practice_window, PracticeWindow::Last5);
         assert_eq!(compute_char_pool(&s).len(), 3);
-    }
-
-    #[test]
-    fn applying_a_window_retargets_the_bounds() {
-        let mut s = koch(9); // ten characters
-        apply_practice_window(&mut s, PracticeWindow::Last3);
-        assert_eq!(s.curriculum.sliding_window_start, 8);
-        assert_eq!(s.curriculum.sliding_window_end, 10);
-        apply_practice_window(&mut s, PracticeWindow::Last5);
-        assert_eq!(s.curriculum.sliding_window_start, 6);
-        apply_practice_window(&mut s, PracticeWindow::All);
-        assert_eq!(s.curriculum.sliding_window_start, 1);
-        assert_eq!(s.curriculum.sliding_window_end, 10);
-        assert_eq!(current_practice_window(&s), Some(PracticeWindow::All));
     }
 
     #[test]
     fn a_window_never_leaves_fewer_than_two_characters() {
         // Level 1 unlocks exactly two; Last3 cannot cut into that.
         let mut s = koch(1);
-        s.curriculum.practice_window = Some(PracticeWindow::Last3);
+        s.curriculum.practice_window = PracticeWindow::Last3;
         assert_eq!(compute_char_pool(&s).len(), 2);
     }
 
@@ -556,23 +384,6 @@ mod window_tests {
     }
 
     #[test]
-    fn fitting_caps_levels_and_cleans_the_alphabets() {
-        let mut s = TrainingSettings::default();
-        s.curriculum.char_set_mode = CharSetMode::Custom;
-        // Duplicates, lower case, spaces and unsendable characters all go.
-        s.curriculum.custom_set = vec!['k', 'K', ' ', '#', 'm'];
-        s.curriculum.custom_sequence = vec!['u', 'u', 'r'];
-        s.curriculum.level = 99;
-        s.curriculum.digits_level = 99;
-        fit_settings_to_alphabet(&mut s);
-        assert_eq!(s.curriculum.custom_set, vec!['K', 'M']);
-        assert_eq!(s.curriculum.custom_sequence, vec!['U', 'R']);
-        assert_eq!(s.curriculum.level, 1);
-        assert_eq!(s.curriculum.digits_level, 9);
-        assert_eq!(s.curriculum.practice_window, Some(PracticeWindow::All));
-    }
-
-    #[test]
     fn an_empty_custom_set_falls_back_to_the_sequence() {
         let mut s = TrainingSettings::default();
         s.curriculum.char_set_mode = CharSetMode::Custom;
@@ -581,11 +392,45 @@ mod window_tests {
         assert_eq!(compute_char_pool(&s), vec!['K', 'M']);
     }
 
+    /// Mixed with a sequence of nothing but digits has no letters to give,
+    /// and at 100% letters it used to give no digits either: an empty pool,
+    /// and a session of silent groups.
     #[test]
-    fn letters_and_digits_split_a_pool() {
-        let pool = ['K', '1', 'M', '0'];
-        assert_eq!(letters_subset(&pool), vec!['K', 'M']);
-        assert_eq!(digits_subset(&pool), vec!['1', '0']);
-        assert!(letters_subset(&[]).is_empty());
+    fn a_share_that_leaves_nothing_in_play_falls_back_to_the_other_axis() {
+        let mut s = TrainingSettings::default();
+        s.curriculum.char_set_mode = CharSetMode::Mixed;
+        s.curriculum.custom_sequence = vec!['0', '1', '2', '3'];
+        s.curriculum.sequence_is_custom = true;
+        s.curriculum.mixed_letters_percent = 100;
+        s.curriculum.digits_level = 3;
+        let s = s.clamp();
+        assert_eq!(compute_char_pool(&s), vec!['0', '1', '2', '3']);
+        assert_eq!(unlocked_practice_count(&s), 4);
+    }
+
+    /// Whatever the settings, there is always something to send.
+    #[test]
+    fn no_setting_leaves_the_pool_empty() {
+        for mode in [
+            CharSetMode::Koch,
+            CharSetMode::Digits,
+            CharSetMode::Mixed,
+            CharSetMode::Custom,
+            CharSetMode::Callsign,
+        ] {
+            for sequence in [vec![], vec!['#', '*'], vec!['0', '1'], vec!['K']] {
+                for letters_percent in [0, 50, 100] {
+                    let mut s = TrainingSettings::default();
+                    s.curriculum.char_set_mode = mode;
+                    s.curriculum.custom_sequence = sequence.clone();
+                    s.curriculum.custom_set = sequence.clone();
+                    s.curriculum.mixed_letters_percent = letters_percent;
+                    assert!(
+                        !compute_char_pool(&s).is_empty(),
+                        "{mode:?} {sequence:?} {letters_percent}%"
+                    );
+                }
+            }
+        }
     }
 }

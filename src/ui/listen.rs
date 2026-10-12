@@ -220,7 +220,7 @@ mod tests {
         settings.curriculum.char_set_mode = mode;
         settings.curriculum.level = 3;
         settings.curriculum.digits_level = 3;
-        settings.curriculum.practice_window = Some(PracticeWindow::All);
+        settings.curriculum.practice_window = PracticeWindow::All;
         settings
     }
 

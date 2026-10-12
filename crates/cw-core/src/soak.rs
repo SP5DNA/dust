@@ -33,8 +33,6 @@ fn wild_settings(rng: &mut FastrandRng) -> TrainingSettings {
     s.curriculum.min_group_size = rng.usize_in(0, 20) as u32;
     s.curriculum.max_group_size = rng.usize_in(0, 20) as u32;
     s.curriculum.link_group_size = rng.f64() < 0.5;
-    s.curriculum.sliding_window_start = rng.usize_in(0, 60) as u32;
-    s.curriculum.sliding_window_end = rng.usize_in(0, 60) as u32;
     s.curriculum.char_set_mode = match rng.usize_in(0, 4) {
         0 => CharSetMode::Koch,
         1 => CharSetMode::Digits,
@@ -172,7 +170,7 @@ fn check_clamped(s: &TrainingSettings, seed: u64) {
         b.pileup_level_db
     );
     assert!(
-        !once.active_alphabet().is_empty(),
+        !compute_char_pool(&once).is_empty(),
         "a session can always be started (seed {seed})"
     );
 }
@@ -531,7 +529,7 @@ fn settings_survive_storage_and_older_saves() {
             "seed {seed}: an older save did not settle"
         );
         assert!(
-            !repaired.active_alphabet().is_empty(),
+            !compute_char_pool(&repaired).is_empty(),
             "seed {seed}: a save without {dropped:?} left nothing to practise"
         );
     }
@@ -552,15 +550,17 @@ fn auto_levelling_never_walks_the_settings_out_of_range() {
         let mut counters = AutoLevelCounters::default();
 
         for round in 0..30 {
-            let accuracy = rng.pick_in_range(0.0, 1.0);
-            if let Some(result) = evaluate_auto_level(accuracy, &settings, &mut counters) {
-                assert!(
-                    result.delta == 1 || result.delta == -1,
-                    "seed {seed} round {round}: a level moved by {}",
-                    result.delta
+            let mut session = crate::session::SessionResult::empty_for_test();
+            session.accuracy = rng.pick_in_range(0.0, 1.0);
+            session.groups = vec![Default::default(); rng.usize_in(0, 40)];
+            if let Some(change) = evaluate_auto_level(&session, &settings, &mut counters) {
+                assert_eq!(
+                    change.from.abs_diff(change.to),
+                    1,
+                    "seed {seed} round {round}: a level moved by more than one"
                 );
-                assert!(result.next_level >= LEVEL_MIN, "seed {seed} round {round}");
-                apply_auto_level(&mut settings, &result);
+                assert!(change.to >= LEVEL_MIN, "seed {seed} round {round}");
+                apply_auto_level(&mut settings, &change);
             }
             assert_eq!(
                 settings.clone().clamp(),

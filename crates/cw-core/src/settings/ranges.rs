@@ -1,10 +1,13 @@
-use super::{RangeSetting, RangeValues, STATIONS_MAX, STATIONS_MIN, TrainingSettings};
+use std::ops::RangeInclusive;
+
+use super::{
+    RangeSetting, RangeValues, SIDE_TONE_MAX_HZ, SIDE_TONE_MIN_HZ, STATIONS_MAX, STATIONS_MIN,
+    TrainingSettings, VOLUME_MAX, VOLUME_MIN,
+};
 
 /// How far apart the side tone bounds are pushed when a fixed pitch is opened
 /// back up into a range.
 const SIDE_TONE_SPREAD_HZ: f64 = 200.0;
-const SIDE_TONE_MIN_HZ: f64 = 200.0;
-const SIDE_TONE_MAX_HZ: f64 = 1200.0;
 
 impl TrainingSettings {
     pub fn range(&self, which: RangeSetting) -> RangeValues {
@@ -148,10 +151,30 @@ impl TrainingSettings {
         }
     }
 
+    /// The pitches a station can be on, inside the dial whatever is set: a
+    /// preview can run on settings the screen is still being typed into.
+    pub fn side_tone_range(&self) -> RangeInclusive<f64> {
+        let min = finite_within(self.band.side_tone_min, SIDE_TONE_MIN_HZ, SIDE_TONE_MAX_HZ);
+        let max = finite_within(self.band.side_tone_max, min, SIDE_TONE_MAX_HZ);
+        min..=max
+    }
+
+    /// The levels a station can come in at, inside full scale whatever is
+    /// set, and a single level when the range is linked.
+    pub fn volume_range(&self) -> RangeInclusive<f64> {
+        let min = finite_within(self.band.volume_min, VOLUME_MIN, VOLUME_MAX);
+        let max = if self.band.link_volume {
+            min
+        } else {
+            finite_within(self.band.volume_max, min, VOLUME_MAX)
+        };
+        min..=max
+    }
+
+    /// The middle of the side-tone range: where the receiver is tuned.
     pub fn side_tone_center(&self) -> f64 {
-        let min = self.band.side_tone_min.max(100.0);
-        let max = self.band.side_tone_max.max(min);
-        min + (max - min) / 2.0
+        let range = self.side_tone_range();
+        range.start() + (range.end() - range.start()) / 2.0
     }
 
     /// Everything the background layers are built from. Two settings with
@@ -176,5 +199,14 @@ impl TrainingSettings {
             band.filter_width_hz,
             band.filter_shape,
         )
+    }
+}
+
+/// `value` held to `low..=high`, or `low` when it is not a number at all.
+fn finite_within(value: f64, low: f64, high: f64) -> f64 {
+    if value.is_finite() {
+        value.clamp(low, high.max(low))
+    } else {
+        low
     }
 }

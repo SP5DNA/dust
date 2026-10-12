@@ -1,7 +1,41 @@
-use cw_core::AutoLevelProgress;
+use cw_core::{AutoLevelChange, AutoLevelProgress, LevelAxis, MixedAutoLevelAxis};
 use dioxus::prelude::*;
 
 use crate::ui::widgets::Icon;
+
+/// What to tell the user when a session moved their level.
+pub fn change_message(change: &AutoLevelChange) -> String {
+    let verb = if change.raised() {
+        "increased"
+    } else {
+        "decreased"
+    };
+    let evidence = format!(
+        "accuracy {}%, threshold {}%, {} sessions {}",
+        change.accuracy_pct.round(),
+        change.threshold_pct,
+        change.sessions,
+        if change.raised() { "above" } else { "below" },
+    );
+    let Some(next) = change.next_mixed_axis else {
+        let label = if change.axis == LevelAxis::Callsign {
+            "Callsign tier"
+        } else {
+            "Level"
+        };
+        return format!("{label} {verb} to {} ({evidence})", change.to);
+    };
+    let (axis, level) = if change.axis == LevelAxis::Digits {
+        ("digit", format!("digits {}", change.to))
+    } else {
+        ("letter", format!("alphabet {}", change.to))
+    };
+    let next = match next {
+        MixedAutoLevelAxis::Letters => "letter",
+        MixedAutoLevelAxis::Digits => "digit",
+    };
+    format!("Mixed {axis} level {verb} — {level} (next: {next}, {evidence})")
+}
 
 #[component]
 pub fn AutoLevelCard(progress: AutoLevelProgress) -> Element {
@@ -17,12 +51,8 @@ pub fn AutoLevelCard(progress: AutoLevelProgress) -> Element {
     };
     let mixed = if progress.alternating_mixed {
         match progress.next_mixed_axis {
-            Some(cw_core::MixedAutoLevelAxis::Letters) => {
-                "Alternating letters/digits — next: Letters"
-            }
-            Some(cw_core::MixedAutoLevelAxis::Digits) => {
-                "Alternating letters/digits — next: Digits"
-            }
+            Some(MixedAutoLevelAxis::Letters) => "Alternating letters/digits — next: Letters",
+            Some(MixedAutoLevelAxis::Digits) => "Alternating letters/digits — next: Digits",
             None => "Alternates letter/digit level",
         }
     } else {
@@ -71,5 +101,51 @@ pub fn AutoLevelCard(progress: AutoLevelProgress) -> Element {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cw_core::{CharSetMode, CountersKey, SessionResult, TrainingSettings, evaluate_auto_level};
+
+    fn change(settings: &TrainingSettings, accuracy: f64) -> AutoLevelChange {
+        let result = SessionResult {
+            accuracy,
+            groups: vec![Default::default(); 20],
+            ..crate::testing::stored_session("2026-09-01", &[("KM", "KM")])
+        };
+        evaluate_auto_level(&result, settings, &mut Default::default()).expect("a change")
+    }
+
+    #[test]
+    fn the_message_names_the_level_and_the_evidence() {
+        let mut koch = TrainingSettings::default();
+        koch.curriculum.char_set_mode = CharSetMode::Koch;
+        koch.curriculum.level = 4;
+        koch.auto_level.auto_adjust_above_threshold_count = 1;
+        assert_eq!(
+            change_message(&change(&koch, 0.95)),
+            "Level increased to 5 (accuracy 95%, threshold 90%, 1 sessions above)"
+        );
+
+        let mut callsigns = koch.clone();
+        callsigns.curriculum.char_set_mode = CharSetMode::Callsign;
+        callsigns.curriculum.callsign_level = 3;
+        assert!(
+            change_message(&change(&callsigns, 0.2)).starts_with("Callsign tier decreased to 2")
+        );
+
+        let mut mixed = koch;
+        mixed.curriculum.char_set_mode = CharSetMode::Mixed;
+        let message = change_message(&change(&mixed, 1.0));
+        assert!(
+            message.starts_with("Mixed letter level increased — alphabet 5 (next: digit"),
+            "{message}"
+        );
+        assert_ne!(
+            CountersKey::of(&mixed),
+            change(&mixed, 1.0).counters_cleared[1]
+        );
     }
 }

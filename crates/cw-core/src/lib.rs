@@ -29,7 +29,7 @@ pub mod timing;
 
 pub use alignment::{AlignmentPair, CopyTally, LetterAccuracy, align_group};
 pub use auto_level::{
-    AutoAdjustMode, AutoLevelCounters, AutoLevelProgress, AutoLevelResult, apply_auto_level,
+    AutoLevelChange, AutoLevelCounters, AutoLevelProgress, CountersKey, apply_auto_level,
     auto_level_progress, evaluate_auto_level,
 };
 pub use callsign::{
@@ -46,30 +46,22 @@ pub use machine::{
     AUTO_CONFIRM_DELAY_MS, SessionEffect, SessionEvent, SessionMachine, SessionPhase,
 };
 pub use morse::{
-    DEFAULT_SLIDING_WINDOW_END, DEFAULT_SLIDING_WINDOW_START, KOCH_LEVEL_MAX, KOCH_LEVEL_MIN,
-    LCWO_SEQUENCE, MAX_DIGITS_LEVEL, decode_morse_pattern, digits_unlocked_count,
-    is_morse_code_prefix, morse_for,
+    LCWO_SEQUENCE, MAX_DIGITS_LEVEL, decode_morse_pattern, is_morse_code_prefix, morse_for,
 };
-pub use pool::{
-    apply_practice_window, compute_char_pool, current_practice_window, fit_settings_to_alphabet,
-    unlocked_practice_count,
-};
+pub use pool::{compute_char_pool, current_practice_window, unlocked_practice_count};
 pub use rng::{FastrandRng, Rng, weighted_random_pick};
 pub use sampling::{
-    CharSamplingState, create_initial_sampling_state, generate_callsign_group,
-    generate_training_group, update_sampling_state_from_answer,
+    CharSamplingState, create_initial_sampling_state, generate_training_group,
+    update_sampling_state_from_answer,
 };
-pub use sequences::{
-    SEQUENCE_PRESETS, SequencePreset, apply_custom_sequence, apply_sequence_preset, preset_by_id,
-    preset_id_for, sequence_preset_id,
-};
+pub use sequences::{PresetId, SEQUENCE_PRESETS, SequenceChoice, SequencePreset};
 pub use session::{
     Group, GroupResult, GroupSession, RuntimeStatus, SessionId, SessionResult, SessionSummary,
     SessionTiming, SessionView, answer_length_matches, build_session_result,
 };
 pub use settings::{
     AutoLevelSettings, BandSettings, CharSetMode, CurriculumSettings, DEFAULT_FILTER_WIDTH_HZ,
-    FILTER_WIDTH_MAX, FILTER_WIDTH_MIN, FilterShape, GROUP_REPEAT_MAX, GROUP_REPEAT_MIN,
+    FILTER_WIDTH_MAX, FILTER_WIDTH_MIN, FilterShape, GROUP_REPEAT_MAX, GROUP_REPEAT_MIN, LevelAxis,
     MixedAutoLevelAxis, PILEUP_LEVEL_MAX_DB, PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX,
     PILEUP_SPREAD_MIN, PlaybackSettings, PracticeWindow, RangeSetting, RangeValues, STATIONS_MAX,
     STATIONS_MIN, SettingsSection, TrainingSettings,

@@ -4,9 +4,9 @@ use std::collections::BTreeMap;
 
 use crate::alignment::align_group;
 use crate::callsign::generate_callsign;
-use crate::pool::{compute_char_pool, digits_subset, letters_subset};
+use crate::pool::compute_char_pool;
 use crate::rng::{Rng, weighted_random_pick};
-use crate::settings::{CharSetMode, TrainingSettings};
+use crate::settings::{CharSetMode, LevelAxis, TrainingSettings};
 
 pub const CHAR_SAMPLING_PRIOR_ALPHA: f64 = 1.0;
 pub const CHAR_SAMPLING_PRIOR_BETA: f64 = 1.0;
@@ -233,10 +233,11 @@ pub fn normalize_weights(pool: &[char], weights: &BTreeMap<char, f64>) -> BTreeM
     out
 }
 
-fn pick_from_pool(pool: &[char], weights: &BTreeMap<char, f64>, rng: &mut impl Rng) -> char {
-    if pool.is_empty() {
-        return '\0';
-    }
+fn pick_from_pool(
+    pool: &[char],
+    weights: &BTreeMap<char, f64>,
+    rng: &mut impl Rng,
+) -> Option<char> {
     let weight_list: Vec<f64> = pool
         .iter()
         .map(|c| weights.get(c).copied().unwrap_or(1.0))
@@ -251,38 +252,22 @@ pub fn sample_training_group(
     config: &CharSamplingConfig,
     rng: &mut impl Rng,
 ) -> (String, CharSamplingState) {
-    if pool.is_empty() || group_size == 0 {
-        return (String::new(), state.clone());
-    }
     let raw_weights = compute_raw_sampling_weights(pool, state, config, rng);
-    let letters = letters_subset(pool);
-    let digits = digits_subset(pool);
-    let use_mixed_split =
-        config.char_set_mode == CharSetMode::Mixed && !letters.is_empty() && !digits.is_empty();
-    let mixed_letters_pct = (config.mixed_letters_percent.min(100) as f64) / 100.0;
+    // Mixed draws each character from the letters or the digits by the
+    // share asked for — when the pool holds both to draw from.
+    let (letters, digits): (Vec<char>, Vec<char>) = pool.iter().partition(|c| !c.is_ascii_digit());
+    let split =
+        (config.char_set_mode == CharSetMode::Mixed && !letters.is_empty() && !digits.is_empty())
+            .then(|| f64::from(config.mixed_letters_percent.min(100)) / 100.0);
 
-    let mut group = String::new();
+    let mut group = String::with_capacity(group_size);
     for _ in 0..group_size {
-        let ch = if use_mixed_split {
-            let pick_letters = rng.f64() < mixed_letters_pct;
-            let subset = if pick_letters { &letters } else { &digits };
-            let fallback = if subset.is_empty() {
-                pool
-            } else {
-                subset.as_slice()
-            };
-            pick_from_pool(fallback, &raw_weights, rng)
-        } else {
-            pick_from_pool(pool, &raw_weights, rng)
+        let from = match split {
+            Some(letters_share) if rng.f64() < letters_share => &letters,
+            Some(_) => &digits,
+            None => pool,
         };
-        if ch != '\0' {
-            group.push(ch);
-        }
-    }
-    if group.is_empty() {
-        for ch in pool.iter().copied().take(group_size.max(1)) {
-            group.push(ch);
-        }
+        group.extend(pick_from_pool(from, &raw_weights, rng));
     }
 
     let mut session_sample_counts = state.session_sample_counts.clone();
@@ -347,15 +332,15 @@ const CALLSIGN_CANDIDATES: usize = 6;
 /// group sampler uses, so the error-weight and coverage settings mean exactly
 /// what they mean everywhere else. With both turned off every weight is equal,
 /// the first candidate wins, and the draw is plainly random.
-pub fn generate_callsign_group(
+pub(crate) fn generate_callsign_group(
     settings: &TrainingSettings,
     state: &CharSamplingState,
+    config: &CharSamplingConfig,
     rng: &mut impl Rng,
 ) -> (String, CharSamplingState) {
-    let tier = settings.curriculum.callsign_level;
+    let tier = settings.level(LevelAxis::Callsign);
     let pool = compute_char_pool(settings);
-    let config = config_from_settings(settings);
-    let weights = compute_raw_sampling_weights(&pool, state, &config, rng);
+    let weights = compute_raw_sampling_weights(&pool, state, config, rng);
     let appetite = |call: &str| {
         let mut total = 0.0;
         let mut count = 0.0;
@@ -397,18 +382,16 @@ pub fn generate_training_group(
 ) -> (String, CharSamplingState) {
     // A callsign is a group like any other once it exists — it is only built
     // differently. This is the single place the two modes part company.
+    let config = config_from_settings(settings);
     if settings.curriculum.char_set_mode == CharSetMode::Callsign {
-        return generate_callsign_group(settings, state, rng);
+        return generate_callsign_group(settings, state, &config, rng);
     }
     let pool = compute_char_pool(settings);
-    let span = settings
-        .curriculum
-        .max_group_size
-        .saturating_sub(settings.curriculum.min_group_size)
-        + 1;
-    let group_size = settings.curriculum.min_group_size as usize
-        + rng.usize_in(0, span.saturating_sub(1) as usize);
-    let config = config_from_settings(settings);
+    // At least one character: a group of none is a silent send nobody can
+    // answer, and only settings that were never clamped could ask for it.
+    let shortest = settings.curriculum.min_group_size.max(1) as usize;
+    let longest = (settings.curriculum.max_group_size as usize).max(shortest);
+    let group_size = rng.usize_in(shortest, longest);
     sample_training_group(&pool, group_size, state, &config, rng)
 }
 
@@ -738,6 +721,19 @@ mod edge_tests {
         assert!(!chars.next().unwrap().is_ascii_digit());
         assert!(chars.next().unwrap().is_ascii_digit());
         assert_eq!(next.session_sample_counts.values().sum::<u32>(), 2);
+    }
+
+    /// Settings nobody clamped can ask for groups of no characters at all;
+    /// a group still has one.
+    #[test]
+    fn a_group_is_never_empty() {
+        let mut settings = TrainingSettings::default();
+        settings.curriculum.min_group_size = 0;
+        settings.curriculum.max_group_size = 0;
+        let mut rng = FastrandRng(5);
+        let (group, _) =
+            generate_training_group(&settings, &CharSamplingState::default(), &mut rng);
+        assert_eq!(group.chars().count(), 1);
     }
 
     #[test]

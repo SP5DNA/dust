@@ -5,7 +5,9 @@ impl TrainingSettings {
     /// of your progress, alone.
     ///
     /// Values come from `Self::default()` rather than being written out again
-    /// here, so a changed default reaches the reset button on its own.
+    /// here, so a changed default reaches the reset button on its own. What
+    /// comes back is clamped, so a section put back against the others —
+    /// the character set under a level, say — is never left half valid.
     pub fn reset_section(&mut self, which: SettingsSection) {
         let d = Self::default();
         match which {
@@ -47,8 +49,6 @@ impl TrainingSettings {
                 self.curriculum.custom_sequence = d.curriculum.custom_sequence.clone();
                 self.curriculum.sequence_is_custom = d.curriculum.sequence_is_custom;
                 self.curriculum.practice_window = d.curriculum.practice_window;
-                self.curriculum.sliding_window_start = d.curriculum.sliding_window_start;
-                self.curriculum.sliding_window_end = d.curriculum.sliding_window_end;
             }
             SettingsSection::ToneAndVolume => {
                 self.band.side_tone_min = d.band.side_tone_min;
@@ -90,5 +90,6 @@ impl TrainingSettings {
                 self.auto_level.char_sampling_thompson = d.auto_level.char_sampling_thompson;
             }
         }
+        *self = std::mem::take(self).clamp();
     }
 }

@@ -10,19 +10,9 @@ pub const LCWO_SEQUENCE: &[char] = &[
     '6', '0', 'X',
 ];
 
-pub use crate::level::{
-    LEVEL_MIN as KOCH_LEVEL_MIN, unlocked_count_for_level as unlocked_char_count_for_level,
-};
-/// Final level of the built-in LCWO curriculum (`LCWO_SEQUENCE.len() - 1`).
-pub const KOCH_LEVEL_MAX: u32 = (LCWO_SEQUENCE.len() as u32).saturating_sub(1);
-pub const DEFAULT_SLIDING_WINDOW_START: u32 = 1;
-pub const DEFAULT_SLIDING_WINDOW_END: u32 = LCWO_SEQUENCE.len() as u32;
-pub const SLIDING_WINDOW_INDEX_MAX: u32 = LCWO_SEQUENCE.len() as u32;
-
 pub const DIGITS: &[char] = &['0', '1', '2', '3', '4', '5', '6', '7', '8', '9'];
 /// Highest digits level: level 1 unlocks two digits, so 10 digits → level 9.
 pub const MAX_DIGITS_LEVEL: u32 = crate::level::max_level_for_len(DIGITS.len());
-pub const MIN_DIGITS_LEVEL: u32 = crate::level::LEVEL_MIN;
 
 const MORSE_PAIRS: &[(char, &str)] = &[
     ('A', ".-"),
@@ -96,28 +86,17 @@ pub fn is_morse_code_prefix(pattern: &str) -> bool {
         .any(|(_, code)| code.starts_with(pattern))
 }
 
-pub fn is_digit(ch: char) -> bool {
-    ch.is_ascii_digit()
-}
-
-pub fn is_scored_char(ch: char) -> bool {
+pub(crate) fn is_scored_char(ch: char) -> bool {
     morse_for(ch).is_some()
 }
 
-/// Digits unlocked at digits level L (level 1 → digits 0–1).
-pub fn digits_unlocked_count(level: u32) -> usize {
-    crate::level::unlocked_prefix(DIGITS, level).len()
-}
+/// How many characters have a Morse code at all: the longest any alphabet
+/// can be.
+pub(crate) const MORSE_CHARACTERS: usize = MORSE_PAIRS.len();
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn koch_level_one_unlocks_k_and_m() {
-        assert_eq!(unlocked_char_count_for_level(1), 2);
-        assert_eq!(&LCWO_SEQUENCE[..2], &['K', 'M']);
-    }
 
     #[test]
     fn morse_round_trip_letters() {
@@ -128,34 +107,13 @@ mod tests {
     }
 
     #[test]
-    fn prefix_check() {
-        assert!(is_morse_code_prefix(""));
-        assert!(is_morse_code_prefix(".-"));
-        assert!(!is_morse_code_prefix("......-"));
-    }
-}
-
-#[cfg(test)]
-mod table_tests {
-    use super::*;
-
-    #[test]
-    fn digits_unlock_two_at_a_time() {
-        assert_eq!(digits_unlocked_count(0), 2);
-        assert_eq!(digits_unlocked_count(1), 2);
-        assert_eq!(digits_unlocked_count(5), 6);
-        assert_eq!(digits_unlocked_count(MAX_DIGITS_LEVEL), DIGITS.len());
-        assert_eq!(digits_unlocked_count(99), DIGITS.len());
-        assert_eq!(MAX_DIGITS_LEVEL, 9);
-        assert_eq!(MIN_DIGITS_LEVEL, 1);
-    }
-
-    #[test]
     fn a_prefix_of_a_real_code_is_a_prefix() {
         assert!(is_morse_code_prefix(""));
         assert!(is_morse_code_prefix("-"));
         assert!(is_morse_code_prefix("-.-"));
+        assert!(is_morse_code_prefix(".-"));
         assert!(!is_morse_code_prefix("......."));
+        assert!(!is_morse_code_prefix("......-"));
     }
 
     #[test]
@@ -164,7 +122,6 @@ mod table_tests {
             assert_eq!(morse_for(*ch), Some(*code));
             assert_eq!(decode_morse_pattern(code), Some(*ch));
             assert!(is_scored_char(*ch));
-            assert_eq!(is_digit(*ch), ch.is_ascii_digit());
         }
         assert_eq!(morse_for('k'), morse_for('K'));
         assert_eq!(morse_for('#'), None);
@@ -174,14 +131,11 @@ mod table_tests {
 
     #[test]
     fn the_lcwo_curriculum_is_consistent() {
-        assert_eq!(KOCH_LEVEL_MIN, 1);
-        assert_eq!(KOCH_LEVEL_MAX as usize, LCWO_SEQUENCE.len() - 1);
-        assert_eq!(DEFAULT_SLIDING_WINDOW_START, 1);
-        assert_eq!(DEFAULT_SLIDING_WINDOW_END as usize, LCWO_SEQUENCE.len());
-        assert_eq!(SLIDING_WINDOW_INDEX_MAX, DEFAULT_SLIDING_WINDOW_END);
-        assert_eq!(unlocked_char_count_for_level(1), 2);
+        assert_eq!(&LCWO_SEQUENCE[..2], &['K', 'M']);
         for ch in LCWO_SEQUENCE {
             assert!(morse_for(*ch).is_some(), "{ch:?} has no code");
         }
+        assert!(LCWO_SEQUENCE.len() <= MORSE_CHARACTERS);
+        assert_eq!(MAX_DIGITS_LEVEL, 9);
     }
 }

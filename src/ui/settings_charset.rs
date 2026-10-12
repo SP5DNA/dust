@@ -1,8 +1,7 @@
 use cw_core::{
     CALLSIGN_TIER_MAX, CharSetMode, MAX_DIGITS_LEVEL, PracticeWindow, SEQUENCE_PRESETS,
-    SettingsSection, TrainingSettings, apply_custom_sequence, apply_practice_window,
-    apply_sequence_preset, current_practice_window, fit_settings_to_alphabet, sequence_preset_id,
-    tier_examples, unlocked_practice_count,
+    SequenceChoice, SettingsSection, TrainingSettings, current_practice_window, tier_examples,
+    unlocked_practice_count,
 };
 use dioxus::prelude::*;
 
@@ -13,7 +12,7 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
     let s = settings();
     let seq = s.sequence();
     let level_max = s.max_active_level();
-    let preset = sequence_preset_id(&s);
+    let choice = s.sequence_choice();
     let unlocked = unlocked_practice_count(&s);
     let window = current_practice_window(&s);
     let pool = cw_core::compute_char_pool(&s);
@@ -59,11 +58,7 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
                     Seg {
                         label: label.to_string(),
                         active: s.curriculum.char_set_mode == mode,
-                        onclick: move |_| {
-                            let w = &mut *settings.write();
-                            w.set_char_set_mode(mode);
-                            fit_settings_to_alphabet(w);
-                        },
+                        onclick: move |_| settings.write().set_char_set_mode(mode),
                     }
                 }
             }
@@ -72,31 +67,21 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
                 div { class: "mode-pills",
                     for preset_def in SEQUENCE_PRESETS.iter() {
                         {
-                            let id = preset_def.id;
-                            let active = preset == id;
+                            let preset = SequenceChoice::Preset(preset_def.id);
+                            let active = choice == preset;
                             rsx! {
                                 ModePill {
                                     label: preset_def.name.to_string(),
                                     active,
-                                    onclick: move |_| {
-                                        let w = &mut *settings.write();
-                                        apply_sequence_preset(w, id);
-                                        fit_settings_to_alphabet(w);
-                                        *w = w.clone().clamp();
-                                    }
+                                    onclick: move |_| settings.write().choose_sequence(preset),
                                 }
                             }
                         }
                     }
                     ModePill {
                         label: "Custom".to_string(),
-                        active: preset == "custom",
-                        onclick: move |_| {
-                            let w = &mut *settings.write();
-                            apply_custom_sequence(w);
-                            fit_settings_to_alphabet(w);
-                            *w = w.clone().clamp();
-                        }
+                        active: choice == SequenceChoice::Custom,
+                        onclick: move |_| settings.write().choose_sequence(SequenceChoice::Custom),
                     }
                 }
                 div { class: "field",
@@ -110,7 +95,6 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
                             let typed: Vec<char> = e.value().chars().collect();
                             w.curriculum.custom_sequence = TrainingSettings::unique_alphabet(&typed);
                             w.curriculum.sequence_is_custom = !w.curriculum.custom_sequence.is_empty();
-                            fit_settings_to_alphabet(w);
                         }
                     }
                 }
@@ -128,9 +112,7 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
                     max: level_max as f64,
                     step: 1.0,
                     onchange: move |v| {
-                        let w = &mut *settings.write();
-                        w.set_active_level(v as u32);
-                        fit_settings_to_alphabet(w);
+                        settings.write().set_active_level(v as u32);
                     }
                 }
                 if s.curriculum.char_set_mode == CharSetMode::Mixed {
@@ -142,9 +124,7 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
                         max: MAX_DIGITS_LEVEL as f64,
                         step: 1.0,
                         onchange: move |v| {
-                            let w = &mut *settings.write();
-                            w.curriculum.digits_level = v as u32;
-                            fit_settings_to_alphabet(w);
+                            settings.write().curriculum.digits_level = v as u32;
                         }
                     }
                 }
@@ -158,9 +138,7 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
                     step: 5.0,
                     unit: "%".to_string(),
                     onchange: move |v| {
-                        let w = &mut *settings.write();
-                        w.curriculum.mixed_letters_percent = v as u32;
-                        fit_settings_to_alphabet(w);
+                        settings.write().curriculum.mixed_letters_percent = v as u32;
                     },
                 }
             }
@@ -176,7 +154,6 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
                             w.curriculum.custom_set = TrainingSettings::unique_alphabet(
                                 &e.value().chars().collect::<Vec<_>>(),
                             );
-                            fit_settings_to_alphabet(w);
                         }
                     }
                 }
@@ -187,21 +164,21 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
             div { class: "mode-pills",
                 ModePill {
                     label: "Everything".to_string(),
-                    active: window == Some(PracticeWindow::All),
-                    onclick: move |_| apply_practice_window(&mut settings.write(), PracticeWindow::All),
+                    active: window == PracticeWindow::All,
+                    onclick: move |_| settings.write().curriculum.practice_window = PracticeWindow::All,
                 }
                 if unlocked >= 3 {
                     ModePill {
                         label: "Newest 3".to_string(),
-                        active: window == Some(PracticeWindow::Last3),
-                        onclick: move |_| apply_practice_window(&mut settings.write(), PracticeWindow::Last3),
+                        active: window == PracticeWindow::Last3,
+                        onclick: move |_| settings.write().curriculum.practice_window = PracticeWindow::Last3,
                     }
                 }
                 if unlocked >= 5 {
                     ModePill {
                         label: "Newest 5".to_string(),
-                        active: window == Some(PracticeWindow::Last5),
-                        onclick: move |_| apply_practice_window(&mut settings.write(), PracticeWindow::Last5),
+                        active: window == PracticeWindow::Last5,
+                        onclick: move |_| settings.write().curriculum.practice_window = PracticeWindow::Last5,
                     }
                 }
             }
