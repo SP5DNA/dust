@@ -12,8 +12,8 @@ use super::calibration::{noise_level, qrn_level};
 use super::memo::Exact;
 use crate::settings::{BandSettings, FilterShape, STATIONS_MIN};
 
-/// Everything the band is built from. Two settings with the same key make
-/// the same band, so a player rebuilds its band only when this changes.
+/// Everything the band is built from. Two settings with the same key sound
+/// the same, so a player rebuilds its band only when this changes.
 ///
 /// Levels are as heard: a layer switched off is the same band whatever its
 /// level control says.
