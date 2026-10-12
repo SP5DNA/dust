@@ -10,7 +10,7 @@ use std::rc::Rc;
 
 use cw_core::PlaybackPlan;
 
-use crate::time::{POLL_MS, sleep_ms};
+use crate::time::{POLL_MS, mono_ms, sleep_ms};
 
 /// How long a send may overrun its own duration before it is called stalled.
 /// Long enough to cover a slow device start and a throttled timer, short
@@ -98,13 +98,13 @@ pub fn next_wait_step(
     WaitStep::KeepWaiting
 }
 
-/// What one poll interval costs the stall budget.
+/// What `elapsed_ms` between two polls costs the stall budget.
 ///
 /// Time spent suspended is free. Charging it would only defer the same bug:
 /// the budget would run out while the page was hidden and the send would fail
 /// the instant it came back, with the audio running again.
-pub fn stall_charge(flags: WaitFlags, poll_ms: u32) -> u32 {
-    if flags.suspended { 0 } else { poll_ms }
+pub fn stall_charge(flags: WaitFlags, elapsed_ms: u32) -> u32 {
+    if flags.suspended { 0 } else { elapsed_ms }
 }
 
 /// The most of a delay between the audio clock and the ear that is believed.
@@ -184,6 +184,7 @@ impl PlaybackWait {
     pub async fn wait(self) -> PlaybackOutcome {
         let duration_ms = self.duration_ms();
         let mut waited = 0u32;
+        let mut polled_at = mono_ms();
         loop {
             let flags = self.signal.poll();
             match next_wait_step(flags, waited, duration_ms, STALL_GRACE_MS) {
@@ -191,7 +192,13 @@ impl PlaybackWait {
                 WaitStep::KeepWaiting => {}
             }
             sleep_ms(POLL_MS).await;
-            waited = waited.saturating_add(stall_charge(flags, POLL_MS));
+            // The time that really passed, not the time asked for: a timer
+            // runs late, and a budget of requested ticks would run long with
+            // it.
+            let now = mono_ms();
+            let elapsed = u32::try_from(now.saturating_sub(polled_at)).unwrap_or(u32::MAX);
+            polled_at = now;
+            waited = waited.saturating_add(stall_charge(flags, elapsed));
         }
     }
 }
