@@ -8,7 +8,7 @@ mod state;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{BufferSize, FromSample, SampleFormat, SizedSample};
@@ -24,6 +24,18 @@ use state::{PlayerState, ToneSignal};
 /// that reports more is reporting nonsense, and a send would wait for it.
 const MAX_LATENCY_SEC: f64 = 0.5;
 
+/// How long after a device refused to open before a paddle squeeze or a
+/// slider move tries it again. Opening probes the device and tries four
+/// buffer sizes on the UI thread; a send, which reports the failure, always
+/// tries.
+const REOPEN_AFTER: Duration = Duration::from_secs(1);
+
+/// How long a stream that keeps reporting errors after it broke is made to
+/// wait before reporting the next. Some hosts' workers retry a dead device
+/// in a tight loop, calling back with an error each time round; this keeps
+/// that loop from taking a core and the log with it.
+const ERROR_BACKOFF: Duration = Duration::from_millis(20);
+
 pub struct MorsePlayer {
     state: PlayerState,
     /// Band and Morse, mixed. The UI swaps bands and sends in under its lock;
@@ -37,6 +49,8 @@ pub struct MorsePlayer {
     /// When the player opened. Fading is read off this clock so it keeps
     /// running between groups instead of restarting with every send.
     opened_at: Instant,
+    /// When the device last refused to open.
+    refused_at: Option<Instant>,
 }
 
 /// An output stream, and its own word that it broke: unplugged headphones, a
@@ -51,9 +65,15 @@ struct OpenStream {
 /// the ringer switch and interrupted by anything else on the device. Claiming
 /// the playback category before the first stream opens is what makes the Morse
 /// audible — cpal does not do it, and there is no equivalent on other platforms.
+///
+/// Mixed with others: a player is made as soon as the settings screen opens,
+/// to warm the paddle's sidetone, and the playback category on its own stops
+/// whatever else is playing — the listener's music, for opening a screen.
 #[cfg(target_os = "ios")]
 fn claim_audio_session() {
-    use objc2_avf_audio::{AVAudioSession, AVAudioSessionCategoryPlayback};
+    use objc2_avf_audio::{
+        AVAudioSession, AVAudioSessionCategoryOptions, AVAudioSessionCategoryPlayback,
+    };
 
     // Safety: both calls are plain messages to the process-wide shared session,
     // and every failure is reported through the returned NSError rather than a
@@ -61,27 +81,33 @@ fn claim_audio_session() {
     unsafe {
         let session = AVAudioSession::sharedInstance();
         if let Some(playback) = AVAudioSessionCategoryPlayback {
-            let _ = session.setCategory_error(playback);
+            let _ = session.setCategory_withOptions_error(
+                playback,
+                AVAudioSessionCategoryOptions::MixWithOthers,
+            );
         }
         let _ = session.setActive_error(true);
     }
 }
 
 impl MorsePlayer {
+    /// A player on the default output, with its stream opened now so the
+    /// first squeeze of the paddle is not a stream start. A device that
+    /// refuses to open gets another chance on first use; no device at all is
+    /// an error.
     pub fn new() -> Result<Self, String> {
         #[cfg(target_os = "ios")]
         claim_audio_session();
-        let (_, supported) = default_output()?;
+        let (device, supported) = default_output()?;
         let mut player = Self {
             state: PlayerState::new(),
             mixer: Arc::new(Mutex::new(Mixer::new(supported.sample_rate().0))),
             sidetone: Arc::new(SidetoneControl::new()),
             stream: None,
             opened_at: Instant::now(),
+            refused_at: None,
         };
-        // Opened now so the first squeeze of the paddle is not a stream start,
-        // but a device that refuses here gets another chance on first use.
-        if let Err(err) = player.ensure_output() {
+        if let Err(err) = player.open(&device, &supported) {
             eprintln!("audio output: {err}");
         }
         Ok(player)
@@ -121,7 +147,31 @@ impl MorsePlayer {
         if self.stream.is_some() {
             return Ok(());
         }
-        let (device, supported) = default_output()?;
+        let (device, supported) = default_output().inspect_err(|_| self.note_refusal())?;
+        self.open(&device, &supported)
+    }
+
+    /// [`MorsePlayer::ensure_output`], unless the device refused a moment
+    /// ago: a squeeze of the paddle or a slider being dragged would otherwise
+    /// probe it again on every event.
+    fn ensure_output_unless_refused(&mut self) {
+        if self
+            .refused_at
+            .is_some_and(|at| at.elapsed() < REOPEN_AFTER)
+        {
+            return;
+        }
+        if let Err(err) = self.ensure_output() {
+            eprintln!("audio output: {err}");
+        }
+    }
+
+    /// Open the stream on `device`.
+    fn open(
+        &mut self,
+        device: &cpal::Device,
+        supported: &cpal::SupportedStreamConfig,
+    ) -> Result<(), String> {
         let rate = supported.sample_rate().0;
         if rate != self.mixer().sample_rate() {
             // A different device, or the same one reconfigured. Everything is
@@ -130,13 +180,15 @@ impl MorsePlayer {
             self.with_mixer(|mixer, swept| mixer.clear(rate, swept));
             self.state.forget_band();
         }
-        self.stream = Some(open_stream(
-            &device,
-            &supported,
-            &self.mixer,
-            &self.sidetone,
-        )?);
+        let open = open_stream(device, supported, &self.mixer, &self.sidetone)
+            .inspect_err(|_| self.note_refusal())?;
+        self.stream = Some(open);
+        self.refused_at = None;
         Ok(())
+    }
+
+    fn note_refusal(&mut self) {
+        self.refused_at = Some(Instant::now());
     }
 }
 
@@ -145,9 +197,7 @@ impl MorseBackend for MorsePlayer {
     /// before the band is built at the old one.
     fn apply_band(&mut self, settings: &TrainingSettings) {
         // A stream that will not open is reported by the next send.
-        if let Err(err) = self.ensure_output() {
-            eprintln!("audio output: {err}");
-        }
+        self.ensure_output_unless_refused();
         if !self.state.band_needs_rebuild(settings) {
             return;
         }
@@ -207,9 +257,7 @@ impl MorseBackend for MorsePlayer {
 
     fn set_live_tone(&mut self, on: bool, frequency_hz: f64, gain: f64) {
         self.sidetone.set(ToneRequest::new(on, frequency_hz, gain));
-        if let Err(err) = self.ensure_output() {
-            eprintln!("audio output: {err}");
-        }
+        self.ensure_output_unless_refused();
     }
 }
 
@@ -261,8 +309,13 @@ where
                 }
             },
             move |err| {
-                eprintln!("audio stream error: {err}");
-                failed.store(true, Ordering::Release);
+                // The first error is the one worth reading; the stream is
+                // reopened on the next use whatever the rest say.
+                if failed.swap(true, Ordering::AcqRel) {
+                    std::thread::sleep(ERROR_BACKOFF);
+                } else {
+                    eprintln!("audio stream error: {err}");
+                }
             },
             None,
         )
