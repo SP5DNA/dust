@@ -90,7 +90,7 @@ pub fn start_session(app: &AppState, signals: SessionSignals) {
         mut runtime,
         mut settings,
         sessions,
-        mut toast,
+        toasts,
         mut preview,
         ..
     } = signals;
@@ -104,7 +104,7 @@ pub fn start_session(app: &AppState, signals: SessionSignals) {
     let lease = match app.player.claim(&fitted) {
         Ok(lease) => lease,
         Err(err) => {
-            toast.set(Some(err.to_string()));
+            toasts.show(err.to_string());
             return;
         }
     };
@@ -195,7 +195,7 @@ fn play(app: &AppState, signals: SessionSignals, lease: &Lease, index: usize, te
         return;
     };
     let (app, lease) = (app.clone(), lease.clone());
-    let mut toast = signals.toast;
+    let toasts = signals.toasts;
     spawn(async move {
         let event = match lease.send(&transmission, &settings).await {
             Ok(sent) => SessionEvent::PlaybackEnded {
@@ -206,7 +206,7 @@ fn play(app: &AppState, signals: SessionSignals, lease: &Lease, index: usize, te
             },
             Err(AudioError::Cancelled) => SessionEvent::PlaybackStopped { index },
             Err(failure) => {
-                toast.set(Some(failure.to_string()));
+                toasts.show(failure.to_string());
                 SessionEvent::PlaybackStopped { index }
             }
         };
@@ -239,7 +239,7 @@ fn finish_session(app: &AppState, signals: SessionSignals) {
         mut auto_message,
         mut sessions,
         settings: mut settings_sig,
-        mut toast,
+        toasts,
         ..
     } = signals;
     let Some(live) = app.session.borrow_mut().take() else {
@@ -260,7 +260,7 @@ fn finish_session(app: &AppState, signals: SessionSignals) {
         save_settings(&next_settings);
         let message = crate::ui::auto_level::change_message(&change);
         auto_message.set(Some(message.clone()));
-        toast.set(Some(message));
+        toasts.show(message);
     } else {
         save_auto_counters(&settings, counters);
         auto_message.set(None);

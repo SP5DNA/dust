@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use cw_core::{GroupSession, SessionResult, TrainingSettings};
 use dioxus::prelude::*;
@@ -19,9 +20,55 @@ pub struct SessionSignals {
     pub auto_message: Signal<Option<String>>,
     pub sessions: Signal<Vec<SessionResult>>,
     pub settings: Signal<TrainingSettings>,
-    pub toast: Signal<Option<String>>,
+    pub toasts: Toasts,
     /// Whatever is playing outside a session.
     pub preview: Signal<Preview>,
+}
+
+/// How long a message stays up.
+pub const TOAST_MS: u32 = 4_000;
+
+/// A message at the foot of the screen.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Toast {
+    pub text: String,
+    /// Which raise this was. The same words raised twice are two toasts,
+    /// each up for its own full time.
+    serial: u64,
+}
+
+/// Where messages are raised and shown: one at a time, the newest in place
+/// of whatever was up.
+#[derive(Clone, Copy, PartialEq)]
+pub struct Toasts(Signal<Option<Toast>>);
+
+impl Toasts {
+    /// Messages for the scope this is made in.
+    pub fn new() -> Self {
+        Self(Signal::new(None))
+    }
+
+    pub fn show(self, text: impl Into<String>) {
+        static RAISED: AtomicU64 = AtomicU64::new(0);
+        let mut shown = self.0;
+        shown.set(Some(Toast {
+            text: text.into(),
+            serial: RAISED.fetch_add(1, Ordering::Relaxed),
+        }));
+    }
+
+    /// The message up now. Read from a component, it subscribes it.
+    pub fn current(self) -> Option<Toast> {
+        self.0.cloned()
+    }
+
+    /// Take `toast` down, unless a newer one has taken its place.
+    pub fn dismiss(self, toast: &Toast) {
+        let mut shown = self.0;
+        if shown.peek().as_ref() == Some(toast) {
+            shown.set(None);
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

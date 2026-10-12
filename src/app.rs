@@ -7,7 +7,7 @@ use crate::persist::{load_sessions, load_settings, load_theme, save_settings, sa
 use crate::playback::{self, Preview, start_preview};
 use crate::routes::{AppCallbacks, ViewState, app_routes};
 use crate::session_runtime::{send_event, session_running, start_session};
-use crate::state::{AppState, Screen, SessionSignals};
+use crate::state::{AppState, Screen, SessionSignals, TOAST_MS, Toasts};
 use crate::theme::Theme;
 use crate::time::{seed_rng, sleep_ms};
 use crate::ui::paddle::use_paddle_keys;
@@ -95,7 +95,7 @@ pub fn App() -> Element {
     let runtime = use_signal(|| None::<GroupSession>);
     let result = use_signal(|| None::<cw_core::SessionResult>);
     let auto_message = use_signal(|| None::<String>);
-    let toast = use_signal(|| None::<String>);
+    let toasts = use_hook(Toasts::new);
     let mut preview = use_signal(Preview::default);
     let mut stream_heard = use_signal(Vec::<String>::new);
     let mut theme = use_signal(|| Theme::from_key(&load_theme()));
@@ -111,7 +111,7 @@ pub fn App() -> Element {
         auto_message,
         sessions,
         settings,
-        toast,
+        toasts,
         preview,
     };
 
@@ -137,13 +137,10 @@ pub fn App() -> Element {
     });
 
     use_effect(move || {
-        if let Some(message) = toast() {
-            let mut toast = toast;
+        if let Some(shown) = toasts.current() {
             spawn(async move {
-                sleep_ms(4000).await;
-                if toast.peek().as_deref() == Some(message.as_str()) {
-                    toast.set(None);
-                }
+                sleep_ms(TOAST_MS).await;
+                toasts.dismiss(&shown);
             });
         }
     });
@@ -345,9 +342,9 @@ pub fn App() -> Element {
                     }
                 }
             }
-            if let Some(message) = toast() {
+            if let Some(toast) = toasts.current() {
                 div { class: if show_nav { "toast-dock has-nav" } else { "toast-dock" },
-                    div { class: "toast", "{message}" }
+                    div { class: "toast", "{toast.text}" }
                 }
             }
         }
@@ -1169,6 +1166,29 @@ mod ui_tests {
                 "the band preview still shows as running: {}",
                 ui.html()
             );
+        });
+    }
+
+    /// The same message twice is shown for its full time the second time
+    /// too. The first one's timer used to clear the second a second in.
+    #[test]
+    fn a_toast_raised_again_stays_for_its_full_time() {
+        run(|| async {
+            let (mut ui, recorder) = Ui::app_with_settings(test_settings());
+            recorder.set(crate::audio::fake::Behaviour::RefuseToStart);
+            ui.click("nav-settings");
+            ui.click("chip-dit");
+            assert!(ui.run_until(5_000, |ui| ui.has("class=\"toast\"")).await);
+            ui.advance(3_000).await;
+            ui.click("chip-dit");
+            assert!(ui.run_until(5_000, |ui| !ui.has("test-chip playing")).await);
+            assert!(ui.has("class=\"toast\""));
+            ui.advance(1_500).await;
+            assert!(
+                ui.has("class=\"toast\""),
+                "the second toast was cleared by the first one's timer"
+            );
+            assert!(ui.run_until(4_000, |ui| !ui.has("class=\"toast\"")).await);
         });
     }
 

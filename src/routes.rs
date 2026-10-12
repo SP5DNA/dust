@@ -54,7 +54,7 @@ pub fn app_routes(
         auto_message,
         sessions,
         settings,
-        toast: _,
+        toasts: _,
         preview: _,
     } = signals;
     let ViewState {
@@ -222,7 +222,7 @@ mod tests {
             auto_message: use_signal(|| None),
             sessions: use_signal(Vec::new),
             settings: use_signal(test_settings),
-            toast: use_signal(|| None),
+            toasts: use_hook(crate::state::Toasts::new),
             preview: use_signal(Default::default),
         };
         let app = use_hook(|| Rc::new(AppState::new()));

@@ -79,7 +79,7 @@ pub fn start_preview<F>(
     }
     let SessionSignals {
         mut preview,
-        mut toast,
+        toasts,
         settings,
         ..
     } = signals;
@@ -90,7 +90,7 @@ pub fn start_preview<F>(
             // The claim ended whatever was playing, whether or not it could
             // open the player for this.
             preview.set(Preview::Idle);
-            toast.set(Some(err.to_string()));
+            toasts.show(err.to_string());
             return;
         }
     };
@@ -100,7 +100,7 @@ pub fn start_preview<F>(
         if let Err(err) = playing.await
             && err != AudioError::Cancelled
         {
-            toast.set(Some(err.to_string()));
+            toasts.show(err.to_string());
         }
         if lease.release() {
             preview.set(Preview::Idle);

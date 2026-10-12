@@ -21,7 +21,7 @@ use crate::audio::fake::{Behaviour, Call, Recorder};
 use crate::playback::Preview;
 use crate::player::Lease;
 use crate::session_runtime::{send_event, start_session};
-use crate::state::{AppState, Screen, SessionSignals};
+use crate::state::{AppState, Screen, SessionSignals, Toasts};
 use crate::time::POLL_MS;
 use crate::ui::widgets::DISCLOSURE;
 
@@ -42,7 +42,7 @@ pub struct Harness {
     pub runtime: Signal<Option<GroupSession>>,
     pub result: Signal<Option<SessionResult>>,
     pub auto_message: Signal<Option<String>>,
-    pub toast: Signal<Option<String>>,
+    pub toasts: Toasts,
     pub preview: Signal<Preview>,
 }
 
@@ -126,7 +126,7 @@ impl Harness {
         let dom = VirtualDom::new(|| rsx! {});
         let recorder = Recorder::new();
         let app = AppState::with_backend(recorder.factory());
-        let (settings, sessions, screen, runtime, result, auto_message, toast, preview) = dom
+        let (settings, sessions, screen, runtime, result, auto_message, toasts, preview) = dom
             .in_scope(ScopeId::ROOT, || {
                 (
                     Signal::new(settings),
@@ -135,7 +135,7 @@ impl Harness {
                     Signal::new(None),
                     Signal::new(None),
                     Signal::new(None),
-                    Signal::new(None),
+                    Toasts::new(),
                     Signal::new(Preview::Idle),
                 )
             });
@@ -149,7 +149,7 @@ impl Harness {
             runtime,
             result,
             auto_message,
-            toast,
+            toasts,
             preview,
         }
     }
@@ -163,7 +163,7 @@ impl Harness {
             auto_message: self.auto_message,
             sessions: self.sessions,
             settings: self.settings,
-            toast: self.toast,
+            toasts: self.toasts,
             preview: self.preview,
         }
     }
@@ -240,7 +240,7 @@ impl Harness {
     }
 
     pub fn toast(&self) -> Option<String> {
-        self.toast.peek().clone()
+        self.toasts.current().map(|toast| toast.text)
     }
 
     pub fn calls(&self) -> Vec<Call> {
