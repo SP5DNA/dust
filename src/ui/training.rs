@@ -1,11 +1,9 @@
-use cw_core::{KeyerMode, Paddle, PaddleKeyer, answer_length_matches, paddle_from_bracket};
+use cw_core::{KeyerMode, answer_length_matches};
 use dioxus::prelude::*;
 
 use crate::time::sleep_ms;
 use crate::ui::focus::focus_group_input;
-use crate::ui::paddle::{
-    TrainingPaddleSink, bracket_from_key, bump_epoch, capture_dom_paddles, paddle_down, paddle_up,
-};
+use crate::ui::paddle::PaddleKeys;
 use crate::ui::widgets::{Icon, ProgressHeader, control_id, html_bool};
 
 /// Incomplete answers wait this long before the session sees them. Short
@@ -14,6 +12,12 @@ use crate::ui::widgets::{Icon, ProgressHeader, control_id, html_bool};
 const INPUT_COMMIT_DEBOUNCE_MS: u32 = 48;
 
 const _: () = assert!(INPUT_COMMIT_DEBOUNCE_MS < cw_core::AUTO_CONFIRM_DELAY_MS);
+
+fn bump_epoch(mut epoch: Signal<u64>) -> u64 {
+    let next = epoch.peek().saturating_add(1);
+    epoch.set(next);
+    next
+}
 
 /// The progress header, kept out of the view that updates on every key.
 #[component]
@@ -137,9 +141,6 @@ fn GroupCard(
     on_change: EventHandler<(usize, String)>,
     on_confirm: EventHandler<usize>,
     on_focus: EventHandler<usize>,
-    #[props(default)] paddle_swap: bool,
-    #[props(default)] on_paddle_down: EventHandler<Paddle>,
-    #[props(default)] on_paddle_up: EventHandler<Paddle>,
 ) -> Element {
     let mut committed = committed;
     let mut committed_at = committed_at;
@@ -226,18 +227,9 @@ fn GroupCard(
                         on_change,
                     );
                 },
+                // `[` and `]` are paddles: the app's root keys them and keeps
+                // them out of the box.
                 onkeydown: move |e| {
-                    if let Some(ch) = bracket_from_key(&e) {
-                        e.prevent_default();
-                        if e.is_auto_repeating() {
-                            return;
-                        }
-                        if capture_dom_paddles()
-                            && let Some(paddle) = paddle_from_bracket(ch, paddle_swap) {
-                                on_paddle_down.call(paddle);
-                            }
-                        return;
-                    }
                     if closed {
                         e.prevent_default();
                         return;
@@ -253,15 +245,6 @@ fn GroupCard(
                         on_confirm.call(idx);
                     }
                 },
-                onkeyup: move |e| {
-                    if let Some(ch) = bracket_from_key(&e) {
-                        e.prevent_default();
-                        if capture_dom_paddles()
-                            && let Some(paddle) = paddle_from_bracket(ch, paddle_swap) {
-                                on_paddle_up.call(paddle);
-                            }
-                    }
-                }
             }
             if is_confirmed {
                 div { style: "margin-top: 0.5rem;",
@@ -296,22 +279,14 @@ pub fn TrainingView(
     on_focus: EventHandler<usize>,
     on_submit: EventHandler<()>,
     on_stop: EventHandler<()>,
-    #[props(default)] paddle_swap: bool,
     #[props(default)] keyer_mode: KeyerMode,
-    #[props(default)] dit_ms: u64,
-    #[props(default)] on_tone: EventHandler<bool>,
 ) -> Element {
-    let dit_ms = if dit_ms == 0 { 60 } else { dit_ms };
     let send_index = (repeat_done + 1).min(repeat_total.max(1));
     let mut draft = use_signal(String::new);
     let mut draft_at = use_signal(|| usize::MAX);
     let mut committed = use_signal(String::new);
     let mut committed_at = use_signal(|| usize::MAX);
     let debounce_gen = use_signal(|| 0u64);
-    let mut keyer = use_signal(|| PaddleKeyer::with_mode(keyer_mode));
-    let mut keying = use_signal(|| false);
-    let paddle_gen = use_signal(|| 0u64);
-    let training_sink = use_hook(try_consume_context::<TrainingPaddleSink>);
     let current_done = confirmed.get(current).copied().unwrap_or(false);
     let can_paddle = !playing && !locked && !current_done;
     let sent_now = groups.get(current).cloned().unwrap_or_default();
@@ -324,15 +299,25 @@ pub fn TrainingView(
             focus_group_input(focused);
         }
     }));
-    use_effect(use_reactive!(|keyer_mode| {
-        keyer.write().set_mode(keyer_mode);
-    }));
+    // The paddles key into the box that is open, and only while it is.
+    let keys = use_context::<PaddleKeys>();
+    keys.use_answer_box(can_paddle, move |ch: char| {
+        push_keyed_char(
+            ch,
+            current,
+            &sent_now,
+            draft,
+            draft_at,
+            committed,
+            committed_at,
+            debounce_gen,
+            on_change,
+        );
+    });
     use_effect(use_reactive!(|current, current_done| {
         let _ = bump_epoch(debounce_gen);
-        let _ = bump_epoch(paddle_gen);
-        keyer.write().reset();
-        keying.set(false);
-        on_tone.call(false);
+        // A letter half keyed for one group is not the next one's.
+        keys.stop();
         if current_done {
             draft.set(String::new());
             draft_at.set(usize::MAX);
@@ -341,61 +326,6 @@ pub fn TrainingView(
     }));
     use_drop(move || {
         let _ = bump_epoch(debounce_gen);
-        let _ = bump_epoch(paddle_gen);
-        on_tone.call(false);
-    });
-    let on_paddle_down = EventHandler::new({
-        let sent_now = sent_now.clone();
-        move |paddle: Paddle| {
-            let on_letter = EventHandler::new({
-                let sent_now = sent_now.clone();
-                move |ch: char| {
-                    push_keyed_char(
-                        ch,
-                        current,
-                        &sent_now,
-                        draft,
-                        draft_at,
-                        committed,
-                        committed_at,
-                        debounce_gen,
-                        on_change,
-                    );
-                }
-            });
-            paddle_down(
-                paddle, dit_ms, can_paddle, keyer, keying, paddle_gen, on_tone, on_letter,
-            );
-        }
-    });
-    let on_paddle_up = EventHandler::new({
-        move |paddle: Paddle| {
-            let on_letter = EventHandler::new({
-                let sent_now = sent_now.clone();
-                move |ch: char| {
-                    push_keyed_char(
-                        ch,
-                        current,
-                        &sent_now,
-                        draft,
-                        draft_at,
-                        committed,
-                        committed_at,
-                        debounce_gen,
-                        on_change,
-                    );
-                }
-            });
-            paddle_up(paddle, dit_ms, keyer, paddle_gen, on_tone, on_letter);
-        }
-    });
-    if let Some(sink) = &training_sink {
-        sink.bind(on_paddle_down, on_paddle_up);
-    }
-    use_drop(move || {
-        if let Some(sink) = training_sink {
-            sink.clear();
-        }
     });
     let hint = if playing && locked {
         "Listen — the answer box unlocks when the group finishes."
@@ -474,9 +404,6 @@ pub fn TrainingView(
                                     on_change,
                                     on_confirm,
                                     on_focus,
-                                    paddle_swap,
-                                    on_paddle_down,
-                                    on_paddle_up,
                                 }
                             }
                         }

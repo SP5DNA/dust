@@ -5,9 +5,11 @@
 //! phone. Effects and audio never run: the virtual DOM is rebuilt in place and
 //! thrown away.
 
+use std::rc::Rc;
+
 use cw_core::{
-    AutoLevelProgress, CharSetMode, GroupResult, KeyerMode, MixedAutoLevelAxis, Paddle,
-    PaddleKeyer, SessionResult, SessionTiming, StreakState, StreakStatus, TrainingSettings,
+    AutoLevelProgress, CharSetMode, GroupResult, KeyerMode, MixedAutoLevelAxis, SessionResult,
+    SessionTiming, StreakState, StreakStatus, TrainingSettings,
 };
 use dioxus::prelude::*;
 
@@ -16,11 +18,56 @@ use super::envelope::EnvelopeCard;
 use super::heatmap::{StreakCard, StreakCardProps};
 use super::home::Home;
 use super::listen::ListenView;
-use super::paddle::{PaddlePad, paddle_down, paddle_up};
+use super::paddle::{PaddlePad, use_paddle_keys};
 use super::results::ResultsView;
 use super::settings::SettingsView;
 use super::stats::{StatsView, StatsViewProps};
 use super::training::{TrainingScope, TrainingView};
+use crate::audio::fake::Recorder;
+use crate::state::{AppState, Screen};
+
+std::thread_local! {
+    /// How many times a [`Keyed`] with no sound device has looked for one.
+    static DEVICE_LOOKS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// The app's paddle keyer around a screen drawn on its own, keyed from a
+/// root the way the shell keys it, with a player that records — or, with
+/// `no_device`, no sound device to be found, however often it is looked for.
+#[component]
+fn Keyed(
+    screen: Screen,
+    #[props(default)] keyer_mode: KeyerMode,
+    #[props(default)] no_device: bool,
+    children: Element,
+) -> Element {
+    let settings = use_signal(|| {
+        let mut settings = crate::testing::test_settings();
+        settings.playback.keyer_mode = keyer_mode;
+        settings
+    });
+    let screen = use_signal(|| screen);
+    let app = use_hook(|| {
+        let factory: crate::state::BackendFactory = if no_device {
+            Rc::new(|| {
+                DEVICE_LOOKS.with(|looks| looks.set(looks.get() + 1));
+                Err("No audio output device found".to_string())
+            })
+        } else {
+            Recorder::new().factory()
+        };
+        Rc::new(AppState::with_backend(factory))
+    });
+    let keys = use_paddle_keys(settings, screen, app);
+    rsx! {
+        div {
+            id: crate::ui::widgets::control_id("keyed", "root"),
+            onkeydown: move |e| keys.keydown(e),
+            onkeyup: move |e| keys.keyup(e),
+            {children}
+        }
+    }
+}
 
 /// Same shape the router draws: the scope is a sibling of the answer list,
 /// not a child of it.
@@ -44,30 +91,32 @@ fn TrainingScreen(
     #[props(default)] keyer_mode: KeyerMode,
 ) -> Element {
     rsx! {
-        div { class: "stack",
-            TrainingScope {
-                focused,
-                total,
-                playing,
-                repeat_total,
-                repeat_done,
-            }
-            TrainingView {
-                current,
-                groups,
-                inputs,
-                confirmed,
-                focused,
-                playing,
-                locked,
-                repeat_total,
-                repeat_done,
-                keyer_mode,
-                on_change,
-                on_confirm,
-                on_focus,
-                on_submit,
-                on_stop,
+        Keyed { screen: Screen::Training, keyer_mode,
+            div { class: "stack",
+                TrainingScope {
+                    focused,
+                    total,
+                    playing,
+                    repeat_total,
+                    repeat_done,
+                }
+                TrainingView {
+                    current,
+                    groups,
+                    inputs,
+                    confirmed,
+                    focused,
+                    playing,
+                    locked,
+                    repeat_total,
+                    repeat_done,
+                    keyer_mode,
+                    on_change,
+                    on_confirm,
+                    on_focus,
+                    on_submit,
+                    on_stop,
+                }
             }
         }
     }
@@ -318,13 +367,15 @@ fn settings_renders_the_digit_and_custom_modes() {
             settings
         });
         rsx! {
-            SettingsView {
-                settings,
-                previewing: true,
-                sample_playing: None,
-                on_preview_band: move |_| {},
-                on_stop_band: move |_| {},
-                on_play_sample: move |_: String| {},
+            Keyed { screen: Screen::Settings,
+                SettingsView {
+                    settings,
+                    previewing: true,
+                    sample_playing: None,
+                    on_preview_band: move |_| {},
+                    on_stop_band: move |_| {},
+                    on_play_sample: move |_: String| {},
+                }
             }
         }
     });
@@ -341,13 +392,15 @@ fn settings_renders_the_digit_and_custom_modes() {
             settings
         });
         rsx! {
-            SettingsView {
-                settings,
-                previewing: false,
-                sample_playing: None,
-                on_preview_band: move |_| {},
-                on_stop_band: move |_| {},
-                on_play_sample: move |_: String| {},
+            Keyed { screen: Screen::Settings,
+                SettingsView {
+                    settings,
+                    previewing: false,
+                    sample_playing: None,
+                    on_preview_band: move |_| {},
+                    on_stop_band: move |_| {},
+                    on_play_sample: move |_: String| {},
+                }
             }
         }
     });
@@ -362,13 +415,15 @@ fn settings_renders_every_card() {
     let html = render(|| {
         let settings = use_signal(TrainingSettings::default);
         rsx! {
-            SettingsView {
-                settings,
-                previewing: false,
-                sample_playing: None,
-                on_preview_band: move |_| {},
-                on_stop_band: move |_| {},
-                on_play_sample: move |_: String| {},
+            Keyed { screen: Screen::Settings,
+                SettingsView {
+                    settings,
+                    previewing: false,
+                    sample_playing: None,
+                    on_preview_band: move |_| {},
+                    on_stop_band: move |_| {},
+                    on_play_sample: move |_: String| {},
+                }
             }
         }
     });
@@ -867,13 +922,15 @@ mod interactions {
     fn SettingsHarness() -> Element {
         let settings = use_signal(test_settings);
         rsx! {
-            SettingsView {
-                settings,
-                previewing: false,
-                sample_playing: Some("E".to_string()),
-                on_preview_band: move |_| {},
-                on_stop_band: move |_| {},
-                on_play_sample: move |_: String| {},
+            Keyed { screen: Screen::Settings,
+                SettingsView {
+                    settings,
+                    previewing: false,
+                    sample_playing: Some("E".to_string()),
+                    on_preview_band: move |_| {},
+                    on_stop_band: move |_| {},
+                    on_play_sample: move |_: String| {},
+                }
             }
         }
     }
@@ -915,29 +972,9 @@ mod interactions {
 
     #[component]
     fn PaddlePadHarness() -> Element {
-        let keyer = use_signal(|| PaddleKeyer::with_mode(KeyerMode::IambicA));
-        let keying = use_signal(|| false);
-        let generation = use_signal(|| 0u64);
-        let mut heard = use_signal(String::new);
-        let on_tone = EventHandler::new(move |_: bool| {});
-        let on_letter = EventHandler::new(move |ch: char| {
-            heard.write().push(ch);
-        });
-        let down = EventHandler::new(move |paddle: Paddle| {
-            paddle_down(
-                paddle, 60, true, keyer, keying, generation, on_tone, on_letter,
-            );
-        });
-        let up = EventHandler::new(move |paddle: Paddle| {
-            paddle_up(paddle, 60, keyer, generation, on_tone, on_letter);
-        });
         rsx! {
-            PaddlePad {
-                heard: heard(),
-                mode: KeyerMode::IambicA,
-                capture_keys: true,
-                on_down: down,
-                on_up: up,
+            Keyed { screen: Screen::Settings,
+                PaddlePad { mode: KeyerMode::IambicA }
             }
         }
     }
@@ -948,9 +985,11 @@ mod interactions {
             let mut ui = Ui::new(PaddlePadHarness, ());
             let key = Key::Character("]".into());
             let code = Code::BracketRight;
-            ui.press_key("paddle-practice", key.clone(), code);
+            // The pad has no listener of its own: a key pressed on it lands
+            // on the nearest element that has one, the root.
+            ui.press_key("keyed-root", key.clone(), code);
             ui.advance(500).await;
-            ui.release_key("paddle-practice", key, code);
+            ui.release_key("keyed-root", key, code);
             ui.advance(160).await;
             ui.advance(60).await;
             ui.advance(120).await;
@@ -959,6 +998,123 @@ mod interactions {
                 "decoded letters have to land on the pad: {}",
                 ui.html()
             );
+        });
+    }
+
+    /// Tap the dit paddle `times` times, a letter space apart: that many Es.
+    async fn tap_dits(ui: &mut Ui, on: &str, times: usize) {
+        for _ in 0..times {
+            ui.press_key(on, Key::Character("[".into()), Code::BracketLeft);
+            ui.advance(30).await;
+            ui.release_key(on, Key::Character("[".into()), Code::BracketLeft);
+            ui.advance(250).await;
+        }
+    }
+
+    #[test]
+    fn the_pad_keeps_only_the_last_line_it_heard() {
+        crate::testing::run(|| async {
+            let mut ui = Ui::new(PaddlePadHarness, ());
+            tap_dits(&mut ui, "keyed-root", 40).await;
+            let heard = ui
+                .html()
+                .split("id=\"paddle-heard\"")
+                .nth(1)
+                .and_then(|rest| rest.split('>').nth(1))
+                .and_then(|text| text.split('<').next())
+                .unwrap_or_default()
+                .to_string();
+            assert_eq!(heard, "E".repeat(32), "{}", ui.html());
+        });
+    }
+
+    #[component]
+    fn NoDeviceHarness() -> Element {
+        rsx! {
+            Keyed { screen: Screen::Settings, no_device: true,
+                PaddlePad { mode: KeyerMode::IambicA }
+            }
+        }
+    }
+
+    /// With no sound device, the pad says so, and a held paddle looks for
+    /// one when it closes — not twice an element while it is held, which
+    /// is a device search on the UI thread for every dit.
+    #[test]
+    fn a_missing_sound_device_is_said_and_looked_for_once_a_squeeze() {
+        crate::testing::run(|| async {
+            DEVICE_LOOKS.with(|looks| looks.set(0));
+            let mut ui = Ui::new(NoDeviceHarness, ());
+            assert!(
+                ui.has("No sidetone: No audio output device found"),
+                "{}",
+                ui.html()
+            );
+            let looks = || DEVICE_LOOKS.with(std::cell::Cell::get);
+            let before = looks();
+            let key = Key::Character("]".into());
+            ui.press_key("keyed-root", key.clone(), Code::BracketRight);
+            ui.advance(1_000).await;
+            ui.release_key("keyed-root", key, Code::BracketRight);
+            ui.advance(500).await;
+            assert_eq!(looks() - before, 1, "one squeeze, one look");
+            // The letter is keyed all the same; it just cannot be heard.
+            assert!(ui.has("paddle-heard"));
+        });
+    }
+
+    #[component]
+    fn ClosingBoxHarness() -> Element {
+        let mut shown = use_signal(|| true);
+        let mut typed = use_signal(String::new);
+        rsx! {
+            Keyed { screen: Screen::Training,
+                if shown() {
+                    TrainingView {
+                        current: 0,
+                        groups: vec!["E".to_string()],
+                        inputs: vec![typed()],
+                        confirmed: vec![false],
+                        focused: 0,
+                        playing: false,
+                        locked: false,
+                        repeat_total: 1,
+                        repeat_done: 1,
+                        on_change: move |(_, value): (usize, String)| typed.set(value),
+                        on_confirm: move |_: usize| {},
+                        on_focus: move |_: usize| {},
+                        on_submit: move |_| {},
+                        on_stop: move |_| {},
+                    }
+                }
+                button {
+                    id: control_id("btn", "close the box"),
+                    onclick: move |_| shown.set(false),
+                    "close"
+                }
+                p { "typed:{typed}" }
+            }
+        }
+    }
+
+    /// Once the training view has gone, nothing it lent the keyer is called:
+    /// a paddle on a training screen with no answer box open keys nothing.
+    #[test]
+    fn a_paddle_after_the_answer_box_has_gone_keys_nothing() {
+        crate::testing::run(|| async {
+            let mut ui = Ui::new(ClosingBoxHarness, ());
+            // Half a letter keyed into the box, then the box goes.
+            ui.press_key(
+                "group-input-0",
+                Key::Character("[".into()),
+                Code::BracketLeft,
+            );
+            ui.advance(20).await;
+            ui.click("btn-close-the-box");
+            ui.release_key("keyed-root", Key::Character("[".into()), Code::BracketLeft);
+            tap_dits(&mut ui, "keyed-root", 2).await;
+            ui.advance(500).await;
+            assert!(ui.has("typed:<") || ui.has("typed:</"), "{}", ui.html());
         });
     }
 

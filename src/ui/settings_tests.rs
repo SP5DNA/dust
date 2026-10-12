@@ -149,3 +149,32 @@ fn a_custom_alphabet_is_cleaned_when_it_is_committed() {
         assert_eq!(value_of(&ui, "field-custom-alphabet"), "ABC");
     });
 }
+
+/// Tap the dit paddle `times` times, a letter space apart: that many Es.
+/// Keys go to the focused control and bubble up to the app's root.
+async fn tap_dits(ui: &mut Ui, on: &str, times: usize) {
+    use dioxus::prelude::{Code, Key};
+    for _ in 0..times {
+        ui.press_key(on, Key::Character("[".into()), Code::BracketLeft);
+        ui.advance(30).await;
+        ui.release_key(on, Key::Character("[".into()), Code::BracketLeft);
+        ui.advance(250).await;
+    }
+}
+
+/// The practice pad shows what the paddles key on Settings, and starts
+/// clean whenever Settings is opened again.
+#[test]
+fn the_practice_pad_shows_what_was_keyed_until_settings_is_left() {
+    run(|| async {
+        let (mut ui, _recorder) = Ui::app_with_settings(test_settings());
+        ui.click("nav-settings");
+        tap_dits(&mut ui, "seg-iambic-a", 2).await;
+        assert!(ui.has(">EE<"), "{}", ui.html());
+        ui.click("nav-practice");
+        tap_dits(&mut ui, "btn-start-training", 1).await;
+        ui.click("nav-settings");
+        assert!(!ui.has(">EE<") && !ui.has(">E<"), "{}", ui.html());
+        assert!(ui.has("· −"));
+    });
+}

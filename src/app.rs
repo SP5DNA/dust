@@ -414,9 +414,9 @@ pub fn App() -> Element {
                     toggle_fullscreen();
                     return;
                 }
-                paddle.keydown.call(e);
+                paddle.keydown(e);
             },
-            onkeyup: move |e| paddle.keyup.call(e),
+            onkeyup: move |e| paddle.keyup(e),
             div { class: shell_class,
                 header { class: "header-bar",
                     div { class: "brand",
@@ -457,7 +457,6 @@ pub fn App() -> Element {
                             listen_streaming: preview().is_stream(),
                             stream_heard: stream_heard(),
                             sample_playing: preview().sample(),
-                            paddle_heard: (paddle.heard)(),
                         },
                         app,
                         AppCallbacks {
@@ -469,8 +468,6 @@ pub fn App() -> Element {
                             start_listen,
                             start_stream,
                             play_sample,
-                            on_paddle_down: paddle.down,
-                            on_paddle_up: paddle.up,
                         },
                     ) }
                 }

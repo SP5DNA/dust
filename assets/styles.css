@@ -1380,6 +1380,8 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .hero-figure {
   font-size: 1.2rem;
   letter-spacing: 0.14em;
   color: var(--ink);
+  /* One unbroken run of letters: break it anywhere rather than overflow. */
+  overflow-wrap: anywhere;
 }
 
 /* ==========================================================================

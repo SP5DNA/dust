@@ -1,11 +1,10 @@
 use cw_core::{
-    CharSetMode, GROUP_REPEAT_MAX, KeyerMode, Paddle, RangeSetting, SettingsSection,
-    TrainingSettings,
+    CharSetMode, GROUP_REPEAT_MAX, KeyerMode, RangeSetting, SettingsSection, TrainingSettings,
 };
 use dioxus::prelude::*;
 
 use crate::ui::envelope::EnvelopeCard;
-use crate::ui::paddle::{PaddlePad, capture_dom_paddles};
+use crate::ui::paddle::PaddlePad;
 use crate::ui::settings_charset::CharsetCard;
 use crate::ui::widgets::{
     Icon, LinkedRange, NumberField, SectionReset, Seg, SliderField, Switch, control_id,
@@ -80,9 +79,6 @@ pub fn SettingsView(
     on_preview_band: EventHandler<()>,
     on_stop_band: EventHandler<()>,
     on_play_sample: EventHandler<String>,
-    #[props(default)] paddle_heard: String,
-    #[props(default)] on_paddle_down: EventHandler<Paddle>,
-    #[props(default)] on_paddle_up: EventHandler<Paddle>,
 ) -> Element {
     let s = settings();
     let keyer_hint = match s.playback.keyer_mode {
@@ -214,14 +210,7 @@ pub fn SettingsView(
                     unit: "WPM".to_string(),
                     onchange: move |v| settings.write().playback.keyer_wpm = v,
                 }
-                PaddlePad {
-                    heard: paddle_heard,
-                    mode: s.playback.keyer_mode,
-                    swap: s.playback.paddle_swap,
-                    capture_keys: capture_dom_paddles(),
-                    on_down: on_paddle_down,
-                    on_up: on_paddle_up,
-                }
+                PaddlePad { mode: s.playback.keyer_mode }
                 if !s.playback.keyer_mode.is_straight() {
                     Switch {
                         title: "Swap [ and ] paddles".to_string(),

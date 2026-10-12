@@ -56,6 +56,12 @@ web-sys = { version = "0.3", optional = true, features = [
     "WaveShaperNode",
     "OverSampleType",
     "Performance",
+    # The paddles, heard from the whole document.
+    "Event",
+    "EventTarget",
+    "KeyboardEvent",
+    "Node",
+    "UiEvent",
 ] }
 
 # Linux / desktop

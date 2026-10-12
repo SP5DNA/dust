@@ -1,6 +1,6 @@
 use std::rc::Rc;
 
-use cw_core::{Paddle, SessionEvent, compute_char_pool, dit_ms_for_wpm};
+use cw_core::{SessionEvent, compute_char_pool};
 use dioxus::prelude::*;
 
 use crate::persist::current_auto_progress;
@@ -23,7 +23,6 @@ pub struct ViewState {
     pub listen_streaming: bool,
     pub stream_heard: Vec<String>,
     pub sample_playing: Option<String>,
-    pub paddle_heard: String,
 }
 
 /// What a screen can ask the app to do for it.
@@ -37,8 +36,6 @@ pub struct AppCallbacks {
     pub start_listen: EventHandler<String>,
     pub start_stream: EventHandler<()>,
     pub play_sample: EventHandler<String>,
-    pub on_paddle_down: EventHandler<Paddle>,
-    pub on_paddle_up: EventHandler<Paddle>,
 }
 
 pub fn app_routes(
@@ -62,7 +59,6 @@ pub fn app_routes(
         listen_streaming,
         stream_heard,
         sample_playing,
-        paddle_heard,
     } = view;
     let AppCallbacks {
         start_training,
@@ -73,8 +69,6 @@ pub fn app_routes(
         start_listen,
         start_stream,
         play_sample,
-        on_paddle_down,
-        on_paddle_up,
     } = callbacks;
     match screen() {
         Screen::Home => {
@@ -104,9 +98,6 @@ pub fn app_routes(
                 on_preview_band: start_band_preview,
                 on_stop_band: stop_preview,
                 on_play_sample: play_sample,
-                paddle_heard,
-                on_paddle_down,
-                on_paddle_up,
             }
         },
         Screen::Stats => rsx! {
@@ -133,13 +124,8 @@ pub fn app_routes(
                 let app_confirm = app.clone();
                 let app_focus = app.clone();
                 let app_submit = app.clone();
-                let app_stop = app.clone();
-                let app_tone = app;
-                let settings = session.settings();
-                let dit_ms = dit_ms_for_wpm(settings.playback.keyer_wpm);
-                let paddle_swap = settings.playback.paddle_swap;
-                let keyer_mode = settings.playback.keyer_mode;
-                let tone_settings = settings.clone();
+                let app_stop = app;
+                let keyer_mode = session.settings().playback.keyer_mode;
                 rsx! {
                     div { class: "stack",
                         TrainingScope {
@@ -159,12 +145,7 @@ pub fn app_routes(
                             locked: view.locked,
                             repeat_total: view.repeat_total,
                             repeat_done: view.repeat_done,
-                            paddle_swap,
                             keyer_mode,
-                            dit_ms,
-                            on_tone: move |on| {
-                                app_tone.set_live_tone(on, &tone_settings);
-                            },
                             on_change: move |(idx, value): (usize, String)| {
                                 send_command((*app_change).clone(), signals, SessionEvent::Input { index: idx, text: value });
                             },
@@ -226,7 +207,6 @@ mod tests {
         let app = use_hook(|| Rc::new(AppState::new()));
         let noop = EventHandler::new(move |_| {});
         let noop_text = EventHandler::new(move |_: String| {});
-        let noop_paddle = EventHandler::new(move |_: Paddle| {});
         app_routes(
             signals,
             ViewState {
@@ -235,7 +215,6 @@ mod tests {
                 listen_streaming: false,
                 stream_heard: Vec::new(),
                 sample_playing: None,
-                paddle_heard: String::new(),
             },
             app,
             AppCallbacks {
@@ -247,8 +226,6 @@ mod tests {
                 start_listen: noop_text,
                 start_stream: noop,
                 play_sample: noop_text,
-                on_paddle_down: noop_paddle,
-                on_paddle_up: noop_paddle,
             },
         )
     }
