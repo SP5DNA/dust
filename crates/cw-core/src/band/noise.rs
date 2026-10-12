@@ -108,7 +108,7 @@ const STATIC_SEED: u64 = 0x51ED_2701;
 /// everything outside the passband is dead silence, which no radio makes, and
 /// the band sounds like a filter rather than a receiver.
 ///
-/// Its level follows the band's noise ([`FLOOR_BELOW_DB`] under its density
+/// Its level follows the band's noise (`FLOOR_BELOW_DB` under its density
 /// at the pitch), so the noise control turns the whole receiver up or down,
 /// and turning the noise off silences it too. Static does not feed it:
 /// lightning arrives at the antenna, and what the filter lets through of it
@@ -127,7 +127,7 @@ pub struct AudioFloor {
 
 impl AudioFloor {
     /// The floor under a band whose noise comes out of a
-    /// [`REFERENCE_BANDWIDTH_HZ`] filter at `rms_in_reference`.
+    /// `REFERENCE_BANDWIDTH_HZ` filter at `rms_in_reference`.
     pub fn new(sample_rate: u32, rms_in_reference: f64, seed: u64) -> Self {
         let fs = f64::from(sample_rate.max(1));
         // Butterworth, each pair of poles at its own Q: 1/√2 for the

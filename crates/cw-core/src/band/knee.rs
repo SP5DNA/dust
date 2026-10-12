@@ -18,9 +18,9 @@ pub const FLOOR_MEASURE_RATE: u32 = 16_000;
 /// a steady tone, for the band `band` describes heard through `receiver`;
 /// `None` with the AGC switched off.
 ///
-/// [`AGC_TRIGGER`] times the band's own floor ([`band_standing_level`]), and
+/// `AGC_TRIGGER` times the band's own floor (`band_standing_level`), and
 /// never below that of the reference floor heard through the reference
-/// filter ([`reference_width_hz`]). Above that it follows the floor, the way
+/// filter (`reference_width_hz`). Above that it follows the floor, the way
 /// an operator backs the RF gain off on a noisy band or a wide filter, so the
 /// hiss on its own never pumps the gain. Below it, it stays put, as a real
 /// receiver's AGC threshold does: closing the filter or finding a quiet band

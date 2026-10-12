@@ -420,7 +420,7 @@ impl FilterDesign {
     /// The receiver the settings ask for: centred on the middle of the
     /// side-tone range, in the shape asked for, at the width asked for — or
     /// wider, where that would not pass the whole range
-    /// ([`ReceiverAsk::width_hz`]).
+    /// (`ReceiverAsk::width_hz`).
     ///
     /// Remembered: everything that asks — the settings screen as it draws,
     /// every send, the pile-up planner, the band — asks about the settings in
@@ -547,7 +547,7 @@ impl FilterDesign {
     /// filter reaches at that level, read off its real response rather than
     /// worked out from the width, so the shape and the fold are in it.
     ///
-    /// The lower one stops at [`LOWEST_EDGE_HZ`], like [`passband_edges`]:
+    /// The lower one stops at `LOWEST_EDGE_HZ`, like `passband_edges`:
     /// below that is the folded sideband, not more of the passband.
     pub fn edges_at(&self, db: f64) -> (f64, f64) {
         let level = db_to_gain(finite_or(db, 0.0).min(0.0));

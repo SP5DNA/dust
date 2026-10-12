@@ -23,7 +23,7 @@ pub const QSB_PATHS: usize = 4;
 pub(super) const MULTIPATH_RATES: [f64; QSB_PATHS] = [1.000, 0.633, 1.471, 2.309];
 
 /// Each path's rate, as a multiple of the rate setting
-/// ([`MULTIPATH_RATES`]), and how much of the fading it carries.
+/// (`MULTIPATH_RATES`), and how much of the fading it carries.
 ///
 /// Weights sum to one, so the swing still spans -1..=1 at its widest and the
 /// depth setting keeps meaning what it meant.

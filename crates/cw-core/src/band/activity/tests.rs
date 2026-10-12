@@ -268,7 +268,7 @@ fn stations_send_overs_of_a_few_seconds() {
 
 /// What a listener hears of the band, measured the way the recordings were:
 /// a Hann STFT, with a station counted wherever its bin stands 10 dB over the
-/// noise the default floor would put in that bin.
+/// noise the reference floor would put in that bin.
 struct Heard {
     /// Share of one-second stretches with a station within 600 Hz of the
     /// pitch for at least 0.2 s of it.

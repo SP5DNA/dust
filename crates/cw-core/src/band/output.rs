@@ -21,10 +21,10 @@ pub fn soft_limit(x: f64) -> f64 {
 /// at its last value. Far beyond anything the band and the Morse add up to.
 const SOFT_LIMIT_HEADROOM: f64 = 4.0;
 
-/// [`soft_limit`] as a lookup table, for a Web Audio `WaveShaperNode`.
+/// `soft_limit` as a lookup table, for a Web Audio `WaveShaperNode`.
 ///
 /// A shaper maps its input over -1..=1 onto the curve, so the input is to be
-/// scaled down by [`SOFT_LIMIT_HEADROOM`] first; the curve maps that back up
+/// scaled down by `SOFT_LIMIT_HEADROOM` first; the curve maps that back up
 /// before limiting. Between the points the shaper interpolates linearly, which
 /// below the knee is exact — the limiter is a straight line there.
 pub fn soft_limit_curve(points: usize) -> Vec<f32> {
@@ -42,7 +42,7 @@ pub fn soft_limit_curve(points: usize) -> Vec<f32> {
 /// set as `setting`.
 ///
 /// The browser's limiter is a shaper whose input is scaled down by
-/// [`SOFT_LIMIT_HEADROOM`], so whatever reaches it has to be too. What has
+/// `SOFT_LIMIT_HEADROOM`, so whatever reaches it has to be too. What has
 /// come through the compressor also carries the make-up gain the compressor
 /// adds of its own accord, which a receiver's AGC never would, so the
 /// receiver's feed takes that back off. The audio-stage floor joins after the

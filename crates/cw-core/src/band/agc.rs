@@ -836,7 +836,7 @@ mod tests {
             );
             let mut agc = Agc::new(SR, knee_for(&settings).unwrap());
             let mut receiver = receiver_for(SR, &settings);
-            // A return stroke sixty decibels over the default floor: ten
+            // A return stroke sixty decibels over the reference floor: ten
             // impulses across three milliseconds.
             let unit = reference_floor_rms() * f64::from(SR) / 1_000.0;
             let (mut loudest_in, mut loudest_out) = (0.0f64, 0.0f64);
