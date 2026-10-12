@@ -1,12 +1,18 @@
 //! Runs a training session: the machine decides, and this carries out what
 //! it decides — sends, timers, the results screen — under the session's
 //! lease on the audio. The UI only hands it events.
+//!
+//! Its tasks belong to the app rather than to whichever screen started the
+//! session, which is gone the moment the session's own screen comes up: they
+//! are spawned on the root scope, and the lease, not a component, decides
+//! how long they live.
 
 use cw_core::{
     CharSamplingState, FastrandRng, MonoMs, Sampler, SessionEffect, SessionEvent, SessionId,
     SessionMachine, Transmission, apply_auto_level, evaluate_auto_level, generate_training_group,
     resolve_station,
 };
+use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
 
 use crate::persist::{
@@ -14,7 +20,7 @@ use crate::persist::{
 };
 use crate::playback::Preview;
 use crate::player::{AudioError, Lease};
-use crate::state::{AppState, Screen, SessionSignals};
+use crate::state::{AppCtx, Screen};
 use crate::time::{local_date_string, mono_ms, now_ms, seed_rng};
 
 /// A session in progress: the machine that decides it, the stations it is
@@ -67,25 +73,20 @@ enum GroupStream {
     Callers,
 }
 
-/// Whether a session has the app: on its screen, or about to be.
-pub fn session_running(signals: SessionSignals) -> bool {
-    matches!(*signals.screen.peek(), Screen::Training) || signals.runtime.peek().is_some()
-}
-
 /// Start a session from the settings as they are.
 ///
 /// Starting first settles the alphabet, and stores the result, so the
 /// session and the screen agree on what is being practised before anything
 /// sounds. The machine is built here, on the UI thread, so Training has its
 /// groups before the first paint.
-pub fn start_session(app: &AppState, signals: SessionSignals) {
+pub fn start_session(ctx: AppCtx) {
     // Held before anything is written, not just before the audio is taken:
     // a session already running must leave the stored settings exactly as
     // they are.
-    if session_running(signals) {
+    if ctx.session_running() {
         return;
     }
-    let SessionSignals {
+    let AppCtx {
         mut screen,
         mut runtime,
         mut settings,
@@ -93,7 +94,7 @@ pub fn start_session(app: &AppState, signals: SessionSignals) {
         toasts,
         mut preview,
         ..
-    } = signals;
+    } = ctx;
     let fitted = settings.peek().clone().clamp();
     if *settings.peek() != fitted {
         settings.set(fitted.clone());
@@ -101,6 +102,7 @@ pub fn start_session(app: &AppState, signals: SessionSignals) {
     // The session has the audio now, whether or not it can open it: any
     // preview that had it has stopped.
     preview.set(Preview::Idle);
+    let app = ctx.app();
     let lease = match app.player.claim(&fitted) {
         Ok(lease) => lease,
         Err(err) => {
@@ -123,15 +125,20 @@ pub fn start_session(app: &AppState, signals: SessionSignals) {
         stations: FastrandRng(seed_rng()),
         lease: lease.clone(),
     });
-    run_effects(app, signals, &lease, effects);
+    run_effects(ctx, &lease, effects);
 }
 
 /// Hand the running session something the user did. Nothing happens when
 /// no session is running.
-pub fn send_event(app: &AppState, signals: SessionSignals, event: SessionEvent) {
-    let lease = app.session.borrow().as_ref().map(|live| live.lease.clone());
+pub fn send_event(ctx: AppCtx, event: SessionEvent) {
+    let lease = ctx
+        .app()
+        .session
+        .borrow()
+        .as_ref()
+        .map(|live| live.lease.clone());
     if let Some(lease) = lease {
-        dispatch(app, signals, &lease, event);
+        dispatch(ctx, &lease, event);
     }
 }
 
@@ -140,8 +147,9 @@ pub fn send_event(app: &AppState, signals: SessionSignals, event: SessionEvent) 
 /// `lease` is the session the event belongs to: an event from a session
 /// that has ended, or from one before the session now running, is dropped
 /// rather than handed to a machine it means nothing to.
-fn dispatch(app: &AppState, signals: SessionSignals, lease: &Lease, event: SessionEvent) {
-    let mut runtime = signals.runtime;
+fn dispatch(ctx: AppCtx, lease: &Lease, event: SessionEvent) {
+    let mut runtime = ctx.runtime;
+    let app = ctx.app();
     let effects = {
         let mut slot = app.session.borrow_mut();
         let Some(live) = slot
@@ -160,49 +168,43 @@ fn dispatch(app: &AppState, signals: SessionSignals, lease: &Lease, event: Sessi
         }
         effects
     };
-    run_effects(app, signals, lease, effects);
+    run_effects(ctx, lease, effects);
 }
 
-fn run_effects(
-    app: &AppState,
-    signals: SessionSignals,
-    lease: &Lease,
-    effects: Vec<SessionEffect>,
-) {
+fn run_effects(ctx: AppCtx, lease: &Lease, effects: Vec<SessionEffect>) {
     for effect in effects {
         match effect {
             SessionEffect::StopAudio => lease.stop_sending(),
-            SessionEffect::Play { index, text } => play(app, signals, lease, index, text),
+            SessionEffect::Play { index, text } => play(ctx, lease, index, text),
             SessionEffect::StartTimer { id, ms } => {
-                let (app, lease) = (app.clone(), lease.clone());
+                let lease = lease.clone();
                 // One wait for the whole of it. A timer the machine has since
                 // forgotten wakes once, is told so, and is gone.
-                spawn(async move {
+                spawn_forever(async move {
                     if lease.sleep(ms).await.is_ok() {
-                        dispatch(&app, signals, &lease, SessionEvent::TimerFired { id });
+                        dispatch(ctx, &lease, SessionEvent::TimerFired { id });
                     }
                 });
             }
-            SessionEffect::PersistAndShowResults => finish_session(app, signals),
-            SessionEffect::AbortToHome => abandon_session(app, signals),
+            SessionEffect::PersistAndShowResults => finish_session(ctx),
+            SessionEffect::AbortToHome => abandon_session(ctx),
         }
     }
 }
 
 /// Send group `index`, and tell the machine how it went.
-fn play(app: &AppState, signals: SessionSignals, lease: &Lease, index: usize, text: String) {
+fn play(ctx: AppCtx, lease: &Lease, index: usize, text: String) {
     // Every group is built from the settings the session started with, not
     // from whatever the settings screen holds now: a change made mid-session
     // belongs to the next one.
-    let Some((settings, transmission)) = app.session.borrow().as_ref().map(|live| {
+    let Some((settings, transmission)) = ctx.app().session.borrow().as_ref().map(|live| {
         let settings = live.machine.session().settings().clone();
         (settings, live.transmission(index, text))
     }) else {
         return;
     };
-    let (app, lease) = (app.clone(), lease.clone());
-    let toasts = signals.toasts;
-    spawn(async move {
+    let lease = lease.clone();
+    spawn_forever(async move {
         let event = match lease.send(&transmission, &settings).await {
             Ok(sent) => SessionEvent::PlaybackEnded {
                 index,
@@ -212,33 +214,37 @@ fn play(app: &AppState, signals: SessionSignals, lease: &Lease, index: usize, te
             },
             Err(AudioError::Cancelled) => SessionEvent::PlaybackStopped { index },
             Err(failure) => {
-                toasts.show(failure.to_string());
+                ctx.toasts.show(failure.to_string());
                 SessionEvent::PlaybackStopped { index }
             }
         };
-        dispatch(&app, signals, &lease, event);
+        dispatch(ctx, &lease, event);
     });
 }
 
+/// The session, taken out of the app, with the audio given back.
+fn end_session(ctx: AppCtx) -> Option<LiveSession> {
+    let live = ctx.app().session.borrow_mut().take()?;
+    live.lease.release();
+    Some(live)
+}
+
 /// End the session without keeping it.
-fn abandon_session(app: &AppState, signals: SessionSignals) {
-    let SessionSignals {
+fn abandon_session(ctx: AppCtx) {
+    let AppCtx {
         mut screen,
         mut runtime,
         ..
-    } = signals;
-    let live = app.session.borrow_mut().take();
-    if let Some(live) = live {
-        live.lease.release();
-    }
+    } = ctx;
+    end_session(ctx);
     runtime.set(None);
     screen.set(Screen::Home);
 }
 
 /// Score the session, move the level if it earned it, store it, and show
 /// the results.
-fn finish_session(app: &AppState, signals: SessionSignals) {
-    let SessionSignals {
+fn finish_session(ctx: AppCtx) {
+    let AppCtx {
         mut screen,
         mut runtime,
         mut result,
@@ -247,11 +253,10 @@ fn finish_session(app: &AppState, signals: SessionSignals) {
         settings: mut settings_sig,
         toasts,
         ..
-    } = signals;
-    let Some(live) = app.session.borrow_mut().take() else {
+    } = ctx;
+    let Some(live) = end_session(ctx) else {
         return;
     };
-    live.lease.release();
     let session = live.machine.session();
     let settings = session.settings().clone();
     // The machine only finishes a session it has scored something in.
@@ -307,11 +312,11 @@ mod tests {
             h.start_training();
             h.play_through(60_000).await;
             assert_eq!(h.screen(), Screen::Results);
-            let result = h.result.peek().clone().expect("a result");
+            let result = h.ctx.result.peek().clone().expect("a result");
             assert_eq!(result.groups.len(), 2);
             assert!(result.groups.iter().all(|g| g.correct));
             assert_eq!(result.accuracy, 1.0);
-            assert_eq!(h.sessions.peek().len(), 1);
+            assert_eq!(h.ctx.sessions.peek().len(), 1);
             assert_eq!(crate::persist::load_sessions().len(), 1);
             // The machine is torn down, and the audio with it.
             assert!(h.app.session.borrow().is_none());
@@ -334,10 +339,11 @@ mod tests {
                 h.run_until(4_000, |h| h.texts().len() == 2).await,
                 "the second group should have been sent"
             );
-            let confirmed = h.runtime.peek().as_ref().map(|s| s.view().confirmed);
+            let confirmed = h.ctx.runtime.peek().as_ref().map(|s| s.view().confirmed);
             assert_eq!(confirmed, Some(vec![true, false]));
             assert_eq!(
-                h.runtime
+                h.ctx
+                    .runtime
                     .peek()
                     .as_ref()
                     .and_then(|s| s.group(0))
@@ -379,13 +385,15 @@ mod tests {
             h.type_answer(0, &first.to_lowercase());
             // Nothing is confirmed until the auto-confirm delay has passed.
             assert!(
-                h.runtime
+                h.ctx
+                    .runtime
                     .peek()
                     .as_ref()
                     .is_some_and(|s| !s.view().confirmed[0])
             );
             assert!(
                 h.run_until(1_000, |h| h
+                    .ctx
                     .runtime
                     .peek()
                     .as_ref()
@@ -394,7 +402,8 @@ mod tests {
             );
             // Typed in lower case, stored the way it was sent.
             assert_eq!(
-                h.runtime
+                h.ctx
+                    .runtime
                     .peek()
                     .as_ref()
                     .and_then(|s| s.group(0))
@@ -421,7 +430,8 @@ mod tests {
             h.type_answer(0, &sent[..1]);
             h.advance(1_000).await;
             assert!(
-                h.runtime
+                h.ctx
+                    .runtime
                     .peek()
                     .as_ref()
                     .is_some_and(|s| !s.view().confirmed[0])
@@ -439,7 +449,8 @@ mod tests {
             h.type_answer(0, &sent);
             h.advance(1_000).await;
             assert!(
-                h.runtime
+                h.ctx
+                    .runtime
                     .peek()
                     .as_ref()
                     .is_some_and(|s| !s.view().confirmed[0])
@@ -490,13 +501,13 @@ mod tests {
             h.advance(100).await;
             h.send(SessionEvent::Abort);
             assert_eq!(h.screen(), Screen::Home);
-            assert!(h.runtime.peek().is_none());
+            assert!(h.ctx.runtime.peek().is_none());
             assert!(h.app.session.borrow().is_none());
 
             h.advance(5_000).await;
             assert_eq!(h.screen(), Screen::Home);
-            assert!(h.result.peek().is_none());
-            assert!(h.sessions.peek().is_empty());
+            assert!(h.ctx.result.peek().is_none());
+            assert!(h.ctx.sessions.peek().is_empty());
         });
     }
 
@@ -510,6 +521,7 @@ mod tests {
             h.type_answer(0, &sent);
             assert!(
                 h.run_until(1_000, |h| h
+                    .ctx
                     .runtime
                     .peek()
                     .as_ref()
@@ -519,9 +531,9 @@ mod tests {
             h.send(SessionEvent::FinishNow);
             h.advance(200).await;
             assert_eq!(h.screen(), Screen::Results);
-            let result = h.result.peek().clone().expect("a result");
+            let result = h.ctx.result.peek().clone().expect("a result");
             assert_eq!(result.groups.len(), 1);
-            assert_eq!(h.sessions.peek().len(), 1);
+            assert_eq!(h.ctx.sessions.peek().len(), 1);
         });
     }
 
@@ -549,7 +561,7 @@ mod tests {
             );
             assert!(h.recorder.players_built.get() > 1, "the player is rebuilt");
             assert_eq!(h.toast().as_deref(), Some("Audio playback stalled."));
-            assert!(h.sessions.peek().is_empty());
+            assert!(h.ctx.sessions.peek().is_empty());
         });
     }
 
@@ -604,7 +616,7 @@ mod tests {
             h.play_through(120_000).await;
 
             assert_eq!(h.screen(), Screen::Results);
-            let result = h.result.peek().clone().expect("a result");
+            let result = h.ctx.result.peek().clone().expect("a result");
             assert_eq!(result.groups.len(), 2);
             assert_eq!(result.accuracy, 1.0, "every call was answered correctly");
             // The calls themselves are cw-core's to get right; here, every
@@ -620,7 +632,7 @@ mod tests {
             // The tier is what this session was run at, not the Koch level.
             assert_eq!(result.level, cw_core::CALLSIGN_TIER_MAX);
             assert_eq!(result.char_set_mode, CharSetMode::Callsign);
-            assert_eq!(h.sessions.peek().len(), 1);
+            assert_eq!(h.ctx.sessions.peek().len(), 1);
             // And what was sent is what was played.
             assert_eq!(h.texts().len(), 2);
             for text in h.texts() {
@@ -639,7 +651,7 @@ mod tests {
             let mut h = Harness::with_settings(settings);
             h.start_training();
             h.play_through(120_000).await;
-            let stored = h.sessions.peek().clone();
+            let stored = h.ctx.sessions.peek().clone();
             assert_eq!(stored.len(), 1);
 
             let mut koch = test_settings();
@@ -769,9 +781,9 @@ mod tests {
 
             // Every group was answered correctly, because the pile-up is not
             // part of the answer.
-            let result = h.result.peek().clone().expect("a result");
+            let result = h.ctx.result.peek().clone().expect("a result");
             assert_eq!(result.accuracy, 1.0);
-            assert_eq!(h.sessions.peek().len(), 1);
+            assert_eq!(h.ctx.sessions.peek().len(), 1);
         });
     }
 
@@ -876,7 +888,7 @@ mod tests {
             h.start_training();
             let writes = Arc::new(AtomicUsize::new(0));
             let counted = writes.clone();
-            let runtime = h.runtime;
+            let runtime = h.ctx.runtime;
             h.in_app(|| {
                 let watcher = dioxus::core::ReactiveContext::new_with_callback(
                     move || {
@@ -926,6 +938,7 @@ mod tests {
             h.type_answer(0, &sent);
             assert!(
                 h.run_until(2_000, |h| h
+                    .ctx
                     .runtime
                     .peek()
                     .as_ref()
@@ -946,6 +959,7 @@ mod tests {
             h.type_answer(0, &sent);
             assert!(
                 h.run_until(1_000, |h| h
+                    .ctx
                     .runtime
                     .peek()
                     .as_ref()
@@ -954,7 +968,7 @@ mod tests {
             );
             h.set_behaviour(Behaviour::RefuseToStart);
             assert!(h.run_until(30_000, |h| h.screen() == Screen::Results).await);
-            let result = h.result.peek().clone().expect("a result");
+            let result = h.ctx.result.peek().clone().expect("a result");
             assert_eq!(result.groups.len(), 1);
         });
     }
@@ -965,13 +979,12 @@ mod tests {
             let mut h = Harness::new();
             h.start_training();
             let stale = h.lease();
-            let (app, signals) = (h.app.clone(), h.signals());
+            let ctx = h.ctx;
             // The user leaves; an old send then reports that it ended.
             h.send(SessionEvent::Abort);
             h.in_app(|| {
                 dispatch(
-                    &app,
-                    signals,
+                    ctx,
                     &stale,
                     SessionEvent::PlaybackEnded {
                         index: 0,
@@ -983,7 +996,7 @@ mod tests {
             });
             h.pump();
             assert_eq!(h.screen(), Screen::Home);
-            assert!(h.runtime.peek().is_none());
+            assert!(h.ctx.runtime.peek().is_none());
         });
     }
 
@@ -1006,7 +1019,7 @@ mod tests {
             let mut h = Harness::new();
             h.send(SessionEvent::Confirm);
             assert_eq!(h.screen(), Screen::Home);
-            assert!(h.runtime.peek().is_none());
+            assert!(h.ctx.runtime.peek().is_none());
         });
     }
 
@@ -1018,8 +1031,8 @@ mod tests {
             let older = h.lease();
             h.send(SessionEvent::Abort);
             h.start_training();
-            let (app, signals) = (h.app.clone(), h.signals());
-            h.in_app(|| dispatch(&app, signals, &older, SessionEvent::Abort));
+            let ctx = h.ctx;
+            h.in_app(|| dispatch(ctx, &older, SessionEvent::Abort));
             h.pump();
             assert_eq!(h.screen(), Screen::Training);
             assert_eq!(h.phase(), Some(SessionPhase::Playing { index: 0 }));
@@ -1037,7 +1050,7 @@ mod tests {
             h.advance(100).await;
             h.lease().stop_sending();
             assert!(h.run_until(5_000, |h| h.screen() == Screen::Home).await);
-            assert!(h.sessions.peek().is_empty());
+            assert!(h.ctx.sessions.peek().is_empty());
         });
     }
 
@@ -1046,11 +1059,10 @@ mod tests {
         run(|| async {
             let mut h = Harness::new();
             h.start_training();
-            let (app, signals, lease) = (h.app.clone(), h.signals(), h.lease());
+            let (ctx, lease) = (h.ctx, h.lease());
             h.in_app(|| {
                 run_effects(
-                    &app,
-                    signals,
+                    ctx,
                     &lease,
                     vec![SessionEffect::StartTimer { id: 999, ms: 20 }],
                 )
@@ -1066,13 +1078,12 @@ mod tests {
         run(|| async {
             let mut h = Harness::new();
             h.start_training();
-            let (app, signals, stale) = (h.app.clone(), h.signals(), h.lease());
+            let (ctx, stale) = (h.ctx, h.lease());
             h.send(SessionEvent::Abort);
             h.recorder.clear();
             h.in_app(|| {
                 run_effects(
-                    &app,
-                    signals,
+                    ctx,
                     &stale,
                     vec![
                         SessionEffect::Play {
@@ -1097,13 +1108,12 @@ mod tests {
             settings.curriculum.num_groups = 1;
             let mut h = Harness::with_settings(settings);
             h.start_training();
-            let (app, signals, stale) = (h.app.clone(), h.signals(), h.lease());
+            let (ctx, stale) = (h.ctx, h.lease());
             h.play_through(30_000).await;
             assert_eq!(h.screen(), Screen::Results);
             h.in_app(|| {
                 run_effects(
-                    &app,
-                    signals,
+                    ctx,
                     &stale,
                     vec![SessionEffect::StartTimer { id: 1, ms: 10 }],
                 )
@@ -1125,10 +1135,22 @@ mod tests {
             assert_eq!(sent.chars().count(), 2);
             assert_eq!(h.texts(), vec![sent.clone()]);
             // The answer box stays shut until the send is over.
-            assert!(h.runtime.peek().as_ref().is_some_and(|s| s.input_locked(0)));
+            assert!(
+                h.ctx
+                    .runtime
+                    .peek()
+                    .as_ref()
+                    .is_some_and(|s| s.input_locked(0))
+            );
 
             assert!(h.run_until(4_000, |h| h.awaiting_answer() == Some(0)).await);
-            assert!(!h.runtime.peek().as_ref().is_some_and(|s| s.input_locked(0)));
+            assert!(
+                !h.ctx
+                    .runtime
+                    .peek()
+                    .as_ref()
+                    .is_some_and(|s| s.input_locked(0))
+            );
         });
     }
 
@@ -1140,14 +1162,14 @@ mod tests {
             let mut h = Harness::new();
             h.start_training();
             let lease = h.lease();
-            h.settings.set({
+            h.ctx.settings.set({
                 let mut changed = test_settings();
                 changed.curriculum.num_groups = 7;
                 changed
             });
             h.start_training();
             assert!(h.lease().is(&lease) && lease.is_current());
-            assert_eq!(h.settings.peek().curriculum.num_groups, 7);
+            assert_eq!(h.ctx.settings.peek().curriculum.num_groups, 7);
             assert_eq!(h.texts().len(), 1);
         });
     }
@@ -1164,13 +1186,13 @@ mod tests {
             h.start_training();
             h.play_through(60_000).await;
             assert_eq!(h.screen(), Screen::Results);
-            assert_eq!(h.settings.peek().curriculum.level, 2);
-            let message = h.auto_message.peek().clone().expect("a message");
+            assert_eq!(h.ctx.settings.peek().curriculum.level, 2);
+            let message = h.ctx.auto_message.peek().clone().expect("a message");
             assert!(message.contains("Level increased to 2"), "{message}");
             assert_eq!(h.toast().as_deref(), Some(message.as_str()));
             // The level that was just left behind keeps no counters.
             assert_eq!(
-                crate::persist::load_auto_counters(&h.settings.peek().clone()),
+                crate::persist::load_auto_counters(&h.ctx.settings.peek().clone()),
                 AutoLevelCounters::default()
             );
         });
@@ -1186,7 +1208,7 @@ mod tests {
             let mut h = Harness::with_settings(settings.clone());
             h.start_training();
             h.play_through(60_000).await;
-            assert!(h.auto_message.peek().is_none());
+            assert!(h.ctx.auto_message.peek().is_none());
             assert_eq!(
                 crate::persist::load_auto_counters(&settings),
                 AutoLevelCounters { above: 1, below: 0 }

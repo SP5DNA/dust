@@ -1,15 +1,17 @@
+//! The shell every screen sits in: the header, the navigation, the toasts,
+//! and the state they all share.
+
 use std::rc::Rc;
 
-use cw_core::{GroupSession, Sampler, SessionEvent};
+use cw_core::SessionEvent;
 use dioxus::prelude::*;
 
 use crate::persist::{load_sessions, load_settings, load_theme, save_settings, save_theme};
-use crate::playback::{self, Preview, start_preview};
-use crate::routes::{AppCallbacks, ViewState, app_routes};
-use crate::session_runtime::{send_event, session_running, start_session};
-use crate::state::{AppState, Screen, SessionSignals, TOAST_MS, Toasts};
+use crate::routes::{Paddles, Route};
+use crate::session_runtime::send_event;
+use crate::state::{AppCtx, AppState, Screen, TOAST_MS};
 use crate::theme::Theme;
-use crate::time::{seed_rng, sleep_ms};
+use crate::time::sleep_ms;
 use crate::ui::paddle::use_paddle_keys;
 use crate::ui::widgets::{Icon, control_id};
 
@@ -18,6 +20,9 @@ use crate::ui::widgets::{Icon, control_id};
 // twice. Mobile has neither, so it injects this string from AppHead.
 #[cfg(not(feature = "web"))]
 pub(crate) const STYLESHEET: &str = include_str!("../assets/styles.css");
+
+/// The type faces, from Google Fonts. Every build links the same sheet.
+pub(crate) const FONT_CSS_URL: &str = "https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;700&family=Figtree:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;700&display=optional";
 
 // The web stylesheet, written into the page's `<head>` by `dx bundle`.
 //
@@ -58,10 +63,7 @@ fn font_link() -> Element {
     #[cfg(not(feature = "desktop"))]
     {
         rsx! {
-            document::Link {
-                rel: "stylesheet",
-                href: "https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;700&family=Figtree:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;700&display=optional",
-            }
+            document::Link { rel: "stylesheet", href: FONT_CSS_URL }
         }
     }
 }
@@ -89,31 +91,25 @@ fn AppHead() -> Element {
 
 #[component]
 pub fn App() -> Element {
-    let mut settings = use_signal(load_settings);
-    let sessions = use_signal(load_sessions);
-    let mut screen = use_signal(|| Screen::Home);
-    let runtime = use_signal(|| None::<GroupSession>);
-    let result = use_signal(|| None::<cw_core::SessionResult>);
-    let auto_message = use_signal(|| None::<String>);
-    let toasts = use_hook(Toasts::new);
-    let mut preview = use_signal(Preview::default);
-    let mut stream_heard = use_signal(Vec::<String>::new);
-    let mut theme = use_signal(|| Theme::from_key(&load_theme()));
     // The audio backend is injectable through context so a test can drive the
     // whole app with a player that records instead of one that needs a device.
-    let app = use_hook(|| try_consume_context::<AppState>().unwrap_or_else(AppState::new));
-    let app = Rc::new(app);
-    let paddle = use_paddle_keys(settings, screen, app.clone());
-    let signals = SessionSignals {
+    let ctx = use_context_provider(|| {
+        let app = try_consume_context::<AppState>().unwrap_or_else(AppState::new);
+        AppCtx::new(app, load_settings(), load_sessions())
+    });
+    let AppCtx {
         screen,
-        runtime,
-        result,
-        auto_message,
-        sessions,
-        settings,
+        mut settings,
         toasts,
-        preview,
-    };
+        ..
+    } = ctx;
+    let mut theme = use_signal(|| Theme::from_key(&load_theme()));
+    let paddle = use_paddle_keys(settings, screen, Rc::new(ctx.app()));
+    use_context_provider(|| Paddles {
+        heard: paddle.heard,
+        down: paddle.down,
+        up: paddle.up,
+    });
 
     use_effect(move || {
         let key = theme().key();
@@ -145,102 +141,10 @@ pub fn App() -> Element {
         }
     });
 
-    // Leaving for another screen is the same move wherever you are going:
-    // a session in progress holds you, and otherwise whatever was sounding
-    // stops before the screen changes.
-    let go_to = use_callback({
-        let app = app.clone();
-        move |to: Screen| {
-            if session_running(signals) {
-                return;
-            }
-            app.player.release();
-            preview.set(Preview::Idle);
-            stream_heard.set(Vec::new());
-            screen.set(to);
-        }
-    });
-    let go_home = use_callback(move |()| go_to.call(Screen::Home));
-
-    let start_training = use_callback({
-        let app = app.clone();
-        move |()| start_session(&app, signals)
-    });
-
-    let start_listen = use_callback({
-        let app = app.clone();
-        move |chars: String| {
-            start_preview(&app.player, signals, Preview::Letters, |lease, settings| {
-                playback::play_chars(lease, settings, chars, 420)
-            });
-        }
-    });
-
-    let start_stream = use_callback({
-        let app = app.clone();
-        move |()| {
-            start_preview(&app.player, signals, Preview::Stream, |lease, first| {
-                stream_heard.set(Vec::new());
-                // Leaning on the same weak characters a session would.
-                let sampler = Sampler::new(&sessions.peek(), &first, seed_rng());
-                playback::loop_stream(lease, settings, sampler, stream_heard)
-            });
-        }
-    });
-
-    // Envelope test chips: send one short sample with the current keying settings.
-    let play_sample = use_callback({
-        let app = app.clone();
-        move |text: String| {
-            start_preview(
-                &app.player,
-                signals,
-                Preview::Sample(text.clone()),
-                |lease, settings| playback::play_sample(lease, settings, text),
-            );
-        }
-    });
-
-    let start_band_preview = use_callback({
-        let app = app.clone();
-        move |()| {
-            start_preview(&app.player, signals, Preview::Band, |lease, _| {
-                playback::loop_band_preview(lease, settings, "CQ", 280)
-            });
-        }
-    });
-
-    let stop_preview = use_callback({
-        let app = app.clone();
-        move |()| {
-            if session_running(signals) {
-                return;
-            }
-            app.player.release();
-            preview.set(Preview::Idle);
-        }
-    });
-
-    use_effect({
-        let app = (*app).clone();
-        move || {
-            if !preview().is_band() {
-                return;
-            }
-            let settings_now = settings().clamp();
-            app.player.follow_band(&settings_now);
-        }
-    });
-
-    // Exit is End session from the header: the session decides what is
-    // worth keeping, the same way whichever button asked.
-    let exit_training = use_callback({
-        let app = app.clone();
-        move |()| send_event(&app, signals, SessionEvent::FinishNow)
-    });
-    let show_nav = !matches!(screen(), Screen::Training);
+    let screen_now = screen();
+    let show_nav = screen_now != Screen::Training;
     let shell_class = if show_nav { "shell has-nav" } else { "shell" };
-    let screen_key = screen_key(screen());
+    let screen_key = screen_now.key();
     let theme_attr = theme().key();
 
     rsx! {
@@ -278,41 +182,21 @@ pub fn App() -> Element {
                             },
                             Icon { name: theme().icon() }
                         }
-                        if screen() == Screen::Training {
+                        if screen_now == Screen::Training {
                             button {
                                 id: control_id("btn", "exit"),
                                 class: "btn btn-secondary btn-sm",
-                                onclick: move |_| exit_training.call(()),
+                                // End session, from the header: the session
+                                // decides what is worth keeping, the same way
+                                // whichever button asked.
+                                onclick: move |_| send_event(ctx, SessionEvent::FinishNow),
                                 "Exit"
                             }
                         }
                     }
                 }
                 div { class: "screen", id: "screen-{screen_key}", key: "{screen_key}",
-                    { app_routes(
-                        signals,
-                        ViewState {
-                            previewing: preview().is_band(),
-                            listen_playing: preview().is_letters(),
-                            listen_streaming: preview().is_stream(),
-                            stream_heard: stream_heard(),
-                            sample_playing: preview().sample(),
-                            paddle_heard: (paddle.heard)(),
-                        },
-                        app,
-                        AppCallbacks {
-                            start_training,
-                            go_home,
-                            go_listen: EventHandler::new(move |()| go_to.call(Screen::Listen)),
-                            start_band_preview,
-                            stop_preview,
-                            start_listen,
-                            start_stream,
-                            play_sample,
-                            on_paddle_down: paddle.down,
-                            on_paddle_up: paddle.up,
-                        },
-                    ) }
+                    Route { screen: screen_now }
                 }
             }
             if show_nav {
@@ -320,22 +204,22 @@ pub fn App() -> Element {
                     nav { class: "bottom-nav",
                         button {
                             id: control_id("nav", "practice"),
-                            class: if matches!(screen(), Screen::Home | Screen::Listen | Screen::Results) { "nav-item active" } else { "nav-item" },
-                            onclick: move |_| go_home.call(()),
+                            class: if matches!(screen_now, Screen::Home | Screen::Listen | Screen::Results) { "nav-item active" } else { "nav-item" },
+                            onclick: move |_| ctx.go_to(Screen::Home),
                             Icon { name: "signal" }
                             span { "Practice" }
                         }
                         button {
                             id: control_id("nav", "stats"),
-                            class: if screen() == Screen::Stats { "nav-item active" } else { "nav-item" },
-                            onclick: move |_| go_to.call(Screen::Stats),
+                            class: if screen_now == Screen::Stats { "nav-item active" } else { "nav-item" },
+                            onclick: move |_| ctx.go_to(Screen::Stats),
                             Icon { name: "chart" }
                             span { "Stats" }
                         }
                         button {
                             id: control_id("nav", "settings"),
-                            class: if screen() == Screen::Settings { "nav-item active" } else { "nav-item" },
-                            onclick: move |_| go_to.call(Screen::Settings),
+                            class: if screen_now == Screen::Settings { "nav-item active" } else { "nav-item" },
+                            onclick: move |_| ctx.go_to(Screen::Settings),
                             Icon { name: "sliders" }
                             span { "Settings" }
                         }
@@ -348,17 +232,6 @@ pub fn App() -> Element {
                 }
             }
         }
-    }
-}
-
-fn screen_key(screen: Screen) -> &'static str {
-    match screen {
-        Screen::Home => "home",
-        Screen::Settings => "settings",
-        Screen::Training => "training",
-        Screen::Results => "results",
-        Screen::Stats => "stats",
-        Screen::Listen => "listen",
     }
 }
 
@@ -384,32 +257,6 @@ fn toggle_fullscreen() {
         if let Some(element) = document.document_element() {
             let _ = element.request_fullscreen();
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::screen_key;
-    use crate::state::Screen;
-
-    #[test]
-    fn every_screen_has_its_own_key() {
-        let keys: Vec<&str> = [
-            Screen::Home,
-            Screen::Settings,
-            Screen::Training,
-            Screen::Results,
-            Screen::Stats,
-            Screen::Listen,
-        ]
-        .into_iter()
-        .map(screen_key)
-        .collect();
-        // The key remounts the screen wrapper, so it has to differ per screen.
-        let mut unique = keys.clone();
-        unique.sort_unstable();
-        unique.dedup();
-        assert_eq!(unique.len(), keys.len());
     }
 }
 

@@ -6,15 +6,22 @@ use cw_core::{
     Transmission, compute_after_group_gap_ms, generate_callsign, generate_training_group,
     resolve_station,
 };
+use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
 
-use crate::player::{AudioError, Lease, Player};
-use crate::session_runtime::session_running;
-use crate::state::SessionSignals;
+use crate::player::{AudioError, Lease};
+use crate::state::AppCtx;
 use crate::time::seed_rng;
 
 /// How many sent groups the stream keeps on screen for a glance-back.
 const STREAM_HEARD_KEEP: usize = 12;
+
+/// The pause between letters on the Listen screen.
+const LETTER_GAP_MS: u32 = 420;
+
+/// What the band preview calls, and the pause between calls.
+const BAND_PREVIEW_CALL: &str = "CQ";
+const BAND_PREVIEW_GAP_MS: u32 = 280;
 
 /// What the app is playing when no session is running.
 ///
@@ -65,26 +72,22 @@ impl Preview {
 /// Every preview starts and ends here, so none of them can forget a step:
 /// the preview shown is the one playing, a failure is said once, and an end
 /// that is still this preview's own gives the audio back, receiver and all.
-pub fn start_preview<F>(
-    player: &Player,
-    signals: SessionSignals,
-    kind: Preview,
-    play: impl FnOnce(Lease, TrainingSettings) -> F,
-) where
+fn start_preview<F>(ctx: AppCtx, kind: Preview, play: impl FnOnce(Lease, TrainingSettings) -> F)
+where
     F: Future<Output = Result<(), AudioError>> + 'static,
 {
     // A session in progress keeps the audio.
-    if session_running(signals) {
+    if ctx.session_running() {
         return;
     }
-    let SessionSignals {
+    let AppCtx {
         mut preview,
         toasts,
         settings,
         ..
-    } = signals;
+    } = ctx;
     let settings = settings.peek().clone().clamp();
-    let lease = match player.claim(&settings) {
+    let lease = match ctx.app().player.claim(&settings) {
         Ok(lease) => lease,
         Err(err) => {
             // The claim ended whatever was playing, whether or not it could
@@ -96,7 +99,8 @@ pub fn start_preview<F>(
     };
     preview.set(kind);
     let playing = play(lease.clone(), settings);
-    spawn(async move {
+    // The app's, not the screen's: the lease decides when it ends.
+    spawn_forever(async move {
         if let Err(err) = playing.await
             && err != AudioError::Cancelled
         {
@@ -108,6 +112,43 @@ pub fn start_preview<F>(
     });
 }
 
+/// The Listen screen: `chars`, one at a time.
+pub fn start_letters(ctx: AppCtx, chars: String) {
+    start_preview(ctx, Preview::Letters, |lease, settings| {
+        play_chars(lease, settings, chars, LETTER_GAP_MS)
+    });
+}
+
+/// The Listen screen's stream of groups, nothing scored.
+pub fn start_stream(ctx: AppCtx) {
+    let AppCtx {
+        settings,
+        sessions,
+        mut stream_heard,
+        ..
+    } = ctx;
+    start_preview(ctx, Preview::Stream, |lease, first| {
+        stream_heard.set(Vec::new());
+        // Leaning on the same weak characters a session would.
+        let sampler = Sampler::new(&sessions.peek(), &first, seed_rng());
+        loop_stream(lease, settings, sampler, stream_heard)
+    });
+}
+
+/// An envelope test chip: one short sample with the current keying settings.
+pub fn start_sample(ctx: AppCtx, text: String) {
+    start_preview(ctx, Preview::Sample(text.clone()), |lease, settings| {
+        play_sample(lease, settings, text)
+    });
+}
+
+/// The band-conditions preview, calling until it is stopped.
+pub fn start_band_preview(ctx: AppCtx) {
+    start_preview(ctx, Preview::Band, |lease, _| {
+        loop_band_preview(lease, ctx.settings, BAND_PREVIEW_CALL, BAND_PREVIEW_GAP_MS)
+    });
+}
+
 /// One operator for a whole preview, drawn afresh each time one starts.
 fn new_station(settings: &TrainingSettings) -> (cw_core::StationVoice, FastrandRng) {
     let mut rng = FastrandRng(seed_rng());
@@ -115,7 +156,7 @@ fn new_station(settings: &TrainingSettings) -> (cw_core::StationVoice, FastrandR
 }
 
 /// Play `chars` one at a time, `gap_ms` apart.
-pub async fn play_chars(
+async fn play_chars(
     lease: Lease,
     settings: TrainingSettings,
     chars: String,
@@ -136,7 +177,7 @@ pub async fn play_chars(
 }
 
 /// Send one short sample once — the keying-envelope test chips.
-pub async fn play_sample(
+async fn play_sample(
     lease: Lease,
     settings: TrainingSettings,
     text: String,
@@ -150,7 +191,7 @@ pub async fn play_sample(
 
 /// Call `text` over and over, `gap_ms` apart, under the settings as they are
 /// at each call. Ends only when the lease does, or the audio fails.
-pub async fn loop_band_preview(
+async fn loop_band_preview(
     lease: Lease,
     settings: Signal<TrainingSettings>,
     text: &'static str,
@@ -179,7 +220,7 @@ pub async fn loop_band_preview(
 /// from the history as a session's is, so it leans on the same weak
 /// characters — and nothing it sends is answered, so nothing is learned and
 /// nothing is stored.
-pub async fn loop_stream(
+async fn loop_stream(
     lease: Lease,
     settings: Signal<TrainingSettings>,
     mut sampler: Sampler,
@@ -241,7 +282,7 @@ mod tests {
 
     fn sampler(h: &Harness, history: &[SessionResult]) -> Sampler {
         // A fixed seed, so what the stream draws is the same every run.
-        Sampler::new(history, &h.settings.peek(), 7)
+        Sampler::new(history, &h.ctx.settings.peek(), 7)
     }
 
     fn claim(h: &Harness) -> Lease {
@@ -358,7 +399,7 @@ mod tests {
         run(|| async {
             let mut h = Harness::new();
             let lease = claim(&h);
-            let outcome = spawn_into(&h, loop_band_preview(lease, h.settings, "CQ", 100));
+            let outcome = spawn_into(&h, loop_band_preview(lease, h.ctx.settings, "CQ", 100));
             h.pump();
             assert!(h.run_until(20_000, |h| h.texts().len() >= 3).await);
             assert!(h.texts().iter().all(|text| text == "CQ"));
@@ -387,7 +428,7 @@ mod tests {
             settings.band.filter_width_hz = cw_core::FILTER_WIDTH_MAX;
             let mut h = Harness::with_settings(settings);
             let lease = claim(&h);
-            let _outcome = spawn_into(&h, loop_band_preview(lease, h.settings, "CQ", 100));
+            let _outcome = spawn_into(&h, loop_band_preview(lease, h.ctx.settings, "CQ", 100));
             h.pump();
             assert!(h.run_until(20_000, |h| h.texts().len() >= 3).await);
             h.app.player.release();
@@ -410,7 +451,7 @@ mod tests {
             let mut h = Harness::new();
             let lease = claim(&h);
             h.set_behaviour(Behaviour::RefuseToStart);
-            let outcome = spawn_into(&h, loop_band_preview(lease, h.settings, "CQ", 100));
+            let outcome = spawn_into(&h, loop_band_preview(lease, h.ctx.settings, "CQ", 100));
             h.pump();
             assert!(h.run_until(20_000, |_| outcome.borrow().is_some()).await);
             assert!(matches!(
@@ -445,7 +486,10 @@ mod tests {
             let mut h = Harness::new();
             let lease = claim(&h);
             let heard = h.in_app(|| Signal::new(Vec::<String>::new()));
-            let _outcome = spawn_into(&h, loop_stream(lease, h.settings, sampler(&h, &[]), heard));
+            let _outcome = spawn_into(
+                &h,
+                loop_stream(lease, h.ctx.settings, sampler(&h, &[]), heard),
+            );
             h.pump();
             assert!(h.run_until(20_000, |h| h.texts().len() >= 3).await);
             assert!(
@@ -484,12 +528,12 @@ mod tests {
                     )
                 })
                 .collect();
-            assert!(sessions[0].usable_for_sampling(&h.settings.peek()));
+            assert!(sessions[0].usable_for_sampling(&h.ctx.settings.peek()));
             let lease = claim(&h);
             let heard = h.in_app(|| Signal::new(Vec::<String>::new()));
             let _outcome = spawn_into(
                 &h,
-                loop_stream(lease, h.settings, sampler(&h, &sessions), heard),
+                loop_stream(lease, h.ctx.settings, sampler(&h, &sessions), heard),
             );
             h.pump();
             assert!(h.run_until(240_000, |h| h.texts().len() >= 60).await);
@@ -508,7 +552,10 @@ mod tests {
             let lease = claim(&h);
             h.set_behaviour(Behaviour::RefuseToStart);
             let heard = h.in_app(|| Signal::new(Vec::<String>::new()));
-            let outcome = spawn_into(&h, loop_stream(lease, h.settings, sampler(&h, &[]), heard));
+            let outcome = spawn_into(
+                &h,
+                loop_stream(lease, h.ctx.settings, sampler(&h, &[]), heard),
+            );
             h.pump();
             assert!(h.run_until(20_000, |_| outcome.borrow().is_some()).await);
             let played = h.texts().len();

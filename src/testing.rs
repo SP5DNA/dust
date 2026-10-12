@@ -11,17 +11,16 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use cw_core::{
-    GroupSession, GroupSource, MonoMs, SessionEffect, SessionEvent, SessionId, SessionMachine,
-    SessionResult, TrainingSettings,
+    GroupSource, MonoMs, SessionEffect, SessionEvent, SessionId, SessionMachine, SessionResult,
+    TrainingSettings,
 };
 use dioxus::core::{ElementId, NoOpMutations};
 use dioxus::prelude::*;
 
 use crate::audio::fake::{Behaviour, Call, Recorder};
-use crate::playback::Preview;
 use crate::player::Lease;
 use crate::session_runtime::{send_event, start_session};
-use crate::state::{AppState, Screen, SessionSignals, Toasts};
+use crate::state::{AppCtx, AppState, Screen};
 use crate::time::POLL_MS;
 use crate::ui::widgets::DISCLOSURE;
 
@@ -32,18 +31,17 @@ const STEP_MS: u64 = 4;
 /// How deep a disclosure may nest before the harness calls it a mistake.
 const NESTED_DISCLOSURES: usize = 8;
 
+/// How many rounds of rendering one event may set off before the page is
+/// said never to settle. Real chains are a handful deep.
+const SETTLE_PASSES: usize = 32;
+
 pub struct Harness {
     dom: VirtualDom,
+    /// The app's state, as every screen sees it.
+    pub ctx: AppCtx,
+    /// What the app holds outside it: the player and the session.
     pub app: AppState,
     pub recorder: Rc<Recorder>,
-    pub settings: Signal<TrainingSettings>,
-    pub sessions: Signal<Vec<SessionResult>>,
-    pub screen: Signal<Screen>,
-    pub runtime: Signal<Option<GroupSession>>,
-    pub result: Signal<Option<SessionResult>>,
-    pub auto_message: Signal<Option<String>>,
-    pub toasts: Toasts,
-    pub preview: Signal<Preview>,
 }
 
 /// Hands a session the groups it is given, in order.
@@ -126,45 +124,14 @@ impl Harness {
         let dom = VirtualDom::new(|| rsx! {});
         let recorder = Recorder::new();
         let app = AppState::with_backend(recorder.factory());
-        let (settings, sessions, screen, runtime, result, auto_message, toasts, preview) = dom
-            .in_scope(ScopeId::ROOT, || {
-                (
-                    Signal::new(settings),
-                    Signal::new(Vec::new()),
-                    Signal::new(Screen::Home),
-                    Signal::new(None),
-                    Signal::new(None),
-                    Signal::new(None),
-                    Toasts::new(),
-                    Signal::new(Preview::Idle),
-                )
-            });
+        let ctx = dom.in_scope(ScopeId::ROOT, || {
+            AppCtx::new(app.clone(), settings, Vec::new())
+        });
         Self {
             dom,
+            ctx,
             app,
             recorder,
-            settings,
-            sessions,
-            screen,
-            runtime,
-            result,
-            auto_message,
-            toasts,
-            preview,
-        }
-    }
-
-    /// The signals a session writes into, as the app assembles them.
-    pub fn signals(&self) -> SessionSignals {
-        SessionSignals {
-            screen: self.screen,
-            runtime: self.runtime,
-            result: self.result,
-            auto_message: self.auto_message,
-            sessions: self.sessions,
-            settings: self.settings,
-            toasts: self.toasts,
-            preview: self.preview,
         }
     }
 
@@ -193,8 +160,8 @@ impl Harness {
     /// Start a session the way the Practice screen's button does: through
     /// the same call.
     pub fn start_training(&mut self) {
-        let (app, signals) = (self.app.clone(), self.signals());
-        self.in_app(|| start_session(&app, signals));
+        let ctx = self.ctx;
+        self.in_app(|| start_session(ctx));
         self.pump();
     }
 
@@ -210,8 +177,8 @@ impl Harness {
 
     /// Send one event the way a component callback does.
     pub fn send(&mut self, event: SessionEvent) {
-        let (app, signals) = (self.app.clone(), self.signals());
-        self.in_app(|| send_event(&app, signals, event));
+        let ctx = self.ctx;
+        self.in_app(|| send_event(ctx, event));
         self.pump();
     }
 
@@ -224,7 +191,8 @@ impl Harness {
 
     /// What the trainer sent for `index`, as the user would have heard it.
     pub fn sent(&self, index: usize) -> String {
-        self.runtime
+        self.ctx
+            .runtime
             .peek()
             .as_ref()
             .and_then(|session| session.group(index).map(|g| g.sent().to_string()))
@@ -232,15 +200,19 @@ impl Harness {
     }
 
     pub fn phase(&self) -> Option<cw_core::SessionPhase> {
-        self.runtime.peek().as_ref().map(|session| session.phase())
+        self.ctx
+            .runtime
+            .peek()
+            .as_ref()
+            .map(|session| session.phase())
     }
 
     pub fn screen(&self) -> Screen {
-        *self.screen.peek()
+        *self.ctx.screen.peek()
     }
 
     pub fn toast(&self) -> Option<String> {
-        self.toasts.current().map(|toast| toast.text)
+        self.ctx.toasts.current().map(|toast| toast.text)
     }
 
     pub fn calls(&self) -> Vec<Call> {
@@ -292,7 +264,8 @@ impl Harness {
     }
 
     fn sent_count(&self) -> usize {
-        self.runtime
+        self.ctx
+            .runtime
             .peek()
             .as_ref()
             .map(|session| session.group_count())
@@ -454,14 +427,31 @@ impl Ui {
     }
 
     /// Settle everything the last event set off: the render it dirtied, the
-    /// effects that render queues, and whatever those effects dirty in turn.
+    /// effects that render queues, and whatever those effects dirty in turn,
+    /// until nothing is left that could run.
+    ///
+    /// A page that never gets there — an effect that keeps waking itself —
+    /// fails here, rather than passing every test that happened to look at
+    /// it between two of its passes.
     pub fn settle(&mut self) {
-        for _ in 0..6 {
-            self.dom.process_events();
+        for _ in 0..SETTLE_PASSES {
+            if !self.has_work() {
+                return;
+            }
             let mut log = IdLog::default();
             self.dom.render_immediate(&mut log);
             self.apply(log);
         }
+        panic!("the page never settled: something keeps waking itself");
+    }
+
+    /// Whether anything is ready to run: a task woken, an effect queued, a
+    /// component marked for redrawing. Runs the tasks and effects it finds,
+    /// as the renderer would before drawing.
+    fn has_work(&mut self) -> bool {
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        let work = std::pin::pin!(self.dom.wait_for_work());
+        work.poll(&mut cx).is_ready()
     }
 
     /// Move the clock forward, settling the page as it goes.
@@ -792,6 +782,23 @@ mod harness_tests {
         );
         ui.click("btn-bump");
         assert!(ui.has("count 10"));
+    }
+
+    /// An effect that wakes itself every time it runs.
+    #[component]
+    fn Restless() -> Element {
+        let mut count = use_signal(|| 0u32);
+        use_effect(move || {
+            let seen = count();
+            count.set(seen + 1);
+        });
+        rsx! { p { "{count}" } }
+    }
+
+    #[test]
+    #[should_panic(expected = "never settled")]
+    fn a_page_that_never_settles_fails_the_test() {
+        let _ui = Ui::new(Restless, ());
     }
 
     #[test]
