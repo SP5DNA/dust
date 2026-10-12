@@ -303,7 +303,10 @@ impl BandStream {
             .map_err(|e| format!("floor split: {e:?}"))?;
         let sample_rate = ctx.sample_rate();
         let chunk = ((f64::from(sample_rate) * STREAM_CHUNK_SEC).round() as usize).max(128);
-        let seed = fastrand::u64(..);
+        // A fresh band every time, drawn the way the native player draws
+        // its own: with stations on it, a fixed seed would replay the same
+        // callsigns at the same moments on every visit.
+        let seed = crate::time::seed_rng();
         let state = Rc::new(RefCell::new(StreamState {
             ctx: ctx.clone(),
             output,

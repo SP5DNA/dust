@@ -20,7 +20,6 @@ description = "Dust — CW Morse group trainer (desktop and WebAssembly)"
 [dependencies]
 cw-core = { path = "crates/cw-core" }
 dioxus = "0.7.10"
-fastrand = { version = "2", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
@@ -33,8 +32,6 @@ wasm-bindgen-futures = { version = "0.4", optional = true }
 web-sys = { version = "0.3", optional = true, features = [
     "Window",
     "Document",
-    "HtmlElement",
-    "HtmlInputElement",
     "Element",
     "AudioContext",
     "AudioContextState",
@@ -47,10 +44,8 @@ web-sys = { version = "0.3", optional = true, features = [
     "AudioBuffer",
     "AudioBufferSourceNode",
     "AudioScheduledSourceNode",
-    "BiquadFilterNode",
     "ChannelSplitterNode",
     "DynamicsCompressorNode",
-    "BiquadFilterType",
     "IirFilterNode",
     "Storage",
     "WaveShaperNode",
@@ -110,7 +105,6 @@ default = []
 web = [
     "dioxus/web",
     "chrono/wasmbind",
-    "dep:fastrand",
     "dep:gloo-timers",
     "dep:js-sys",
     "dep:wasm-bindgen",

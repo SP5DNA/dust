@@ -1634,7 +1634,6 @@ dependencies = [
  "dioxus-html",
  "dioxus-ssr",
  "dirs",
- "fastrand",
  "gloo-timers",
  "js-sys",
  "objc2-avf-audio",
