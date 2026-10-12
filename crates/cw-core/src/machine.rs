@@ -66,6 +66,17 @@ pub enum SessionEffect {
     AbortToHome,
 }
 
+/// How an event closes the answer to the group being copied.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnswerClose {
+    /// Whatever is entered by now is the answer: Confirm, End session, the
+    /// answer window running out.
+    Deadline,
+    /// Auto-confirm: the answer reached full length a moment ago and has sat
+    /// still since. Anything still being entered means it has not.
+    Settled,
+}
+
 /// What the phase's timer is waiting for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PhaseTimer {
@@ -155,33 +166,39 @@ impl<S: GroupSource> SessionMachine<S> {
         self.auto_confirm = None;
     }
 
-    /// Whether `event` would close the answer to the group being copied:
-    /// confirm it, run its answer window out, or end the session on it.
+    /// Whether, and how, `event` would close the answer to the group being
+    /// copied.
     ///
-    /// Whatever the user has finished entering by then is part of the
-    /// answer, so the runtime asks before it applies the event — and only
-    /// then, as anything else (a send ending, a gap) leaves the answer open
-    /// for more.
-    pub fn closes_answer(&self, event: &SessionEvent) -> bool {
+    /// The runtime asks before it applies the event. At a deadline, what the
+    /// user has finished entering by then is part of the answer. Auto-confirm
+    /// is no deadline: it waits for the answer to sit still, so an entry
+    /// still under way puts it off. Anything else — a send ending, a gap —
+    /// leaves the answer open for more.
+    pub fn closes_answer(&self, event: &SessionEvent) -> Option<AnswerClose> {
         if self.is_terminal() {
-            return false;
+            return None;
         }
         match event {
-            SessionEvent::Confirm | SessionEvent::FinishNow => true,
+            SessionEvent::Confirm | SessionEvent::FinishNow => Some(AnswerClose::Deadline),
             SessionEvent::TimerFired { id } => {
-                self.auto_confirm
+                if self
+                    .auto_confirm
                     .as_ref()
                     .is_some_and(|pending| pending.id == *id)
-                    || matches!(
-                        (self.phase_timer, self.phase()),
-                        (Some((timer, PhaseTimer::AnswerWindow)), SessionPhase::AwaitingAnswer { .. })
-                            if timer == *id
-                    )
+                {
+                    return Some(AnswerClose::Settled);
+                }
+                matches!(
+                    (self.phase_timer, self.phase()),
+                    (Some((timer, PhaseTimer::AnswerWindow)), SessionPhase::AwaitingAnswer { .. })
+                        if timer == *id
+                )
+                .then_some(AnswerClose::Deadline)
             }
             SessionEvent::PlaybackEnded { .. }
             | SessionEvent::PlaybackStopped { .. }
             | SessionEvent::Input { .. }
-            | SessionEvent::Abort => false,
+            | SessionEvent::Abort => None,
         }
     }
 
@@ -541,28 +558,36 @@ mod tests {
     /// out, leaves it open for more.
     #[test]
     fn only_what_closes_the_answer_says_so() {
+        use AnswerClose::{Deadline, Settled};
         let mut m = start_with(settings(2, false, 10.0), script(&["KM"], 2));
-        assert!(!m.closes_answer(&ended(0)));
+        assert_eq!(m.closes_answer(&ended(0)), None);
         let gap = m.apply(ended(0), MonoMs(500));
         let (gap_id, _) = timer(&gap);
-        assert!(!m.closes_answer(&SessionEvent::TimerFired { id: gap_id }));
+        assert_eq!(
+            m.closes_answer(&SessionEvent::TimerFired { id: gap_id }),
+            None
+        );
         let _ = m.apply(SessionEvent::TimerFired { id: gap_id }, MonoMs(900));
         let window = m.apply(ended(0), MonoMs(1_400));
         let (window_id, _) = timer(&window);
-        assert!(m.closes_answer(&SessionEvent::TimerFired { id: window_id }));
-        assert!(m.closes_answer(&SessionEvent::Confirm));
-        assert!(m.closes_answer(&SessionEvent::FinishNow));
-        assert!(!m.closes_answer(&typed(0, "K")));
-        assert!(!m.closes_answer(&SessionEvent::Abort));
-        // A full answer starts auto-confirm, and its timer closes it too.
+        let window = SessionEvent::TimerFired { id: window_id };
+        assert_eq!(m.closes_answer(&window), Some(Deadline));
+        assert_eq!(m.closes_answer(&SessionEvent::Confirm), Some(Deadline));
+        assert_eq!(m.closes_answer(&SessionEvent::FinishNow), Some(Deadline));
+        assert_eq!(m.closes_answer(&typed(0, "K")), None);
+        assert_eq!(m.closes_answer(&SessionEvent::Abort), None);
+        // A full answer starts auto-confirm, which waits for it to settle.
         let auto = m.apply(typed(0, "KM"), MonoMs(1_500));
         let (auto_id, _) = timer(&auto);
-        assert!(m.closes_answer(&SessionEvent::TimerFired { id: auto_id }));
+        assert_eq!(
+            m.closes_answer(&SessionEvent::TimerFired { id: auto_id }),
+            Some(Settled)
+        );
         // A timer the machine has forgotten closes nothing, and nothing does
         // once the session is over.
-        assert!(!m.closes_answer(&SessionEvent::TimerFired { id: 999 }));
+        assert_eq!(m.closes_answer(&SessionEvent::TimerFired { id: 999 }), None);
         let _ = m.apply(SessionEvent::Abort, MonoMs(1_600));
-        assert!(!m.closes_answer(&SessionEvent::Confirm));
+        assert_eq!(m.closes_answer(&SessionEvent::Confirm), None);
     }
 
     #[test]

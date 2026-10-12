@@ -8,9 +8,9 @@
 //! how long they live.
 
 use cw_core::{
-    CharSamplingState, CountersKey, CountersUpdate, MonoMs, Sampler, SessionEffect, SessionEvent,
-    SessionId, SessionMachine, SplitMix64, Transmission, complete_session, generate_training_group,
-    resolve_station,
+    AnswerClose, CharSamplingState, CountersKey, CountersUpdate, MonoMs, Sampler, SessionEffect,
+    SessionEvent, SessionId, SessionMachine, SplitMix64, Transmission, complete_session,
+    generate_training_group, resolve_station,
 };
 use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
@@ -70,9 +70,9 @@ impl LiveSession {
 /// nothing that moves the session on can overtake a keystroke, however close
 /// the two land.
 ///
-/// Before anything closes the answer, the box is also asked to finish what
-/// is entered in full but not in it yet: a letter the paddles have keyed,
-/// still waiting out its letter space.
+/// The box also has a say in what is still being entered and not in it yet:
+/// a letter the paddles are keying. At a deadline it finishes what is keyed
+/// in full; auto-confirm waits until nothing is under way.
 #[derive(Clone, Copy, PartialEq)]
 pub struct AnswerOutbox(CopyValue<Outbox>);
 
@@ -80,8 +80,16 @@ pub struct AnswerOutbox(CopyValue<Outbox>);
 struct Outbox {
     /// Typed into the box for this group, and not handed over yet.
     waiting: Option<(usize, String)>,
+    entry: Option<Entry>,
+}
+
+/// What the box says about an entry still under way.
+#[derive(Clone, Copy, PartialEq)]
+struct Entry {
     /// Puts into the box whatever is entered in full but not there yet.
-    finish: Option<Callback>,
+    finish: Callback,
+    /// Whether anything is still being entered.
+    open: Callback<(), bool>,
 }
 
 impl AnswerOutbox {
@@ -99,31 +107,44 @@ impl AnswerOutbox {
         self.0.write().waiting.take()
     }
 
-    /// While the calling component is mounted, `finish` is what puts into
-    /// the box whatever is entered in full but not there yet.
-    pub fn use_finish(self, finish: impl FnMut() + 'static) {
-        let mut finish = finish;
-        let finish = use_callback(move |()| finish());
-        use_hook(move || self.set_finish(Some(finish)));
+    /// While the calling component is mounted, `finish` puts into the box
+    /// whatever is entered in full but not there yet, and `open` says
+    /// whether anything is still being entered.
+    pub fn use_entry(
+        self,
+        mut finish: impl FnMut() + 'static,
+        mut open: impl FnMut() -> bool + 'static,
+    ) {
+        let entry = Entry {
+            finish: use_callback(move |()| finish()),
+            open: use_callback(move |()| open()),
+        };
+        use_hook(move || self.set_entry(Some(entry)));
         use_drop(move || {
             // Only its own: a box that has already taken over stays.
-            if self.0.peek().finish == Some(finish) {
-                self.set_finish(None);
+            if self.0.peek().entry == Some(entry) {
+                self.set_entry(None);
             }
         });
     }
 
-    fn set_finish(mut self, finish: Option<Callback>) {
-        self.0.write().finish = finish;
+    fn set_entry(mut self, entry: Option<Entry>) {
+        self.0.write().entry = entry;
     }
 
     /// Have the box finish what is entered in full. It may hand the session
     /// an answer of its own on the way.
     fn finish(self) {
-        let finish = self.0.peek().finish;
-        if let Some(finish) = finish {
-            finish.call(());
+        let entry = self.0.peek().entry;
+        if let Some(entry) = entry {
+            entry.finish.call(());
         }
+    }
+
+    /// Whether anything is still being entered into the box.
+    fn entry_open(self) -> bool {
+        let entry = self.0.peek().entry;
+        entry.is_some_and(|entry| entry.open.call(()))
     }
 
     /// A new session: nothing typed for the last one carries over.
@@ -131,6 +152,9 @@ impl AnswerOutbox {
         self.0.write().waiting = None;
     }
 }
+
+/// How soon auto-confirm asks again while a letter is still being keyed.
+const ENTRY_RECHECK_MS: u32 = 50;
 
 /// The generators one group draws from, one per thing it decides.
 #[derive(Clone, Copy)]
@@ -219,14 +243,29 @@ pub fn send_event(ctx: AppCtx, event: SessionEvent) {
 fn dispatch(ctx: AppCtx, lease: &Lease, event: SessionEvent) {
     let mut runtime = ctx.runtime;
     let app = ctx.app();
-    // What is entered in full by the time the answer closes is part of it,
-    // whatever is still settling. Finishing it can hand the session an answer
-    // of its own, so it comes before the session is borrowed.
-    let closes = app.session.borrow().as_ref().is_some_and(|live| {
-        live.lease.is(lease) && lease.is_current() && live.machine.closes_answer(&event)
+    let closes = app.session.borrow().as_ref().and_then(|live| {
+        (live.lease.is(lease) && lease.is_current())
+            .then(|| live.machine.closes_answer(&event))
+            .flatten()
     });
-    if closes {
-        ctx.answer.finish();
+    match closes {
+        // What is entered in full by the deadline is part of the answer,
+        // whatever is still settling. Finishing it can hand the session an
+        // answer of its own, so it comes before the session is borrowed.
+        Some(AnswerClose::Deadline) => ctx.answer.finish(),
+        // Auto-confirm waits for the answer to sit still, and one with a
+        // letter still being keyed into it has not: ask again shortly. The
+        // letter, once in, lengthens the answer and calls the confirm off.
+        Some(AnswerClose::Settled) if ctx.answer.entry_open() => {
+            let lease = lease.clone();
+            spawn_forever(async move {
+                if lease.sleep(ENTRY_RECHECK_MS).await.is_ok() {
+                    dispatch(ctx, &lease, event);
+                }
+            });
+            return;
+        }
+        Some(AnswerClose::Settled) | None => {}
     }
     let effects = {
         let mut slot = app.session.borrow_mut();
@@ -502,6 +541,49 @@ mod tests {
         });
     }
 
+    /// Auto-confirm waits while anything is still being entered, and comes
+    /// back for the answer once it has settled. It never finishes an entry
+    /// early, which would cut a paddle letter being keyed in two.
+    #[test]
+    fn auto_confirm_waits_for_an_entry_still_under_way() {
+        run(|| async {
+            let mut h = Harness::new();
+            // Still entering for the first three asks.
+            let open_for = Rc::new(Cell::new(3_u32));
+            let finished = Rc::new(Cell::new(0));
+            let entry = h.in_app(|| {
+                let (open_for, finished) = (Rc::clone(&open_for), Rc::clone(&finished));
+                Entry {
+                    finish: Callback::new(move |()| finished.set(finished.get() + 1)),
+                    open: Callback::new(move |()| {
+                        let left = open_for.get();
+                        open_for.set(left.saturating_sub(1));
+                        left > 0
+                    }),
+                }
+            });
+            h.ctx.answer.set_entry(Some(entry));
+            h.start_training();
+            assert!(h.run_until(4_000, |h| h.awaiting_answer() == Some(0)).await);
+            let sent = h.sent(0);
+            h.type_answer(0, &sent);
+            let confirmed = |h: &Harness| {
+                h.ctx
+                    .runtime
+                    .peek()
+                    .as_ref()
+                    .is_some_and(|s| s.view().confirmed[0])
+            };
+            h.advance(u64::from(cw_core::AUTO_CONFIRM_DELAY_MS) + 20)
+                .await;
+            assert!(!confirmed(&h), "auto-confirm went ahead mid-entry");
+            assert!(h.run_until(1_000, confirmed).await);
+            assert_eq!(open_for.get(), 0);
+            assert_eq!(finished.get(), 0, "auto-confirm finished an entry");
+            assert_eq!(input_of(&h, 0), Some(sent));
+        });
+    }
+
     /// A key that lands as a session closes does not carry over into the
     /// next one.
     #[test]
@@ -536,14 +618,17 @@ mod tests {
             let mut h = Harness::with_settings(settings);
             let asked = Rc::new(Cell::new(0));
             let answer = h.ctx.answer;
-            let finish = h.in_app(|| {
+            let entry = h.in_app(|| {
                 let asked = Rc::clone(&asked);
-                Callback::new(move |()| {
-                    asked.set(asked.get() + 1);
-                    answer.hold(0, "T".into());
-                })
+                Entry {
+                    finish: Callback::new(move |()| {
+                        asked.set(asked.get() + 1);
+                        answer.hold(0, "T".into());
+                    }),
+                    open: Callback::new(|()| false),
+                }
             });
-            answer.set_finish(Some(finish));
+            answer.set_entry(Some(entry));
             h.start_training();
             assert!(h.run_until(8_000, |h| h.awaiting_answer() == Some(0)).await);
             assert_eq!(asked.get(), 0, "two sends and a gap closed nothing");

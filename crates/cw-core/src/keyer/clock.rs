@@ -78,6 +78,12 @@ impl Keyer {
         self.dit_ms = dit_ms_for_wpm(wpm);
     }
 
+    /// Whether a letter is under way: an element sounding, or keyed and not
+    /// yet ended by its letter space.
+    pub fn letter_open(&self) -> bool {
+        self.phase != Phase::Idle
+    }
+
     /// Whether the sidetone is sounding.
     pub fn sounding(&self) -> bool {
         matches!(self.phase, Phase::Contact | Phase::Element { .. })
@@ -325,7 +331,12 @@ mod tests {
         host.press(Dah, 0);
         host.release(Dah, 100);
         host.run_to(250);
+        assert!(
+            host.keyer.letter_open(),
+            "keyed, its letter space not run out"
+        );
         let out = host.keyer.finish_letter();
+        assert!(!host.keyer.letter_open());
         assert_eq!(out.letter, Some('T'));
         assert_eq!(out.wake_at, None);
         host.act(250, out);
@@ -370,6 +381,7 @@ mod tests {
         // A straight key's contact still closed, and nothing keyed at all.
         let mut host = Host::new(KeyerMode::Straight);
         host.press(Dit, 0);
+        assert!(host.keyer.letter_open());
         assert_eq!(host.keyer.finish_letter().letter, None);
         assert_eq!(
             Keyer::new(KeyerMode::IambicA, WPM).finish_letter(),

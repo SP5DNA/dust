@@ -264,6 +264,11 @@ impl PaddleKeys {
         self.act(out);
     }
 
+    /// Whether a letter is being keyed and has not ended yet.
+    pub fn letter_open(self) -> bool {
+        self.keyer.peek().letter_open()
+    }
+
     /// End the letter keyed into the answer box now, if it is keyed in full,
     /// rather than once its letter space has run out.
     pub fn finish_letter(mut self) {

@@ -621,6 +621,55 @@ mod ui_tests {
         });
     }
 
+    /// Auto-confirm waits for a letter still being keyed, as it would for a
+    /// key still being typed: it does not cut the letter in two, and the
+    /// letter, once in, calls the confirm off.
+    #[test]
+    fn auto_confirm_does_not_cut_a_paddle_letter_in_two() {
+        run(|| async {
+            let mut settings = short_session();
+            settings.playback.keyer_mode = cw_core::KeyerMode::IambicA;
+            settings.playback.keyer_wpm = 20.0;
+            let (mut ui, _recorder) = awaiting_answer(settings).await;
+            let (dit, dah) = (Key::Character("[".into()), Key::Character("]".into()));
+            let key = |ui: &mut Ui, paddle: &Key, code: Code, down: bool| {
+                if down {
+                    ui.press_key("group-input-0", paddle.clone(), code);
+                } else {
+                    ui.release_key("group-input-0", paddle.clone(), code);
+                }
+            };
+            // E, and E again: the group's full length at 500 ms, and
+            // auto-confirm due 300 ms after.
+            key(&mut ui, &dit, Code::BracketLeft, true);
+            ui.advance(32).await;
+            key(&mut ui, &dit, Code::BracketLeft, false);
+            ui.advance(228).await;
+            key(&mut ui, &dit, Code::BracketLeft, true);
+            ui.advance(32).await;
+            key(&mut ui, &dit, Code::BracketLeft, false);
+            // An A: its dit at 720, its dah closed in the space after it,
+            // at 820 — the auto-confirm falls between the two.
+            ui.advance(428).await;
+            key(&mut ui, &dit, Code::BracketLeft, true);
+            ui.advance(32).await;
+            key(&mut ui, &dit, Code::BracketLeft, false);
+            ui.advance(68).await;
+            key(&mut ui, &dah, Code::BracketRight, true);
+            ui.advance(80).await;
+            key(&mut ui, &dah, Code::BracketRight, false);
+            ui.advance(600).await;
+            assert_eq!(
+                ui.screen(),
+                "training",
+                "auto-confirm went ahead mid-letter"
+            );
+            ui.press_enter("group-input-0");
+            assert!(ui.run_until(2_000, |ui| ui.screen() == "results").await);
+            assert_eq!(ui.store.load_sessions()[0].groups[0].received, "EEA");
+        });
+    }
+
     /// Enter on the heels of a key confirms what the box shows, not what the
     /// session had been told before the key.
     #[test]

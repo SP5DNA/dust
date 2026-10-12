@@ -324,8 +324,9 @@ pub fn TrainingView(
         draft.push(current, letter, &sent_now);
     });
     // A letter keyed in full is in the answer when it closes, even with its
-    // letter space still running out.
-    answer.use_finish(move || keys.finish_letter());
+    // letter space still running out; and auto-confirm waits for a letter
+    // still being keyed, as it would for a key still being typed.
+    answer.use_entry(move || keys.finish_letter(), move || keys.letter_open());
     use_effect(use_reactive!(|current, current_done| {
         let _ = current;
         draft.settle(current_done);
