@@ -18,10 +18,13 @@ pub fn now_ms() -> u64 {
     chrono::Utc::now().timestamp_millis().max(0) as u64
 }
 
-/// Monotonic milliseconds for the paddle keyer.
+/// Monotonic milliseconds, for anything timed against itself: the paddle
+/// keyer, and the session's response times, which a wall clock stepped back
+/// would turn negative.
 ///
 /// Tests run on a paused Tokio clock, so wall time would make every straight-key
-/// hold look like a dit. When a Tokio runtime is up, this follows that clock.
+/// hold look like a dit. When a Tokio runtime is up, this follows that clock;
+/// a browser has its own monotonic clock in `performance.now()`.
 pub fn mono_ms() -> u64 {
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -36,6 +39,12 @@ pub fn mono_ms() -> u64 {
                     .saturating_duration_since(start)
                     .as_millis() as u64
             });
+        }
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        if let Some(performance) = web_sys::window().and_then(|window| window.performance()) {
+            return performance.now().max(0.0) as u64;
         }
     }
     now_ms()

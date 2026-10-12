@@ -8,9 +8,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use cw_core::{
-    KeyerMode, LETTER_GAP_DITS, Paddle, PaddleKeyer, dit_ms_for_wpm, paddle_from_bracket,
-};
+use cw_core::{KeyerMode, Paddle, PaddleKeyer, dit_ms_for_wpm, paddle_from_bracket};
 use dioxus::prelude::*;
 
 use crate::state::{AppState, Screen};
@@ -20,7 +18,8 @@ use crate::time::sleep_ms;
 use crate::ui::widgets::{control_id, html_bool};
 
 /// Squeeze poll while waiting for a letter gap. Coarser than this and iambic
-/// squeezes feel late; this is not the sidetone path.
+/// squeezes feel late; this is not the sidetone path. When the gap is over is
+/// the decoder's rule, read off the clock; this is only how often it is asked.
 const KEYER_POLL_MS: u32 = 4;
 
 /// X11 key auto-repeat is a fake release+press pair. tao on Linux never marks
@@ -149,13 +148,13 @@ pub fn paddle_down(
     if keyer.peek().mode().is_straight() {
         let already = keyer.peek().any_held();
         let _ = bump_epoch(generation);
-        keyer.write().press_at(paddle, mono_ms());
+        keyer.write().press(paddle, mono_ms());
         if !already {
             on_tone.call(true);
         }
         return;
     }
-    keyer.write().press(paddle);
+    keyer.write().press(paddle, mono_ms());
     if *keying.peek() {
         return;
     }
@@ -212,33 +211,53 @@ async fn run_iambic_loop(
             sleep_element(dit_ms.max(1) as u32).await;
             continue;
         }
-        let mut left = dit_ms.saturating_mul(LETTER_GAP_DITS).max(1);
-        let mut squeezed = false;
-        while left > 0 {
-            if *generation.peek() != run {
+        keyer.write().decoder_mut().quiet_from(mono_ms());
+        match wait_for_letter_gap(dit_ms, keyer, generation, run).await {
+            LetterGap::Squeezed => continue,
+            LetterGap::Superseded => {
                 keying.set(false);
                 return;
             }
-            if keyer.peek().any_held() {
-                squeezed = true;
-                break;
+            LetterGap::Over => {
+                keying.set(false);
+                if let Some(ch) = keyer.write().decoder_mut().take_letter() {
+                    on_letter.call(ch);
+                }
+                return;
             }
-            let step = left.min(u64::from(KEYER_POLL_MS)).max(1);
-            sleep_element(step as u32).await;
-            left = left.saturating_sub(step);
         }
-        if squeezed {
-            continue;
-        }
+    }
+}
+
+/// How a wait for the end of a letter came out.
+enum LetterGap {
+    /// The paddles stayed quiet for a letter space: the letter is done.
+    Over,
+    /// A paddle closed first, so the letter goes on.
+    Squeezed,
+    /// Something newer took the keyer over.
+    Superseded,
+}
+
+/// Wait out the letter gap the decoder is timing, asking it on the clock
+/// rather than adding up sleeps, which run long.
+async fn wait_for_letter_gap(
+    dit_ms: u64,
+    keyer: Signal<PaddleKeyer>,
+    generation: Signal<u64>,
+    run: u64,
+) -> LetterGap {
+    loop {
         if *generation.peek() != run {
-            keying.set(false);
-            return;
+            return LetterGap::Superseded;
         }
-        keying.set(false);
-        if let Some(ch) = keyer.write().decoder_mut().take_letter() {
-            on_letter.call(ch);
+        if keyer.peek().any_held() {
+            return LetterGap::Squeezed;
         }
-        return;
+        if keyer.peek().decoder().letter_gap_over(mono_ms(), dit_ms) {
+            return LetterGap::Over;
+        }
+        sleep_element(KEYER_POLL_MS).await;
     }
 }
 
@@ -260,25 +279,18 @@ pub fn paddle_up(
         let Some(element) = keyer.write().take_straight(mono_ms(), dit_ms) else {
             return;
         };
-        keyer.write().decoder_mut().push(element);
+        let now = mono_ms();
+        let mut keyed = keyer.write();
+        keyed.decoder_mut().push(element);
+        keyed.decoder_mut().quiet_from(now);
+        drop(keyed);
         let run = bump_epoch(generation);
         spawn(async move {
-            let mut left = dit_ms.saturating_mul(LETTER_GAP_DITS).max(1);
-            while left > 0 {
-                if *generation.peek() != run {
-                    return;
-                }
-                if keyer.peek().any_held() {
-                    return;
-                }
-                let step = left.min(u64::from(KEYER_POLL_MS)).max(1);
-                sleep_element(step as u32).await;
-                left = left.saturating_sub(step);
-            }
-            if *generation.peek() != run {
-                return;
-            }
-            if let Some(ch) = keyer.write().decoder_mut().take_letter() {
+            // A squeeze or a newer press carries the letter on; only a full
+            // letter space ends it.
+            if let LetterGap::Over = wait_for_letter_gap(dit_ms, keyer, generation, run).await
+                && let Some(ch) = keyer.write().decoder_mut().take_letter()
+            {
                 on_letter.call(ch);
             }
         });

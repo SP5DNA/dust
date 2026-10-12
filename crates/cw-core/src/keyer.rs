@@ -53,15 +53,6 @@ impl KeyerMode {
     pub fn is_straight(self) -> bool {
         matches!(self, Self::Straight)
     }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Straight => "Straight",
-            Self::IambicA => "Iambic A",
-            Self::IambicB => "Iambic B",
-            Self::Ultimatic => "Ultimatic",
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -105,71 +96,60 @@ pub fn paddle_from_bracket(ch: char, swap: bool) -> Option<Paddle> {
     Some(if swap { paddle.flipped() } else { paddle })
 }
 
-/// Running Morse character being squeezed on the paddles.
+/// The Morse character being keyed, element by element, and the letter gap
+/// that ends it.
 #[derive(Clone, Debug, Default)]
 pub struct PaddleDecoder {
     pattern: String,
-    last_at_ms: Option<u64>,
+    /// The elements so far begin no character. Whatever follows, the letter
+    /// is nothing — not the character its first few elements spelled, which
+    /// is what dropping the stray element used to make of it: eight dits, the
+    /// error sign, came out as a 5.
+    invalid: bool,
+    /// When the paddles last went quiet, for timing the letter gap.
+    quiet_since: Option<u64>,
 }
 
 impl PaddleDecoder {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     pub fn is_empty(&self) -> bool {
-        self.pattern.is_empty()
+        self.pattern.is_empty() && !self.invalid
     }
 
     pub fn push(&mut self, paddle: Paddle) {
+        self.quiet_since = None;
+        if self.invalid {
+            return;
+        }
         self.pattern.push(paddle.mark());
         if !is_morse_code_prefix(&self.pattern) {
-            self.pattern.pop();
+            self.invalid = true;
+            self.pattern.clear();
         }
     }
 
-    /// Record one element. If the pause before this hit already ended a
-    /// letter, that letter is returned first and this hit starts the next.
-    pub fn hit(&mut self, paddle: Paddle, now_ms: u64, dit_ms: u64) -> Option<char> {
-        let flushed = self.poll(now_ms, dit_ms);
-        self.push(paddle);
-        self.last_at_ms = Some(now_ms);
-        flushed
+    /// The paddles went quiet at `now_ms`: the letter gap starts here.
+    pub fn quiet_from(&mut self, now_ms: u64) {
+        self.quiet_since = Some(now_ms);
     }
 
-    /// Commit a letter once the paddles have been quiet for a letter-space.
-    #[must_use = "a decoded letter that is not used is a letter lost"]
-    pub fn poll(&mut self, now_ms: u64, dit_ms: u64) -> Option<char> {
-        let last = self.last_at_ms?;
-        if self.pattern.is_empty() {
-            return None;
-        }
-        let gap = now_ms.saturating_sub(last);
-        if gap < dit_ms.saturating_mul(LETTER_GAP_DITS) {
-            return None;
-        }
-        let ch = decode_morse_pattern(&self.pattern);
-        self.pattern.clear();
-        self.last_at_ms = None;
-        ch
+    /// Whether the paddles have been quiet for a letter space, so whatever
+    /// was keyed is a letter.
+    pub fn letter_gap_over(&self, now_ms: u64, dit_ms: u64) -> bool {
+        self.quiet_since.is_some_and(|since| {
+            now_ms.saturating_sub(since) >= dit_ms.saturating_mul(LETTER_GAP_DITS)
+        })
     }
 
-    /// Commit whatever is in the pattern, ignoring the clock. Used after a
-    /// letter-space sleep that already waited the right number of dits.
+    /// End the letter: what it decodes to, if it is one, and a clean slate.
     #[must_use = "a decoded letter that is not used is a letter lost"]
     pub fn take_letter(&mut self) -> Option<char> {
-        if self.pattern.is_empty() {
-            return None;
-        }
-        let ch = decode_morse_pattern(&self.pattern);
-        self.pattern.clear();
-        self.last_at_ms = None;
-        ch
-    }
-
-    pub fn reset(&mut self) {
-        self.pattern.clear();
-        self.last_at_ms = None;
+        let letter = if self.invalid {
+            None
+        } else {
+            decode_morse_pattern(&self.pattern)
+        };
+        *self = Self::default();
+        letter
     }
 }
 
@@ -200,10 +180,6 @@ impl Default for PaddleKeyer {
 }
 
 impl PaddleKeyer {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     pub fn with_mode(mode: KeyerMode) -> Self {
         Self {
             mode,
@@ -216,7 +192,7 @@ impl PaddleKeyer {
             dit_mem: false,
             dah_mem: false,
             straight_down_at: None,
-            decoder: PaddleDecoder::new(),
+            decoder: PaddleDecoder::default(),
         }
     }
 
@@ -227,6 +203,10 @@ impl PaddleKeyer {
     pub fn set_mode(&mut self, mode: KeyerMode) {
         self.mode = mode;
         self.reset();
+    }
+
+    pub fn decoder(&self) -> &PaddleDecoder {
+        &self.decoder
     }
 
     pub fn decoder_mut(&mut self) -> &mut PaddleDecoder {
@@ -258,11 +238,9 @@ impl PaddleKeyer {
         }
     }
 
-    pub fn press(&mut self, paddle: Paddle) {
-        self.press_at(paddle, 0);
-    }
-
-    pub fn press_at(&mut self, paddle: Paddle, now_ms: u64) {
+    /// A paddle closed at `now_ms`. A straight key is timed from the moment
+    /// it closes, so the time is not optional.
+    pub fn press(&mut self, paddle: Paddle, now_ms: u64) {
         let was_up = !self.held(paddle);
         let was_any = self.any_held();
         if self.mode.is_straight() && !was_any {
@@ -392,45 +370,58 @@ mod tests {
         assert_eq!(paddle_from_bracket('A', false), None);
     }
 
-    #[test]
-    fn k_commits_after_a_two_dit_pause() {
-        let mut decoder = PaddleDecoder::new();
-        let dit = 60;
-        assert_eq!(decoder.hit(Paddle::Dah, 0, dit), None);
-        assert_eq!(decoder.hit(Paddle::Dit, 60, dit), None);
-        assert_eq!(decoder.hit(Paddle::Dah, 120, dit), None);
-        assert_eq!(decoder.poll(120 + dit, dit), None);
-        assert_eq!(decoder.poll(120 + dit * 2, dit), Some('K'));
-        assert!(decoder.is_empty());
-    }
-
-    #[test]
-    fn a_short_gap_stays_inside_the_letter() {
-        let mut decoder = PaddleDecoder::new();
-        let dit = 60;
-        decoder.hit(Paddle::Dit, 0, dit);
-        decoder.hit(Paddle::Dit, dit, dit);
-        assert_eq!(decoder.poll(dit + dit - 1, dit), None);
-        assert_eq!(decoder.poll(dit * 3, dit), Some('I'));
-    }
-
-    #[test]
-    fn the_next_letter_flushes_the_one_before() {
-        let mut decoder = PaddleDecoder::new();
-        let dit = 50;
-        decoder.hit(Paddle::Dah, 0, dit);
-        assert_eq!(decoder.hit(Paddle::Dit, dit * 3, dit), Some('T'));
-        assert_eq!(decoder.poll(dit * 5, dit), Some('E'));
-    }
-
-    #[test]
-    fn extra_elements_that_leave_the_table_are_ignored() {
-        let mut decoder = PaddleDecoder::new();
-        let dit = 40;
-        for i in 0..8 {
-            decoder.hit(Paddle::Dit, i * dit, dit);
+    /// Keys `paddles` into a decoder the way the UI does: each element, then
+    /// quiet from the end of it.
+    fn keyed(paddles: &[Paddle]) -> PaddleDecoder {
+        let mut decoder = PaddleDecoder::default();
+        for paddle in paddles {
+            decoder.push(*paddle);
         }
-        assert_eq!(decoder.poll(20 * dit, dit), Some('5'));
+        decoder
+    }
+
+    #[test]
+    fn a_letter_ends_after_a_two_dit_gap() {
+        let dit = 60;
+        let mut decoder = keyed(&[Paddle::Dah, Paddle::Dit, Paddle::Dah]);
+        assert!(!decoder.letter_gap_over(1_000, dit), "not quiet yet");
+        decoder.quiet_from(1_000);
+        assert!(!decoder.letter_gap_over(1_000 + dit, dit));
+        assert!(decoder.letter_gap_over(1_000 + 2 * dit, dit));
+        assert_eq!(decoder.take_letter(), Some('K'));
+        assert!(decoder.is_empty());
+        assert!(
+            !decoder.letter_gap_over(5_000, dit),
+            "a new letter starts unquiet"
+        );
+
+        // Another element puts the letter gap off again.
+        let mut decoder = keyed(&[Paddle::Dit]);
+        decoder.quiet_from(0);
+        decoder.push(Paddle::Dit);
+        assert!(!decoder.letter_gap_over(500, dit));
+        decoder.quiet_from(500);
+        assert!(decoder.letter_gap_over(500 + 2 * dit, dit));
+        assert_eq!(decoder.take_letter(), Some('I'));
+    }
+
+    /// A pattern that leaves the table is no letter. Dropping the element
+    /// that left it used to turn the error sign into a 5, and -.-.-- into C.
+    #[test]
+    fn a_pattern_that_is_no_character_is_no_letter() {
+        let mut error_sign = keyed(&[Paddle::Dit; 8]);
+        assert!(!error_sign.is_empty());
+        assert_eq!(error_sign.take_letter(), None);
+        assert!(error_sign.is_empty());
+
+        use Paddle::{Dah, Dit};
+        let mut stray = keyed(&[Dah, Dit, Dah, Dit, Dah, Dah]);
+        assert_eq!(stray.take_letter(), None);
+        // And the next letter is decoded afresh.
+        let mut next = stray;
+        next.push(Dit);
+        assert_eq!(next.take_letter(), Some('E'));
+        assert_eq!(keyed(&[Dah, Dit, Dah, Dit]).take_letter(), Some('C'));
     }
 
     #[test]
@@ -441,18 +432,9 @@ mod tests {
     }
 
     #[test]
-    fn take_letter_commits_without_waiting() {
-        let mut decoder = PaddleDecoder::new();
-        decoder.hit(Paddle::Dit, 0, 60);
-        decoder.hit(Paddle::Dit, 60, 60);
-        assert_eq!(decoder.take_letter(), Some('I'));
-        assert!(decoder.is_empty());
-    }
-
-    #[test]
     fn holding_dah_keeps_producing_dahs() {
-        let mut keyer = PaddleKeyer::new();
-        keyer.press(Paddle::Dah);
+        let mut keyer = PaddleKeyer::default();
+        keyer.press(Paddle::Dah, 0);
         assert_eq!(keyer.next_element(), Some(Paddle::Dah));
         assert_eq!(keyer.next_element(), Some(Paddle::Dah));
         assert_eq!(keyer.next_element(), Some(Paddle::Dah));
@@ -462,25 +444,25 @@ mod tests {
 
     #[test]
     fn a_new_squeeze_starts_with_the_paddle_closed_first() {
-        let mut keyer = PaddleKeyer::new();
+        let mut keyer = PaddleKeyer::default();
         // One dit, sent and finished; the keyer goes idle.
-        keyer.press(Paddle::Dit);
+        keyer.press(Paddle::Dit, 0);
         assert_eq!(keyer.next_element(), Some(Paddle::Dit));
         keyer.release(Paddle::Dit);
         assert_eq!(keyer.next_element(), None);
         // A fresh squeeze, dit first. The old element must not decide it: it
         // used to be flipped into a dah, sending the squeeze backwards.
-        keyer.press(Paddle::Dit);
-        keyer.press(Paddle::Dah);
+        keyer.press(Paddle::Dit, 0);
+        keyer.press(Paddle::Dah, 0);
         assert_eq!(keyer.next_element(), Some(Paddle::Dit));
         assert_eq!(keyer.next_element(), Some(Paddle::Dah));
     }
 
     #[test]
     fn squeezing_both_paddles_alternates() {
-        let mut keyer = PaddleKeyer::new();
-        keyer.press(Paddle::Dit);
-        keyer.press(Paddle::Dah);
+        let mut keyer = PaddleKeyer::default();
+        keyer.press(Paddle::Dit, 0);
+        keyer.press(Paddle::Dah, 0);
         assert_eq!(keyer.next_element(), Some(Paddle::Dit));
         assert_eq!(keyer.next_element(), Some(Paddle::Dah));
         assert_eq!(keyer.next_element(), Some(Paddle::Dit));
@@ -489,8 +471,8 @@ mod tests {
     #[test]
     fn iambic_a_stops_when_the_squeeze_is_released() {
         let mut keyer = PaddleKeyer::with_mode(KeyerMode::IambicA);
-        keyer.press(Paddle::Dah);
-        keyer.press(Paddle::Dit);
+        keyer.press(Paddle::Dah, 0);
+        keyer.press(Paddle::Dit, 0);
         assert_eq!(keyer.next_element(), Some(Paddle::Dah));
         keyer.release(Paddle::Dah);
         keyer.release(Paddle::Dit);
@@ -500,8 +482,8 @@ mod tests {
     #[test]
     fn iambic_b_adds_the_opposite_after_a_squeeze_release() {
         let mut keyer = PaddleKeyer::with_mode(KeyerMode::IambicB);
-        keyer.press(Paddle::Dah);
-        keyer.press(Paddle::Dit);
+        keyer.press(Paddle::Dah, 0);
+        keyer.press(Paddle::Dit, 0);
         assert_eq!(keyer.next_element(), Some(Paddle::Dah));
         keyer.release(Paddle::Dah);
         keyer.release(Paddle::Dit);
@@ -512,9 +494,9 @@ mod tests {
     #[test]
     fn iambic_a_remembers_a_tap_during_the_opposite_element() {
         let mut keyer = PaddleKeyer::with_mode(KeyerMode::IambicA);
-        keyer.press(Paddle::Dah);
+        keyer.press(Paddle::Dah, 0);
         assert_eq!(keyer.next_element(), Some(Paddle::Dah));
-        keyer.press(Paddle::Dit);
+        keyer.press(Paddle::Dit, 0);
         keyer.release(Paddle::Dit);
         keyer.release(Paddle::Dah);
         assert_eq!(keyer.next_element(), Some(Paddle::Dit));
@@ -524,9 +506,9 @@ mod tests {
     #[test]
     fn ultimatic_repeats_the_last_paddle_instead_of_alternating() {
         let mut keyer = PaddleKeyer::with_mode(KeyerMode::Ultimatic);
-        keyer.press(Paddle::Dah);
+        keyer.press(Paddle::Dah, 0);
         assert_eq!(keyer.next_element(), Some(Paddle::Dah));
-        keyer.press(Paddle::Dit);
+        keyer.press(Paddle::Dit, 0);
         assert_eq!(keyer.next_element(), Some(Paddle::Dit));
         assert_eq!(keyer.next_element(), Some(Paddle::Dit));
         keyer.release(Paddle::Dit);
@@ -540,14 +522,14 @@ mod tests {
         // X is -..- : dah, squeeze dit for the two dits, release dit for the
         // last dah. Online tools that alternate on squeeze send C instead.
         let mut keyer = PaddleKeyer::with_mode(KeyerMode::Ultimatic);
-        let mut decoder = PaddleDecoder::new();
-        keyer.press(Paddle::Dah);
-        decoder.hit(keyer.next_element().unwrap(), 0, 60);
-        keyer.press(Paddle::Dit);
-        decoder.hit(keyer.next_element().unwrap(), 60, 60);
-        decoder.hit(keyer.next_element().unwrap(), 120, 60);
+        let mut decoder = PaddleDecoder::default();
+        keyer.press(Paddle::Dah, 0);
+        decoder.push(keyer.next_element().unwrap());
+        keyer.press(Paddle::Dit, 0);
+        decoder.push(keyer.next_element().unwrap());
+        decoder.push(keyer.next_element().unwrap());
         keyer.release(Paddle::Dit);
-        decoder.hit(keyer.next_element().unwrap(), 180, 60);
+        decoder.push(keyer.next_element().unwrap());
         keyer.release(Paddle::Dah);
         assert_eq!(decoder.take_letter(), Some('X'));
     }
@@ -555,14 +537,14 @@ mod tests {
     #[test]
     fn ultimatic_sends_p_by_squeezing_the_middle_dahs() {
         let mut keyer = PaddleKeyer::with_mode(KeyerMode::Ultimatic);
-        let mut decoder = PaddleDecoder::new();
-        keyer.press(Paddle::Dit);
-        decoder.hit(keyer.next_element().unwrap(), 0, 60);
-        keyer.press(Paddle::Dah);
-        decoder.hit(keyer.next_element().unwrap(), 60, 60);
-        decoder.hit(keyer.next_element().unwrap(), 120, 60);
+        let mut decoder = PaddleDecoder::default();
+        keyer.press(Paddle::Dit, 0);
+        decoder.push(keyer.next_element().unwrap());
+        keyer.press(Paddle::Dah, 0);
+        decoder.push(keyer.next_element().unwrap());
+        decoder.push(keyer.next_element().unwrap());
         keyer.release(Paddle::Dah);
-        decoder.hit(keyer.next_element().unwrap(), 180, 60);
+        decoder.push(keyer.next_element().unwrap());
         keyer.release(Paddle::Dit);
         assert_eq!(decoder.take_letter(), Some('P'));
     }
@@ -570,9 +552,9 @@ mod tests {
     #[test]
     fn ultimatic_a_tap_inserts_one_opposite_then_the_held_paddle_resumes() {
         let mut keyer = PaddleKeyer::with_mode(KeyerMode::Ultimatic);
-        keyer.press(Paddle::Dah);
+        keyer.press(Paddle::Dah, 0);
         assert_eq!(keyer.next_element(), Some(Paddle::Dah));
-        keyer.press(Paddle::Dit);
+        keyer.press(Paddle::Dit, 0);
         keyer.release(Paddle::Dit);
         assert_eq!(keyer.next_element(), Some(Paddle::Dit));
         assert_eq!(keyer.next_element(), Some(Paddle::Dah));
@@ -581,7 +563,7 @@ mod tests {
     #[test]
     fn a_short_straight_press_is_a_dit() {
         let mut keyer = PaddleKeyer::with_mode(KeyerMode::Straight);
-        keyer.press_at(Paddle::Dit, 0);
+        keyer.press(Paddle::Dit, 0);
         keyer.release(Paddle::Dit);
         assert_eq!(keyer.take_straight(50, 60), Some(Paddle::Dit));
         assert_eq!(keyer.next_element(), None);
@@ -590,7 +572,7 @@ mod tests {
     #[test]
     fn a_long_straight_press_is_a_dah() {
         let mut keyer = PaddleKeyer::with_mode(KeyerMode::Straight);
-        keyer.press_at(Paddle::Dah, 10);
+        keyer.press(Paddle::Dah, 10);
         keyer.release(Paddle::Dah);
         assert_eq!(keyer.take_straight(200, 60), Some(Paddle::Dah));
     }
@@ -598,8 +580,8 @@ mod tests {
     #[test]
     fn either_bracket_is_the_straight_key_contact() {
         let mut keyer = PaddleKeyer::with_mode(KeyerMode::Straight);
-        keyer.press_at(Paddle::Dit, 0);
-        keyer.press_at(Paddle::Dah, 20);
+        keyer.press(Paddle::Dit, 0);
+        keyer.press(Paddle::Dah, 20);
         keyer.release(Paddle::Dit);
         assert!(keyer.any_held());
         assert_eq!(keyer.take_straight(200, 60), None);
