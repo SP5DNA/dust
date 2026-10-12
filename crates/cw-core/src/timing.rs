@@ -41,11 +41,29 @@ pub fn compute_after_group_gap_ms(
 
 /// Word-space gap for the WPM that was actually sent, not the settings minimum.
 pub fn compute_group_gap_for_wpm(char_wpm: f64, effective_wpm: f64, extra_word_space: f64) -> u32 {
+    let word_space_sec =
+        7.0 * spacing_unit_sec(char_wpm, effective_wpm) * clamp_extra_spacing(extra_word_space);
+    (word_space_sec * 1000.0).round() as u32
+}
+
+/// One unit of the gaps between characters and words, in seconds: three of
+/// them between letters, seven between words.
+///
+/// At an effective speed below the character speed this is Farnsworth
+/// timing as the ARRL defines it (Jon Bloom, QEX 1990). PARIS has fifty
+/// units, nineteen of them letter and word gaps; the characters keep their
+/// own speed and the whole of the slow-down goes into those nineteen, so that
+/// a word still takes sixty seconds over the effective speed. Stretching them
+/// only to the effective speed's dot would leave the word arriving faster
+/// than the speed asked for.
+fn spacing_unit_sec(char_wpm: f64, effective_wpm: f64) -> f64 {
     let char_wpm = char_wpm.max(1.0);
     let effective_wpm = effective_wpm.max(1.0).min(char_wpm);
-    let dot_effective_sec = 1.2 / effective_wpm;
-    let word_space_sec = 7.0 * dot_effective_sec * clamp_extra_spacing(extra_word_space);
-    (word_space_sec * 1000.0).round() as u32
+    if effective_wpm >= char_wpm {
+        return dot_seconds(char_wpm);
+    }
+    let delay_per_word = (60.0 * char_wpm - 37.2 * effective_wpm) / (effective_wpm * char_wpm);
+    delay_per_word / 19.0
 }
 
 #[derive(Clone, Debug)]
@@ -518,7 +536,7 @@ pub fn plan_morse_playback_for(
     let target_gain = DEFAULT_TARGET_GAIN * voice.volume.clamp(0.0, 1.0);
 
     let dot_char = dot_seconds(resolved_char_wpm);
-    let dot_eff = dot_seconds(resolved_effective_wpm);
+    let unit = spacing_unit_sec(resolved_char_wpm, resolved_effective_wpm);
     // The operator's fist. Elements are stretched or clipped by their weight
     // and the gap after them takes the difference back, so a heavy fist
     // crowds its spaces rather than simply sending slower — which is what
@@ -528,8 +546,8 @@ pub fn plan_morse_playback_for(
     let dot_duration = dot_char * weight;
     let dash_duration = dot_char * dash_ratio * weight;
     let symbol_space = dot_char * (2.0 - weight);
-    let char_space = dot_eff * 3.0;
-    let word_space = dot_eff * 7.0 * extra;
+    let char_space = unit * 3.0;
+    let word_space = unit * 7.0 * extra;
     let rise_time = settings.band.steepness / 1000.0;
     let smoothing = settings.band.envelope_smoothing.clamp(0.0, 1.0);
 
@@ -955,6 +973,34 @@ mod plan_tests {
             (f64::from(compute_group_gap_for_wpm(20.0, 20.0, 1.0)) / 1000.0 / dot - 7.0).abs()
                 < 0.01
         );
+    }
+
+    /// Effective speed is the speed a word arrives at: PARIS and the word
+    /// space after it take sixty seconds over the effective WPM, whatever the
+    /// characters inside it are sent at. That is the ARRL's definition of
+    /// Farnsworth timing, and stretching only the letter and word gaps to
+    /// three and seven dots at the effective speed fell well short of it —
+    /// ten words a minute played at fourteen and a half.
+    #[test]
+    fn paris_and_its_word_space_take_a_minute_over_the_effective_speed() {
+        let s = fixed_speed(20.0);
+        for (char_wpm, effective_wpm) in [(20.0, 20.0), (20.0, 10.0), (25.0, 5.0), (18.0, 12.0)] {
+            let voice = StationVoice {
+                tone_hz: 600.0,
+                char_wpm,
+                effective_wpm,
+                volume: 1.0,
+                weight: 1.0,
+                dash_ratio: 3.0,
+            };
+            let word = plan_morse_playback_for("PARIS", &s, &voice).duration_sec
+                + f64::from(compute_group_gap_for_wpm(char_wpm, effective_wpm, 1.0)) / 1000.0;
+            let heard_wpm = 60.0 / word;
+            assert!(
+                (heard_wpm - effective_wpm).abs() / effective_wpm < 0.01,
+                "{char_wpm}/{effective_wpm} WPM played at {heard_wpm:.2} WPM"
+            );
+        }
     }
 
     #[test]
