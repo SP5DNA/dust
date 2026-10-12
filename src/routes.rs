@@ -7,7 +7,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use cw_core::{Paddle, SessionEvent, TrainingSettings, compute_char_pool, dit_ms_for_wpm};
+use cw_core::{SessionEvent, TrainingSettings, compute_char_pool};
 use dioxus::prelude::*;
 
 use crate::persist::auto_progress;
@@ -20,21 +20,12 @@ use crate::ui::listen::ListenView;
 use crate::ui::results::ResultsView;
 use crate::ui::settings::SettingsView;
 use crate::ui::stats::StatsView;
-use crate::ui::training::{TrainingScope, TrainingView};
+use crate::ui::training::{TrainingProgress, TrainingView};
 
 /// How often the band follows the settings while it is being previewed:
 /// often enough to sound live, seldom enough that a slider dragged across
 /// the noise does not rebuild the band, and measure its AGC, every frame.
 const BAND_FOLLOW_MS: u32 = 80;
-
-/// The paddle keyer the shell runs for every screen but training, as the
-/// screens that show it need it.
-#[derive(Clone, Copy)]
-pub struct Paddles {
-    pub heard: Signal<String>,
-    pub down: EventHandler<Paddle>,
-    pub up: EventHandler<Paddle>,
-}
 
 /// The screen `screen` names.
 #[component]
@@ -75,7 +66,6 @@ fn HomeRoute() -> Element {
 #[component]
 fn SettingsRoute() -> Element {
     let ctx = use_context::<AppCtx>();
-    let paddles = use_context::<Paddles>();
     let on_preview_band = use_callback(move |()| playback::start_band_preview(ctx));
     let on_stop_band = use_callback(move |()| ctx.stop_audio());
     let on_play_sample = use_callback(move |text| playback::start_sample(ctx, text));
@@ -89,9 +79,6 @@ fn SettingsRoute() -> Element {
             on_preview_band,
             on_stop_band,
             on_play_sample,
-            paddle_heard: (paddles.heard)(),
-            on_paddle_down: paddles.down,
-            on_paddle_up: paddles.up,
         }
     }
 }
@@ -159,24 +146,18 @@ fn TrainingRoute() -> Element {
     let on_change = use_callback(move |(index, text): (usize, String)| {
         send_event(ctx, SessionEvent::Input { index, text });
     });
-    let on_confirm = use_callback(move |_: usize| send_event(ctx, SessionEvent::Confirm));
+    let on_confirm = use_callback(move |()| send_event(ctx, SessionEvent::Confirm));
     let on_submit = use_callback(move |()| send_event(ctx, SessionEvent::FinishNow));
     let on_stop = use_callback(move |()| send_event(ctx, SessionEvent::Abort));
-    // The sidetone follows the settings the session was started with.
-    let on_tone = use_callback(move |on: bool| {
-        if let Some(session) = ctx.runtime.peek().as_ref() {
-            ctx.app().set_live_tone(on, session.settings());
-        }
-    });
     let runtime = ctx.runtime.read();
     let Some(session) = runtime.as_ref() else {
         return rsx! { p { class: "muted", "Starting…" } };
     };
     let view = session.view();
-    let playback = &session.settings().playback;
+    let keyer_mode = session.settings().playback.keyer_mode;
     rsx! {
         div { class: "stack",
-            TrainingScope {
+            TrainingProgress {
                 focused: view.focused,
                 total: view.sent.len(),
                 playing: view.playing,
@@ -193,10 +174,7 @@ fn TrainingRoute() -> Element {
                 locked: view.locked,
                 repeat_total: view.repeat_total,
                 repeat_done: view.repeat_done,
-                paddle_swap: playback.paddle_swap,
-                keyer_mode: playback.keyer_mode,
-                dit_ms: dit_ms_for_wpm(playback.keyer_wpm),
-                on_tone,
+                keyer_mode,
                 on_change,
                 on_confirm,
                 on_submit,
@@ -235,11 +213,6 @@ mod tests {
     #[component]
     fn EmptyRoute(screen: Screen) -> Element {
         use_context_provider(|| AppCtx::new(AppState::new(), test_settings(), Vec::new()));
-        use_context_provider(|| Paddles {
-            heard: Signal::new(String::new()),
-            down: EventHandler::default(),
-            up: EventHandler::default(),
-        });
         rsx! { Route { screen } }
     }
 

@@ -1,7 +1,6 @@
 pub mod auto_level;
 pub mod band;
 pub mod envelope;
-pub mod focus;
 pub mod heatmap;
 pub mod home;
 pub mod listen;
@@ -17,5 +16,7 @@ pub mod widgets;
 
 #[cfg(test)]
 mod render_tests;
+#[cfg(test)]
+mod settings_tests;
 #[cfg(test)]
 mod styles_tests;

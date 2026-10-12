@@ -7,13 +7,13 @@ use std::rc::Rc;
 use cw_core::SessionEvent;
 use dioxus::prelude::*;
 
-use crate::routes::{Paddles, Route};
+use crate::routes::Route;
 use crate::session_runtime::send_event;
 use crate::state::{AppCtx, AppState, Screen, TOAST_MS};
 use crate::theme::Theme;
 use crate::time::sleep_ms;
 use crate::ui::paddle::use_paddle_keys;
-use crate::ui::widgets::{Icon, control_id};
+use crate::ui::widgets::{Icon, IconName, control_id};
 
 // Desktop inlines this in the window head. Web loads it through `asset!` so
 // `dx bundle` copies the file; compiling the sheet into wasm would ship it
@@ -110,11 +110,6 @@ pub fn App() -> Element {
     } = ctx;
     let mut theme = use_signal(|| Theme::from_key(&ctx.app().store.load_theme()));
     let paddle = use_paddle_keys(settings, screen, Rc::new(ctx.app()));
-    use_context_provider(|| Paddles {
-        heard: paddle.heard,
-        down: paddle.down,
-        up: paddle.up,
-    });
     use_stored_settings(ctx);
 
     use_effect(move || {
@@ -143,9 +138,9 @@ pub fn App() -> Element {
                     toggle_fullscreen();
                     return;
                 }
-                paddle.keydown.call(e);
+                paddle.keydown(e);
             },
-            onkeyup: move |e| paddle.keyup.call(e),
+            onkeyup: move |e| paddle.keyup(e),
             div { class: shell_class,
                 header { class: "header-bar",
                     div { class: "brand",
@@ -184,7 +179,7 @@ pub fn App() -> Element {
                         }
                     }
                 }
-                div { class: "screen", id: "screen-{screen_key}", key: "{screen_key}",
+                div { class: "screen", id: "screen-{screen_key}",
                     Route { screen: screen_now }
                 }
             }
@@ -195,21 +190,21 @@ pub fn App() -> Element {
                             id: control_id("nav", "practice"),
                             class: if matches!(screen_now, Screen::Home | Screen::Listen | Screen::Results) { "nav-item active" } else { "nav-item" },
                             onclick: move |_| ctx.go_to(Screen::Home),
-                            Icon { name: "signal" }
+                            Icon { name: IconName::Signal }
                             span { "Practice" }
                         }
                         button {
                             id: control_id("nav", "stats"),
                             class: if screen_now == Screen::Stats { "nav-item active" } else { "nav-item" },
                             onclick: move |_| ctx.go_to(Screen::Stats),
-                            Icon { name: "chart" }
+                            Icon { name: IconName::Chart }
                             span { "Stats" }
                         }
                         button {
                             id: control_id("nav", "settings"),
                             class: if screen_now == Screen::Settings { "nav-item active" } else { "nav-item" },
                             onclick: move |_| ctx.go_to(Screen::Settings),
-                            Icon { name: "sliders" }
+                            Icon { name: IconName::Sliders }
                             span { "Settings" }
                         }
                     }
@@ -421,7 +416,7 @@ mod ui_tests {
     }
 
     #[test]
-    fn a_group_locks_while_it_plays_then_unlocks_with_autofocus() {
+    fn a_group_locks_while_it_plays_then_unlocks() {
         run(|| async {
             let mut settings = test_settings();
             settings.curriculum.num_groups = 2;
@@ -432,7 +427,6 @@ mod ui_tests {
             assert!(ui.has("Listen — the answer box unlocks"));
             let sending = ui.input_tag("group-input-0");
             assert!(sending.contains("readonly"), "{sending}");
-            assert!(!sending.contains("autofocus"), "{sending}");
             ui.type_into("group-input-0", "XX");
             assert!(!ui.has("committed"), "{}", ui.html());
 
@@ -440,7 +434,6 @@ mod ui_tests {
             let open = ui.input_tag("group-input-0");
             assert!(!open.contains("readonly"), "{open}");
             assert!(!open.contains("disabled"), "{open}");
-            assert!(open.contains("autofocus"), "{open}");
 
             let sent = recorder.texts().first().cloned().expect("a group was sent");
             ui.type_into("group-input-0", &sent);
@@ -455,12 +448,10 @@ mod ui_tests {
             assert!(
                 ui.run_until(8_000, |ui| {
                     let tag = ui.input_tag("group-input-1");
-                    tag.contains("autofocus")
-                        && !tag.contains("readonly")
-                        && !tag.contains("disabled")
+                    !tag.contains("readonly") && !tag.contains("disabled")
                 })
                 .await,
-                "the next group's box should unlock and autofocus: {}",
+                "the next group's box should unlock: {}",
                 ui.html()
             );
             let first = ui.input_tag("group-input-0");
@@ -482,7 +473,6 @@ mod ui_tests {
             let tag = ui.input_tag("group-input-0");
             assert!(!tag.contains("readonly"), "{tag}");
             assert!(!tag.contains("disabled"), "{tag}");
-            assert!(tag.contains("autofocus"), "{tag}");
         });
     }
 
@@ -739,7 +729,7 @@ mod ui_tests {
             settings.curriculum.level = 9;
             let (mut ui, _recorder) = Ui::app_with_settings(settings);
             ui.click("nav-settings");
-            ui.type_into("field-sequence-order", "KM");
+            ui.commit("field-sequence-order", "KM");
             ui.advance(50).await;
             let stored = ui.stored_settings().await;
             assert_eq!(stored.curriculum.custom_sequence, vec!['K', 'M']);
@@ -747,7 +737,7 @@ mod ui_tests {
             assert_eq!(stored.active_level(), 1);
             assert_eq!(stored.clone().clamp(), stored);
 
-            ui.type_into("field-sequence-order", "KMURESNAPTL");
+            ui.commit("field-sequence-order", "KMURESNAPTL");
             ui.advance(50).await;
             assert_eq!(ui.stored_settings().await.active_level(), 9);
         });
@@ -1345,11 +1335,11 @@ mod ui_tests {
             ui.click("btn-start-training");
             assert!(ui.run_until(20_000, |ui| ui.screen() == "training").await);
 
-            // A frame of the receiver trace while a group is sending.
+            // Nothing redraws on a timer while a group is sending.
             let _ = ui.take_work();
             ui.advance(40).await;
-            let frame = ui.take_work();
-            assert!(frame <= 4, "a scope frame cost {frame} mutations");
+            let sending = ui.take_work();
+            assert!(sending <= 4, "40 ms of sending cost {sending} mutations");
 
             assert!(ui.run_until(30_000, |ui| ui.has("Your turn")).await);
 

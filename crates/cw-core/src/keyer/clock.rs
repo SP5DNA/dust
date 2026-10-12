@@ -1,0 +1,366 @@
+//! The keyer on a clock: paddles in, sidetone and letters out.
+
+use super::{KeyerMode, LETTER_GAP_DITS, Paddle, PaddleDecoder, PaddleKeyer, dit_ms_for_wpm};
+
+/// What the keyer is doing between one instant and the next.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Phase {
+    /// Nothing sounding and no letter open.
+    Idle,
+    /// The straight key's contact is closed. The element is as long as it
+    /// stays that way.
+    Contact,
+    /// An element sounding, until `until`.
+    Element { until: u64 },
+    /// The space after an element, until `until`.
+    Space { until: u64 },
+    /// Quiet since `since`. A letter space ends the letter; a paddle closing
+    /// before then carries it on.
+    Gap { since: u64 },
+}
+
+/// What the host has to do now that the keyer has moved.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[must_use = "the sidetone, the letter and the next wake are the host's to act on"]
+pub struct KeyerOutput {
+    /// The sidetone goes on, or off, when it has changed.
+    pub tone: Option<bool>,
+    /// A letter that has just ended and spells a character.
+    pub letter: Option<char>,
+    /// When the keyer next has something to do: call [`Keyer::tick`] then.
+    pub wake_at: Option<u64>,
+}
+
+/// An electronic keyer, timed by whoever drives it.
+///
+/// Every call takes the instant it happens at, in milliseconds on any
+/// monotonic clock, so the keyer never sleeps and never needs to be woken
+/// early: the host acts on each [`KeyerOutput`] — sounds the tone, takes the
+/// letter — and calls [`Keyer::tick`] when `wake_at` comes round. A tick that
+/// comes before then, or twice, changes nothing, so a timer the host forgot to
+/// cancel is harmless. Each phase is timed from the instant it really began,
+/// so a tick that comes late lengthens the element that was sounding rather
+/// than eating into the space after it.
+#[derive(Clone, Debug)]
+pub struct Keyer {
+    paddles: PaddleKeyer,
+    decoder: PaddleDecoder,
+    dit_ms: u64,
+    phase: Phase,
+}
+
+impl Keyer {
+    pub fn new(mode: KeyerMode, wpm: f64) -> Self {
+        Self {
+            paddles: PaddleKeyer::with_mode(mode),
+            decoder: PaddleDecoder::default(),
+            dit_ms: dit_ms_for_wpm(wpm),
+            phase: Phase::Idle,
+        }
+    }
+
+    pub fn mode(&self) -> KeyerMode {
+        self.paddles.mode()
+    }
+
+    /// Key another way. Whatever was half keyed the old way is dropped.
+    pub fn set_mode(&mut self, mode: KeyerMode) -> KeyerOutput {
+        if mode == self.mode() {
+            return KeyerOutput::default();
+        }
+        let out = self.stop();
+        self.paddles.set_mode(mode);
+        out
+    }
+
+    /// The speed the paddles send at, from the next element on.
+    pub fn set_wpm(&mut self, wpm: f64) {
+        self.dit_ms = dit_ms_for_wpm(wpm);
+    }
+
+    /// Whether the sidetone is sounding.
+    pub fn sounding(&self) -> bool {
+        matches!(self.phase, Phase::Contact | Phase::Element { .. })
+    }
+
+    /// A paddle closed at `now`. An electronic keyer that is between letters,
+    /// or waiting out a letter space, starts the element at once: a dit at
+    /// 20 WPM is 60 ms, and waiting for the next tick to begin it would be
+    /// the whole character feeling late.
+    pub fn press(&mut self, paddle: Paddle, now: u64) -> KeyerOutput {
+        let was_sounding = self.sounding();
+        self.paddles.press(paddle, now);
+        if self.mode().is_straight() {
+            self.phase = Phase::Contact;
+        } else if matches!(self.phase, Phase::Idle | Phase::Gap { .. }) {
+            self.start_next(now);
+        }
+        self.output(was_sounding, None)
+    }
+
+    /// A paddle opened at `now`. An electronic keyer finishes the element it
+    /// is on; a straight key's element ends here.
+    pub fn release(&mut self, paddle: Paddle, now: u64) -> KeyerOutput {
+        let was_sounding = self.sounding();
+        self.paddles.release(paddle);
+        if self.phase == Phase::Contact && !self.paddles.any_held() {
+            if let Some(element) = self.paddles.take_straight(now, self.dit_ms) {
+                self.decoder.push(element);
+            }
+            self.phase = Phase::Gap { since: now };
+        }
+        self.output(was_sounding, None)
+    }
+
+    /// The clock has reached `now`: end whatever was due to end by then.
+    pub fn tick(&mut self, now: u64) -> KeyerOutput {
+        let was_sounding = self.sounding();
+        let mut letter = None;
+        match self.phase {
+            Phase::Element { until } if now >= until => {
+                self.phase = Phase::Space {
+                    until: now.saturating_add(self.dit_ms),
+                };
+            }
+            Phase::Space { until } if now >= until => self.start_next(now),
+            Phase::Gap { since } if now >= since.saturating_add(self.letter_gap_ms()) => {
+                letter = self.decoder.take_letter();
+                self.phase = Phase::Idle;
+            }
+            _ => {}
+        }
+        self.output(was_sounding, letter)
+    }
+
+    /// Drop everything — the element sounding, the paddles held, the letter
+    /// half keyed — and fall silent.
+    pub fn stop(&mut self) -> KeyerOutput {
+        let was_sounding = self.sounding();
+        self.paddles.reset();
+        self.decoder = PaddleDecoder::default();
+        self.phase = Phase::Idle;
+        self.output(was_sounding, None)
+    }
+
+    /// Send the next element now, or start the letter space when there is
+    /// none to send.
+    fn start_next(&mut self, now: u64) {
+        self.phase = match self.paddles.next_element() {
+            Some(paddle) => {
+                self.decoder.push(paddle);
+                Phase::Element {
+                    until: now.saturating_add(self.dit_ms.saturating_mul(paddle.dits())),
+                }
+            }
+            None => Phase::Gap { since: now },
+        };
+    }
+
+    fn letter_gap_ms(&self) -> u64 {
+        self.dit_ms.saturating_mul(LETTER_GAP_DITS)
+    }
+
+    fn output(&self, was_sounding: bool, letter: Option<char>) -> KeyerOutput {
+        let sounding = self.sounding();
+        KeyerOutput {
+            tone: (sounding != was_sounding).then_some(sounding),
+            letter,
+            wake_at: match self.phase {
+                Phase::Idle | Phase::Contact => None,
+                Phase::Element { until } | Phase::Space { until } => Some(until),
+                Phase::Gap { since } => Some(since.saturating_add(self.letter_gap_ms())),
+            },
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use Paddle::{Dah, Dit};
+
+    /// 20 WPM: a dit is 60 ms.
+    const WPM: f64 = 20.0;
+
+    /// Drives a keyer the way the app does — ticking at every wake — and
+    /// writes down what it heard: `"180 off"`, `"840 O"`.
+    struct Host {
+        keyer: Keyer,
+        wake: Option<u64>,
+        log: Vec<String>,
+    }
+
+    impl Host {
+        fn new(mode: KeyerMode) -> Self {
+            Self {
+                keyer: Keyer::new(mode, WPM),
+                wake: None,
+                log: Vec::new(),
+            }
+        }
+
+        fn act(&mut self, now: u64, out: KeyerOutput) {
+            if let Some(on) = out.tone {
+                self.log
+                    .push(format!("{now} {}", if on { "on" } else { "off" }));
+            }
+            if let Some(letter) = out.letter {
+                self.log.push(format!("{now} {letter}"));
+            }
+            self.wake = out.wake_at;
+        }
+
+        /// Run the clock up to `now`, ticking at each wake on the way.
+        fn run_to(&mut self, now: u64) {
+            while let Some(at) = self.wake.filter(|at| *at <= now) {
+                let out = self.keyer.tick(at);
+                self.act(at, out);
+            }
+        }
+
+        fn press(&mut self, paddle: Paddle, now: u64) {
+            self.run_to(now);
+            let out = self.keyer.press(paddle, now);
+            self.act(now, out);
+        }
+
+        fn release(&mut self, paddle: Paddle, now: u64) {
+            self.run_to(now);
+            let out = self.keyer.release(paddle, now);
+            self.act(now, out);
+        }
+
+        fn heard(&mut self) -> Vec<String> {
+            self.run_to(u64::MAX / 2);
+            std::mem::take(&mut self.log)
+        }
+    }
+
+    #[test]
+    fn a_held_dah_paddle_keys_dahs_until_it_is_let_go() {
+        let mut host = Host::new(KeyerMode::IambicA);
+        host.press(Dah, 0);
+        // Let go during the third dah: it still finishes, then the letter
+        // space after it ends the letter.
+        host.release(Dah, 500);
+        assert_eq!(
+            host.heard(),
+            [
+                "0 on", "180 off", "240 on", "420 off", "480 on", "660 off", "840 O"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_squeeze_alternates_from_the_paddle_closed_first() {
+        let mut host = Host::new(KeyerMode::IambicA);
+        host.press(Dah, 0);
+        host.press(Dit, 10);
+        host.release(Dah, 370);
+        host.release(Dit, 370);
+        // Dah, dit, dah — the third already under way when both let go.
+        assert_eq!(
+            host.heard(),
+            [
+                "0 on", "180 off", "240 on", "300 off", "360 on", "540 off", "720 K"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_paddle_closed_in_the_letter_space_carries_the_letter_on() {
+        let mut host = Host::new(KeyerMode::IambicA);
+        host.press(Dit, 0);
+        host.release(Dit, 30);
+        // The dit ends at 60 and its space at 120; the letter would end at
+        // 240. A second dit at 200 makes it an I.
+        host.press(Dit, 200);
+        host.release(Dit, 230);
+        assert_eq!(
+            host.heard(),
+            ["0 on", "60 off", "200 on", "260 off", "440 I"]
+        );
+    }
+
+    #[test]
+    fn a_straight_key_is_timed_by_its_contact() {
+        let mut host = Host::new(KeyerMode::Straight);
+        host.press(Dit, 0);
+        host.release(Dit, 50);
+        host.press(Dah, 100);
+        host.release(Dah, 300);
+        // Short then long: A, once the contact has been open a letter space.
+        assert_eq!(
+            host.heard(),
+            ["0 on", "50 off", "100 on", "300 off", "420 A"]
+        );
+    }
+
+    #[test]
+    fn early_or_repeated_ticks_change_nothing() {
+        let mut keyer = Keyer::new(KeyerMode::IambicA, WPM);
+        let first = keyer.press(Dit, 0);
+        assert_eq!(first.wake_at, Some(60));
+        for now in [0, 30, 59, 59] {
+            assert_eq!(
+                keyer.tick(now),
+                KeyerOutput {
+                    wake_at: Some(60),
+                    ..KeyerOutput::default()
+                }
+            );
+        }
+        assert_eq!(keyer.tick(60).tone, Some(false));
+        assert_eq!(keyer.tick(60).tone, None);
+    }
+
+    #[test]
+    fn a_late_tick_lengthens_the_element_and_keeps_the_space_whole() {
+        let mut keyer = Keyer::new(KeyerMode::IambicA, WPM);
+        let _ = keyer.press(Dit, 0);
+        let _ = keyer.release(Dit, 10);
+        let late = keyer.tick(100);
+        assert_eq!(late.tone, Some(false));
+        assert_eq!(late.wake_at, Some(160), "a whole dit of space after it");
+    }
+
+    #[test]
+    fn stopping_drops_the_half_keyed_letter_and_silences_the_tone() {
+        let mut keyer = Keyer::new(KeyerMode::IambicA, WPM);
+        let _ = keyer.press(Dah, 0);
+        let stopped = keyer.stop();
+        assert_eq!(
+            stopped,
+            KeyerOutput {
+                tone: Some(false),
+                ..KeyerOutput::default()
+            }
+        );
+        // The timer for the dah that was sounding comes round to nothing.
+        assert_eq!(keyer.tick(180), KeyerOutput::default());
+        assert_eq!(keyer.tick(10_000), KeyerOutput::default());
+        assert_eq!(keyer.stop(), KeyerOutput::default(), "already quiet");
+    }
+
+    #[test]
+    fn a_new_mode_drops_what_the_old_one_had_keyed() {
+        let mut host = Host::new(KeyerMode::IambicA);
+        host.press(Dit, 0);
+        host.release(Dit, 30);
+        let out = host.keyer.set_mode(KeyerMode::Straight);
+        host.act(40, out);
+        assert_eq!(host.keyer.mode(), KeyerMode::Straight);
+        assert_eq!(host.heard(), ["0 on", "40 off"]);
+        assert_eq!(
+            host.keyer.set_mode(KeyerMode::Straight),
+            KeyerOutput::default()
+        );
+    }
+
+    #[test]
+    fn a_new_speed_times_the_next_element() {
+        let mut keyer = Keyer::new(KeyerMode::IambicA, WPM);
+        keyer.set_wpm(12.0);
+        assert_eq!(keyer.press(Dit, 0).wake_at, Some(100));
+    }
+}

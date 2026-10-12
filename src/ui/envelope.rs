@@ -1,10 +1,15 @@
 //! Keying-envelope scope: draws the exact attack/decay shape the audio backends
 //! apply, and sends short test samples with the current settings.
 
-use cw_core::{EnvelopeShape, SettingsSection, TrainingSettings, envelope_shape};
+use cw_core::{
+    EnvelopeShape, STEEPNESS_MAX_MS, STEEPNESS_MIN_MS, SettingsSection, TrainingSettings,
+    envelope_shape,
+};
 use dioxus::prelude::*;
 
-use crate::ui::widgets::{Icon, SectionReset, SliderField, control_id, pretty_number};
+use crate::ui::widgets::{
+    CardHead, Icon, IconName, SectionReset, SliderField, control_id, pretty_number,
+};
 
 const VIEW_W: f64 = 320.0;
 const VIEW_H: f64 = 120.0;
@@ -75,6 +80,14 @@ fn envelope_path(shape: &EnvelopeShape) -> String {
     format!("{top}{bottom} Z")
 }
 
+/// What the envelope card shows: the shape, and the two settings that make it.
+#[derive(Clone, PartialEq)]
+struct Envelope {
+    shape: EnvelopeShape,
+    rise_ms: f64,
+    smoothing: f64,
+}
+
 #[component]
 pub fn EnvelopeCard(
     settings: Signal<TrainingSettings>,
@@ -82,9 +95,17 @@ pub fn EnvelopeCard(
     on_play: EventHandler<String>,
     on_stop: EventHandler<()>,
 ) -> Element {
-    let s = settings();
-    let shape = envelope_shape(&s);
-    let path = envelope_path(&shape);
+    let envelope = use_memo(move || {
+        let s = settings.read();
+        Envelope {
+            shape: envelope_shape(&s),
+            rise_ms: s.band.steepness,
+            smoothing: s.band.envelope_smoothing,
+        }
+    });
+    let envelope = envelope.read();
+    let shape = &envelope.shape;
+    let path = envelope_path(shape);
     let span = shape.total_sec;
     let rise_w = (x_at(shape.rise_sec.min(shape.dot_sec), span) - PAD_X).max(0.0);
     let dit_share = (shape.dot_sec * 2.0 / span * 100.0).round();
@@ -100,23 +121,15 @@ pub fn EnvelopeCard(
     let playing = sample_playing;
     rsx! {
         div { class: "card stack-sm",
-            div { class: "card-head",
-                div { class: "card-head-main",
-                    span { class: "card-icon", Icon { name: "envelope" } }
-                    div {
-                        h3 { class: "card-title", "Keying envelope" }
-                        p { class: "card-note",
-                            "A dit and a dah at {shape.wpm as u32} WPM · dit {dot_ms} ms"
-                        }
-                    }
-                }
-                div { class: "card-tools",
-                    SectionReset {
-                        label: "keying envelope".to_string(),
-                        on_reset: move |()| {
-                            settings.write().reset_section(SettingsSection::KeyingEnvelope);
-                        },
-                    }
+            CardHead {
+                icon: IconName::Envelope,
+                title: "Keying envelope",
+                note: format!("A dit and a dah at {} WPM · dit {dot_ms} ms", shape.wpm as u32),
+                SectionReset {
+                    label: "keying envelope",
+                    on_reset: move |()| {
+                        settings.write().reset_section(SettingsSection::KeyingEnvelope);
+                    },
                 }
             }
             div { class: "envelope-stage",
@@ -169,7 +182,7 @@ pub fn EnvelopeCard(
                     }
                     span { class: "legend-item",
                         span { class: "legend-swatch rise" }
-                        "Rise window {pretty_number(s.band.steepness)} ms"
+                        "Rise window {pretty_number(envelope.rise_ms)} ms"
                     }
                     span { class: "legend-item", "{sharpness}" }
                 }
@@ -182,18 +195,18 @@ pub fn EnvelopeCard(
             div { class: "field-grid",
                 SliderField {
                     label: "Rise time".to_string(),
-                    value_label: format!("{} ms", pretty_number(s.band.steepness)),
-                    value: s.band.steepness,
-                    min: 1.0,
-                    max: 40.0,
+                    value_label: format!("{} ms", pretty_number(envelope.rise_ms)),
+                    value: envelope.rise_ms,
+                    min: STEEPNESS_MIN_MS,
+                    max: STEEPNESS_MAX_MS,
                     step: 1.0,
                     disabled: false,
                     onchange: move |v| settings.write().band.steepness = v,
                 }
                 SliderField {
                     label: "Edge smoothing".to_string(),
-                    value_label: format!("{:.0}%", s.band.envelope_smoothing * 100.0),
-                    value: s.band.envelope_smoothing,
+                    value_label: format!("{:.0}%", envelope.smoothing * 100.0),
+                    value: envelope.smoothing,
                     min: 0.0,
                     max: 1.0,
                     step: 0.05,
@@ -208,7 +221,7 @@ pub fn EnvelopeCard(
                         id: control_id("btn", "sample stop"),
                         class: "btn btn-secondary btn-sm",
                         onclick: move |_| on_stop.call(()),
-                        Icon { name: "stop" }
+                        Icon { name: IconName::Stop }
                         "Stop"
                     }
                 }
@@ -223,7 +236,7 @@ pub fn EnvelopeCard(
                                 id: control_id("chip", chip.label),
                                 class: if is_playing { "test-chip playing" } else { "test-chip" },
                                 onclick: move |_| on_play.call(text.clone()),
-                                Icon { name: if is_playing { "stop" } else { "play" } }
+                                Icon { name: if is_playing { IconName::Stop } else { IconName::Play } }
                                 "{chip.label}"
                                 span { class: "code", "{chip.code}" }
                             }

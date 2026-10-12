@@ -1,21 +1,11 @@
-use cw_core::{GroupResult, align_group};
+use cw_core::{GroupResult, RangeSetting, TrainingSettings, align_group};
 use dioxus::prelude::*;
 
-fn parse_number_input(raw: &str, min: f64, max: f64, commit: bool) -> Option<f64> {
-    let value: f64 = raw.parse().ok()?;
-    if !value.is_finite() {
-        return None;
-    }
-    if commit {
-        return Some(value.clamp(min, max));
-    }
-    if value > max {
-        Some(max)
-    } else if value < 0.0 && min >= 0.0 {
-        None
-    } else {
-        Some(value)
-    }
+/// What was typed into a number field, held inside its bounds. `None` for
+/// anything that is not a finite number, which leaves the value as it was.
+fn parse_number_input(raw: &str, min: f64, max: f64) -> Option<f64> {
+    let value: f64 = raw.trim().parse().ok()?;
+    value.is_finite().then(|| value.clamp(min, max))
 }
 
 /// Snap to the step grid so 0.1-steps do not drift into 0.30000000000000004.
@@ -89,99 +79,155 @@ pub fn pretty_number(value: f64) -> String {
     }
 }
 
+/// The app's icons. A name that is not one of these does not compile, which
+/// is the point: a typo used to draw a dot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IconName {
+    Signal,
+    Chart,
+    Sliders,
+    Play,
+    Stop,
+    Headphones,
+    Check,
+    X,
+    Back,
+    Sun,
+    Moon,
+    Auto,
+    Envelope,
+    Gauge,
+    Waves,
+    Target,
+    Shuffle,
+    Repeat,
+    Reset,
+    Letters,
+    Timer,
+    Volume,
+    Sparkle,
+    Flag,
+}
+
+impl IconName {
+    /// Every icon, for the test that draws them all.
+    #[cfg(test)]
+    pub const ALL: [Self; 24] = [
+        Self::Signal,
+        Self::Chart,
+        Self::Sliders,
+        Self::Play,
+        Self::Stop,
+        Self::Headphones,
+        Self::Check,
+        Self::X,
+        Self::Back,
+        Self::Sun,
+        Self::Moon,
+        Self::Auto,
+        Self::Envelope,
+        Self::Gauge,
+        Self::Waves,
+        Self::Target,
+        Self::Shuffle,
+        Self::Repeat,
+        Self::Reset,
+        Self::Letters,
+        Self::Timer,
+        Self::Volume,
+        Self::Sparkle,
+        Self::Flag,
+    ];
+
+    /// The strokes, on a 24×24 grid.
+    fn paths(self) -> &'static [&'static str] {
+        match self {
+            Self::Signal => &["M2 12h3l2.5-7 3.5 14 3-10 2 3h6"],
+            Self::Chart => &["M4 20V11", "M10 20V4", "M16 20v-6", "M2 20h20"],
+            Self::Sliders => &[
+                "M3 7h8",
+                "M15 7h6",
+                "M3 13h3",
+                "M10 13h11",
+                "M3 19h11",
+                "M18 19h3",
+                "M13 5v4",
+                "M8 11v4",
+                "M16 17v4",
+            ],
+            Self::Play => &["M7 4.5l12 7.5-12 7.5z"],
+            Self::Stop => &["M6.5 6.5h11v11h-11z"],
+            Self::Headphones => &["M4 14v-2a8 8 0 0116 0v2", "M4 14h3v6H4z", "M17 14h3v6h-3z"],
+            Self::Check => &["M4.5 12.5l5 5 10-11"],
+            Self::X => &["M6 6l12 12", "M18 6L6 18"],
+            Self::Back => &["M15 5l-7 7 7 7"],
+            Self::Sun => &[
+                "M12 3.5v2",
+                "M12 18.5v2",
+                "M3.5 12h2",
+                "M18.5 12h2",
+                "M6 6l1.5 1.5",
+                "M16.5 16.5L18 18",
+                "M18 6l-1.5 1.5",
+                "M7.5 16.5L6 18",
+                "M15.5 12a3.5 3.5 0 11-7 0 3.5 3.5 0 017 0z",
+            ],
+            Self::Moon => &["M20.5 14.5A8.5 8.5 0 019.5 3.5a8.5 8.5 0 1011 11z"],
+            Self::Auto => &[
+                "M21 12a9 9 0 11-18 0 9 9 0 0118 0z",
+                "M12 3v18a9 9 0 000-18z",
+            ],
+            Self::Envelope => &["M2 18c3.5 0 3-11 7-11s3.5 11 7 11", "M16 18h6", "M2 18h0.5"],
+            Self::Gauge => &["M20 13a8 8 0 10-16 0", "M12 13l4.5-4", "M4 18h16"],
+            Self::Waves => &[
+                "M4 14a6 6 0 0116 0",
+                "M8 17.5a3.2 3.2 0 017.5 0",
+                "M12 21h.01",
+                "M12 3v3",
+            ],
+            Self::Target => &[
+                "M21 12a9 9 0 11-18 0 9 9 0 0118 0z",
+                "M16 12a4 4 0 11-8 0 4 4 0 018 0z",
+                "M12 11.5h.01",
+            ],
+            Self::Shuffle => &[
+                "M3 6.5h4l9 11h5",
+                "M3 17.5h4l2.5-3",
+                "M14 8l2.5-1.5h5",
+                "M18 3.5l4 3-4 3",
+                "M18 14.5l4 3-4 3",
+            ],
+            Self::Repeat => &[
+                "M17 2.5l4 4-4 4",
+                "M3 11.5v-1a4 4 0 014-4h14",
+                "M7 21.5l-4-4 4-4",
+                "M21 12.5v1a4 4 0 01-4 4H3",
+            ],
+            // A single turn back round: undo, not the two-arrow loop of "repeat".
+            Self::Reset => &["M3 12a9 9 0 109-9 9 9 0 00-6.4 2.6L3 8", "M3 3.5V8h4.5"],
+            Self::Letters => &["M3 18l5-12 5 12", "M5 14h6", "M16 9h5", "M18.5 9v9"],
+            Self::Timer => &[
+                "M20 13.5a8 8 0 11-16 0 8 8 0 0116 0z",
+                "M12 9.5v4l2.5 2",
+                "M9 2h6",
+            ],
+            Self::Volume => &["M11 5L6.5 9H3v6h3.5L11 19z", "M15 9.5a4 4 0 010 5"],
+            Self::Sparkle => &["M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"],
+            Self::Flag => &["M5 21V4", "M5 5h13l-2.5 4L18 13H5"],
+        }
+    }
+}
+
 /// Single-colour line icons, 24×24, stroked with `currentColor`.
 #[component]
-pub fn Icon(name: String) -> Element {
-    let paths: &[&str] = match name.as_str() {
-        "signal" => &["M2 12h3l2.5-7 3.5 14 3-10 2 3h6"],
-        "chart" => &["M4 20V11", "M10 20V4", "M16 20v-6", "M2 20h20"],
-        "sliders" => &[
-            "M3 7h8",
-            "M15 7h6",
-            "M3 13h3",
-            "M10 13h11",
-            "M3 19h11",
-            "M18 19h3",
-            "M13 5v4",
-            "M8 11v4",
-            "M16 17v4",
-        ],
-        "play" => &["M7 4.5l12 7.5-12 7.5z"],
-        "stop" => &["M6.5 6.5h11v11h-11z"],
-        "headphones" => &["M4 14v-2a8 8 0 0116 0v2", "M4 14h3v6H4z", "M17 14h3v6h-3z"],
-        "check" => &["M4.5 12.5l5 5 10-11"],
-        "x" => &["M6 6l12 12", "M18 6L6 18"],
-        "chevron" => &["M9 5l7 7-7 7"],
-        "back" => &["M15 5l-7 7 7 7"],
-        "sun" => &[
-            "M12 3.5v2",
-            "M12 18.5v2",
-            "M3.5 12h2",
-            "M18.5 12h2",
-            "M6 6l1.5 1.5",
-            "M16.5 16.5L18 18",
-            "M18 6l-1.5 1.5",
-            "M7.5 16.5L6 18",
-            "M15.5 12a3.5 3.5 0 11-7 0 3.5 3.5 0 017 0z",
-        ],
-        "moon" => &["M20.5 14.5A8.5 8.5 0 019.5 3.5a8.5 8.5 0 1011 11z"],
-        "auto" => &[
-            "M21 12a9 9 0 11-18 0 9 9 0 0118 0z",
-            "M12 3v18a9 9 0 000-18z",
-        ],
-        "envelope" => &["M2 18c3.5 0 3-11 7-11s3.5 11 7 11", "M16 18h6", "M2 18h0.5"],
-        "gauge" => &["M20 13a8 8 0 10-16 0", "M12 13l4.5-4", "M4 18h16"],
-        "waves" => &[
-            "M4 14a6 6 0 0116 0",
-            "M8 17.5a3.2 3.2 0 017.5 0",
-            "M12 21h.01",
-            "M12 3v3",
-        ],
-        "target" => &[
-            "M21 12a9 9 0 11-18 0 9 9 0 0118 0z",
-            "M16 12a4 4 0 11-8 0 4 4 0 018 0z",
-            "M12 11.5h.01",
-        ],
-        "shuffle" => &[
-            "M3 6.5h4l9 11h5",
-            "M3 17.5h4l2.5-3",
-            "M14 8l2.5-1.5h5",
-            "M18 3.5l4 3-4 3",
-            "M18 14.5l4 3-4 3",
-        ],
-        "repeat" => &[
-            "M17 2.5l4 4-4 4",
-            "M3 11.5v-1a4 4 0 014-4h14",
-            "M7 21.5l-4-4 4-4",
-            "M21 12.5v1a4 4 0 01-4 4H3",
-        ],
-        // A single turn back round: undo, not the two-arrow loop of "repeat".
-        "reset" => &["M3 12a9 9 0 109-9 9 9 0 00-6.4 2.6L3 8", "M3 3.5V8h4.5"],
-        "letters" => &["M3 18l5-12 5 12", "M5 14h6", "M16 9h5", "M18.5 9v9"],
-        "timer" => &[
-            "M20 13.5a8 8 0 11-16 0 8 8 0 0116 0z",
-            "M12 9.5v4l2.5 2",
-            "M9 2h6",
-        ],
-        "volume" => &["M11 5L6.5 9H3v6h3.5L11 19z", "M15 9.5a4 4 0 010 5"],
-        "trophy" => &[
-            "M7 4h10v5a5 5 0 01-10 0z",
-            "M7 6H4v2a3 3 0 003 3",
-            "M17 6h3v2a3 3 0 01-3 3",
-            "M9 20h6",
-            "M12 14v6",
-        ],
-        "sparkle" => &["M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"],
-        "flag" => &["M5 21V4", "M5 5h13l-2.5 4L18 13H5"],
-        _ => &["M12 12h.01"],
-    };
+pub fn Icon(name: IconName) -> Element {
     rsx! {
         svg {
             class: "icon",
             view_box: "0 0 24 24",
             "aria-hidden": "true",
             "focusable": "false",
-            for d in paths.iter() {
+            for d in name.paths() {
                 path { d: "{d}" }
             }
         }
@@ -236,7 +282,7 @@ pub fn GroupResultRow(index: usize, group: GroupResult) -> Element {
                 }
             }
             span { class: if group.correct { "badge good" } else { "badge bad" },
-                Icon { name: if group.correct { "check" } else { "x" } }
+                Icon { name: if group.correct { IconName::Check } else { IconName::X } }
             }
         }
     }
@@ -272,32 +318,53 @@ pub fn ProgressHeader(current: usize, total: usize, status: String, live: bool) 
     }
 }
 
+/// The head every card wears: an icon, a title, a note under it, and the
+/// card's own tools to the right.
 #[component]
-pub fn ModePill(label: String, active: bool, onclick: EventHandler<()>) -> Element {
+pub fn CardHead(
+    icon: IconName,
+    #[props(into)] title: String,
+    #[props(into)] note: Option<String>,
+    #[props(default)] children: Element,
+) -> Element {
     rsx! {
-        button {
-            id: control_id("pill", &label),
-            class: if active { "pill active" } else { "pill" },
-            onclick: move |_| onclick.call(()),
-            "{label}"
+        div { class: "card-head",
+            div { class: "card-head-main",
+                span { class: "card-icon", Icon { name: icon } }
+                div {
+                    h3 { class: "card-title", "{title}" }
+                    if let Some(note) = note {
+                        p { class: "card-note", "{note}" }
+                    }
+                }
+            }
+            div { class: "card-tools", {children} }
         }
     }
 }
 
-/// One segment of a `.segmented` control.
+/// One choice among a few: a segment of a `.segmented` control, or with
+/// `pill`, one of a row of `.mode-pills`.
 #[component]
 pub fn Seg(
-    label: String,
+    #[props(into)] label: String,
     active: bool,
+    #[props(default)] pill: bool,
     /// Overrides the id derived from the label, where one label appears twice
     /// on the same screen.
     id: Option<String>,
     onclick: EventHandler<()>,
 ) -> Element {
+    let (kind, class) = match (pill, active) {
+        (false, false) => ("seg", "seg"),
+        (false, true) => ("seg", "seg active"),
+        (true, false) => ("pill", "pill"),
+        (true, true) => ("pill", "pill active"),
+    };
     rsx! {
         button {
-            id: id.unwrap_or_else(|| control_id("seg", &label)),
-            class: if active { "seg active" } else { "seg" },
+            id: id.unwrap_or_else(|| control_id(kind, &label)),
+            class,
             onclick: move |_| onclick.call(()),
             "{label}"
         }
@@ -306,8 +373,8 @@ pub fn Seg(
 
 #[component]
 pub fn Switch(
-    title: String,
-    description: Option<String>,
+    #[props(into)] title: String,
+    #[props(into)] description: Option<String>,
     checked: bool,
     onchange: EventHandler<bool>,
 ) -> Element {
@@ -334,7 +401,7 @@ pub fn Switch(
 
 #[component]
 pub fn SliderField(
-    label: String,
+    #[props(into)] label: String,
     value_label: String,
     value: f64,
     min: f64,
@@ -349,6 +416,8 @@ pub fn SliderField(
     let name = id.unwrap_or_else(|| control_id("slider", &label));
     let at_min = value <= min;
     let at_max = value >= max;
+    let less = format!("Decrease {label}");
+    let more = format!("Increase {label}");
     rsx! {
         div { class: if disabled { "slider disabled" } else { "slider" },
             div { class: "slider-head",
@@ -360,7 +429,7 @@ pub fn SliderField(
                     id: control_id("less", &name),
                     class: "step",
                     r#type: "button",
-                    aria_label: "Decrease",
+                    aria_label: less,
                     disabled: html_bool(disabled || at_min),
                     onclick: move |_| onchange.call(nudge(value - step, step, min, max)),
                     "−"
@@ -372,6 +441,7 @@ pub fn SliderField(
                     input {
                         id: name.clone(),
                         r#type: "range",
+                        aria_label: "{label}",
                         min: "{min}",
                         max: "{max}",
                         step: "{step}",
@@ -388,7 +458,7 @@ pub fn SliderField(
                     id: control_id("more", &name),
                     class: "step",
                     r#type: "button",
-                    aria_label: "Increase",
+                    aria_label: more,
                     disabled: html_bool(disabled || at_max),
                     onclick: move |_| onchange.call(nudge(value + step, step, min, max)),
                     "+"
@@ -398,29 +468,43 @@ pub fn SliderField(
     }
 }
 
+/// A number typed in, or stepped with − and +.
+///
+/// What is typed stays in the box, and reaches `onchange` only once it is
+/// committed — on Enter, or on leaving the field — inside its bounds. A number
+/// is typed through its prefixes: on the way to 30 the box holds 3, and a
+/// setting that took every key would take that too, which for one end of a
+/// range drags the other end down with it.
 #[component]
 pub fn NumberField(
-    label: String,
+    #[props(into)] label: String,
     value: f64,
     min: f64,
     max: f64,
     step: f64,
-    unit: Option<String>,
+    #[props(into)] unit: Option<String>,
     /// Overrides the id derived from the label, for fields whose label is not
     /// unique or not stable.
     id: Option<String>,
     onchange: EventHandler<f64>,
 ) -> Element {
     let name = id.unwrap_or_else(|| control_id("number", &label));
+    // The text being typed, until it is committed. Reading it here is what
+    // puts the committed value back in the box afterwards, even when the
+    // value itself did not move — 999 into a field already at its top.
+    let mut typed = use_signal(|| None::<String>);
+    let shown = typed().unwrap_or_else(|| value.to_string());
+    let less = format!("Decrease {label}");
+    let more = format!("Increase {label}");
     rsx! {
         div { class: "field",
-            label { "{label}" }
+            label { r#for: "{name}", "{label}" }
             div { class: "stepper",
                 button {
                     id: control_id("less", &name),
                     class: "step",
                     r#type: "button",
-                    aria_label: "Decrease",
+                    aria_label: less,
                     disabled: html_bool(value <= min),
                     onclick: move |_| onchange.call(nudge(value - step, step, min, max)),
                     "−"
@@ -432,14 +516,11 @@ pub fn NumberField(
                     min: "{min}",
                     max: "{max}",
                     step: "{step}",
-                    value: "{value}",
-                    oninput: move |e| {
-                        if let Some(v) = parse_number_input(&e.value(), min, max, false) {
-                            onchange.call(v);
-                        }
-                    },
+                    value: "{shown}",
+                    oninput: move |e| typed.set(Some(e.value())),
                     onchange: move |e| {
-                        if let Some(v) = parse_number_input(&e.value(), min, max, true) {
+                        typed.set(None);
+                        if let Some(v) = parse_number_input(&e.value(), min, max) {
                             onchange.call(v);
                         }
                     },
@@ -451,7 +532,7 @@ pub fn NumberField(
                     id: control_id("more", &name),
                     class: "step",
                     r#type: "button",
-                    aria_label: "Increase",
+                    aria_label: more,
                     disabled: html_bool(value >= max),
                     onclick: move |_| onchange.call(nudge(value + step, step, min, max)),
                     "+"
@@ -461,7 +542,6 @@ pub fn NumberField(
     }
 }
 
-/// A value that is either fixed or drawn from a min–max range each time it is used.
 /// Put one card back to its defaults.
 ///
 /// Sits with the card's own tools rather than in one page-wide "reset
@@ -469,7 +549,7 @@ pub fn NumberField(
 /// you have just been experimenting in — and a single global reset is the one
 /// nobody dares press.
 #[component]
-pub fn SectionReset(label: String, on_reset: EventHandler<()>) -> Element {
+pub fn SectionReset(#[props(into)] label: String, on_reset: EventHandler<()>) -> Element {
     let title = format!("Reset {label} to defaults");
     rsx! {
         button {
@@ -479,15 +559,16 @@ pub fn SectionReset(label: String, on_reset: EventHandler<()>) -> Element {
             title: "{title}",
             aria_label: "{title}",
             onclick: move |_| on_reset.call(()),
-            Icon { name: "reset" }
+            Icon { name: IconName::Reset }
         }
     }
 }
 
+/// A value that is either fixed or drawn from a min–max range each time it is used.
 #[component]
 pub fn LinkedRange(
-    label: String,
-    unit: String,
+    label: &'static str,
+    unit: &'static str,
     min_value: f64,
     max_value: f64,
     linked: bool,
@@ -518,11 +599,11 @@ pub fn LinkedRange(
                 div { class: "row", style: "gap: 0.45rem;",
                     span { class: "range-value", "{summary}" }
                     button {
-                        id: control_id("link", &label),
+                        id: control_id("link", label),
                         class: if linked { "link-toggle on" } else { "link-toggle" },
                         r#type: "button",
                         onclick: move |_| on_link.call(!linked),
-                        Icon { name: if linked { "target" } else { "shuffle" } }
+                        Icon { name: if linked { IconName::Target } else { IconName::Shuffle } }
                         if linked { "Fixed" } else { "Random" }
                     }
                 }
@@ -533,7 +614,7 @@ pub fn LinkedRange(
             if linked {
                 NumberField {
                     label: format!("Value ({unit})"),
-                    id: control_id("fixed", &label),
+                    id: control_id("fixed", label),
                     value: min_value,
                     min: min_bound,
                     max: max_bound,
@@ -544,37 +625,60 @@ pub fn LinkedRange(
                 div { class: "field-grid",
                     NumberField {
                         label: format!("Min ({unit})"),
-                        id: control_id("from", &label),
+                        id: control_id("from", label),
                         value: min_value,
                         min: min_bound,
                         max: max_bound,
                         step,
-                        onchange: move |v: f64| {
-                            on_min.call(v);
-                            if v > max_value {
-                                on_max.call(v);
-                            }
-                        },
+                        onchange: move |v: f64| on_min.call(v),
                     }
                     NumberField {
                         label: format!("Max ({unit})"),
-                        id: control_id("to", &label),
+                        id: control_id("to", label),
                         value: max_value,
                         min: min_bound,
                         max: max_bound,
                         step,
-                        onchange: move |v: f64| {
-                            on_max.call(v);
-                            if v < min_value {
-                                on_min.call(v);
-                            }
-                        },
+                        onchange: move |v: f64| on_max.call(v),
                     }
                 }
             }
             if let Some(hint) = hint {
                 p { class: "muted", style: "margin: 0; font-size: 0.8rem;", "{hint}" }
             }
+        }
+    }
+}
+
+/// One min/max setting. Every edit goes through `TrainingSettings`, which owns
+/// the ordering and link invariants, so this stays declarative. It reads its
+/// own range and nothing else, so it redraws only when that moves.
+#[component]
+pub fn SettingsRange(
+    settings: Signal<TrainingSettings>,
+    which: RangeSetting,
+    label: &'static str,
+    unit: &'static str,
+    min_bound: f64,
+    max_bound: f64,
+    step: f64,
+    hint: Option<&'static str>,
+) -> Element {
+    let range = use_memo(move || settings.read().range(which))();
+    rsx! {
+        LinkedRange {
+            label,
+            unit,
+            min_value: range.min,
+            max_value: range.max,
+            linked: range.linked,
+            min_bound,
+            max_bound,
+            step,
+            hint: hint.map(str::to_string),
+            on_min: move |v| settings.write().set_range_min(which, v),
+            on_max: move |v| settings.write().set_range_max(which, v),
+            on_link: move |on| settings.write().set_range_linked(which, on),
         }
     }
 }
@@ -643,21 +747,20 @@ mod tests {
     use super::{control_id, html_bool, nudge, parse_number_input, pct_between, pretty_number};
 
     #[test]
-    fn typing_below_min_is_kept_until_commit() {
-        assert_eq!(parse_number_input("1", 5.0, 60.0, false), Some(1.0));
-        assert_eq!(parse_number_input("18", 5.0, 60.0, false), Some(18.0));
-        assert_eq!(parse_number_input("1", 5.0, 60.0, true), Some(5.0));
+    fn a_typed_number_is_held_inside_its_bounds() {
+        assert_eq!(parse_number_input("18", 5.0, 60.0), Some(18.0));
+        assert_eq!(parse_number_input(" 18 ", 5.0, 60.0), Some(18.0));
+        assert_eq!(parse_number_input("1", 5.0, 60.0), Some(5.0));
+        assert_eq!(parse_number_input("99", 5.0, 60.0), Some(60.0));
+        assert_eq!(parse_number_input("-1", 1.0, 100.0), Some(1.0));
     }
 
     #[test]
-    fn input_above_max_is_capped() {
-        assert_eq!(parse_number_input("99", 5.0, 60.0, false), Some(60.0));
-    }
-
-    #[test]
-    fn negative_values_are_ignored_when_min_is_non_negative() {
-        assert_eq!(parse_number_input("-1", 1.0, 100.0, false), None);
-        assert_eq!(parse_number_input("1e500", 1.0, 100.0, false), None);
+    fn anything_but_a_finite_number_is_ignored() {
+        assert_eq!(parse_number_input("", 1.0, 100.0), None);
+        assert_eq!(parse_number_input("-", 1.0, 100.0), None);
+        assert_eq!(parse_number_input("1e500", 1.0, 100.0), None);
+        assert_eq!(parse_number_input("NaN", 1.0, 100.0), None);
     }
 
     #[test]

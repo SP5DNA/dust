@@ -1,5 +1,7 @@
 //! Colour-scheme preference. `Auto` follows the OS; the other two pin it.
 
+use crate::ui::widgets::IconName;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Theme {
     Auto,
@@ -32,11 +34,11 @@ impl Theme {
         }
     }
 
-    pub fn icon(self) -> &'static str {
+    pub fn icon(self) -> IconName {
         match self {
-            Self::Auto => "auto",
-            Self::Light => "sun",
-            Self::Dark => "moon",
+            Self::Auto => IconName::Auto,
+            Self::Light => IconName::Sun,
+            Self::Dark => IconName::Moon,
         }
     }
 

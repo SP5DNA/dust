@@ -763,6 +763,9 @@ mod tests {
     fn a_pile_up_is_heard_but_never_answered() {
         run(|| async {
             let mut settings = test_settings();
+            // Every group is a full pile-up: each session draws its stations
+            // afresh, and a range could leave a short one with nobody else.
+            settings.band.stations_min = cw_core::STATIONS_MAX;
             settings.band.stations_max = cw_core::STATIONS_MAX;
             let mut h = Harness::with_settings(settings);
             h.start_training();
@@ -773,7 +776,7 @@ mod tests {
             assert!(!sent.is_empty());
             assert!(
                 sent.iter().any(|t| !t.others.is_empty()),
-                "with five allowed, somebody else should have called"
+                "with five calling, somebody else should have got through"
             );
             for transmission in &sent {
                 for other in &transmission.others {

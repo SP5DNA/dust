@@ -1,12 +1,13 @@
-use cw_core::{KeyerMode, Paddle, PaddleKeyer, answer_length_matches, paddle_from_bracket};
+use cw_core::{KeyerMode, answer_length_matches};
+use dioxus::core::Runtime;
+use dioxus::html::{ScrollBehavior, ScrollLogicalPosition, ScrollToOptions};
 use dioxus::prelude::*;
 
 use crate::time::sleep_ms;
-use crate::ui::focus::focus_group_input;
-use crate::ui::paddle::{
-    TrainingPaddleSink, bracket_from_key, bump_epoch, capture_dom_paddles, paddle_down, paddle_up,
+use crate::ui::paddle::{PaddleKeys, paddle_hint};
+use crate::ui::widgets::{
+    CharacterComparison, Icon, IconName, ProgressHeader, control_id, html_bool,
 };
-use crate::ui::widgets::{Icon, ProgressHeader, control_id, html_bool};
 
 /// Incomplete answers wait this long before the session sees them. Short
 /// enough that a pause still lands well before auto-confirm would have cared,
@@ -17,7 +18,7 @@ const _: () = assert!(INPUT_COMMIT_DEBOUNCE_MS < cw_core::AUTO_CONFIRM_DELAY_MS)
 
 /// The progress header, kept out of the view that updates on every key.
 #[component]
-pub fn TrainingScope(
+pub fn TrainingProgress(
     focused: usize,
     total: usize,
     playing: bool,
@@ -39,67 +40,116 @@ pub fn TrainingScope(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn commit_draft(
-    idx: usize,
-    value: String,
-    sent: &str,
-    mut draft: Signal<String>,
-    mut draft_at: Signal<usize>,
-    mut committed: Signal<String>,
-    mut committed_at: Signal<usize>,
-    debounce_gen: Signal<u64>,
+/// The answer being typed into the open box, and what the session has heard
+/// of it.
+///
+/// Typing stays in the box. The session hears it when its length matches the
+/// group, when it has sat still for the debounce, or when the box is left —
+/// Enter, a click anywhere else, End session — and each of those goes through
+/// [`AnswerDraft::commit`], so "tell the session, unless it has heard this
+/// already" is written once.
+#[derive(Clone, Copy, PartialEq)]
+struct AnswerDraft {
+    /// The text in the box. Only that box reads it, so a key redraws one card.
+    text: Signal<String>,
+    /// The group `text` is the answer to.
+    at: CopyValue<Option<usize>>,
+    /// What the session last heard, and for which group.
+    heard: CopyValue<Option<(usize, String)>>,
+    /// Moved on by every commit and every new group: a debounce that finds
+    /// it moved stands down.
+    epoch: CopyValue<u64>,
+    /// The view that owns the debounce, so one still waiting ends with it,
+    /// whoever started it — a key in a card, or the paddles.
+    owner: ScopeId,
     on_change: EventHandler<(usize, String)>,
-) {
-    draft_at.set(idx);
-    draft.set(value.clone());
-    let matches_now = answer_length_matches(sent, &value);
-    let matches_committed =
-        *committed_at.peek() == idx && answer_length_matches(sent, committed.peek().as_str());
-    if matches_now || matches_committed {
-        let _ = bump_epoch(debounce_gen);
-        committed.set(value.clone());
-        committed_at.set(idx);
-        on_change.call((idx, value));
-        return;
-    }
-    let generation = bump_epoch(debounce_gen);
-    spawn(async move {
-        sleep_ms(INPUT_COMMIT_DEBOUNCE_MS).await;
-        if *debounce_gen.peek() != generation {
-            return;
-        }
-        committed.set(value.clone());
-        committed_at.set(idx);
-        on_change.call((idx, value));
-    });
 }
 
-#[allow(clippy::too_many_arguments)]
-fn push_keyed_char(
-    ch: char,
-    current: usize,
-    sent_now: &str,
-    draft: Signal<String>,
-    draft_at: Signal<usize>,
-    committed: Signal<String>,
-    committed_at: Signal<usize>,
-    debounce_gen: Signal<u64>,
-    on_change: EventHandler<(usize, String)>,
-) {
-    let mut text = draft.peek().clone();
-    text.push(ch);
-    commit_draft(
-        current,
-        text,
-        sent_now,
-        draft,
-        draft_at,
-        committed,
-        committed_at,
-        debounce_gen,
-        on_change,
-    );
+impl AnswerDraft {
+    fn use_new(on_change: EventHandler<(usize, String)>) -> Self {
+        use_hook(|| Self {
+            text: Signal::new(String::new()),
+            at: CopyValue::new(None),
+            heard: CopyValue::new(None),
+            epoch: CopyValue::new(0),
+            owner: dioxus::core::current_scope_id(),
+            on_change,
+        })
+    }
+
+    /// What the box for `idx` shows while the draft is its own. Reading it
+    /// subscribes the caller to every key — before the first one too, which
+    /// is what makes the draft this box's.
+    fn read_for(self, idx: usize) -> Option<String> {
+        let text = self.text.read();
+        (*self.at.peek() == Some(idx)).then(|| text.clone())
+    }
+
+    fn peek_for(self, idx: usize) -> Option<String> {
+        (*self.at.peek() == Some(idx)).then(|| self.text.peek().clone())
+    }
+
+    /// The box for `idx` now holds `text`. The session hears it at once when
+    /// its length matches the group's, or matched what it heard last — a box
+    /// backed off a full answer must stop auto-confirm straight away — and
+    /// otherwise once typing has paused.
+    fn edit(mut self, idx: usize, text: String, sent: &str) {
+        let full_before = matches!(
+            &*self.heard.peek(),
+            Some((at, heard)) if *at == idx && answer_length_matches(sent, heard)
+        );
+        let full_now = answer_length_matches(sent, &text);
+        self.at.set(Some(idx));
+        self.text.set(text);
+        if full_before || full_now {
+            self.commit(idx);
+            return;
+        }
+        let epoch = self.cancel_pending();
+        Runtime::current().spawn(self.owner, async move {
+            sleep_ms(INPUT_COMMIT_DEBOUNCE_MS).await;
+            if *self.epoch.peek() == epoch {
+                self.commit(idx);
+            }
+        });
+    }
+
+    /// A paddle keyed `letter` into the box for `idx`.
+    fn push(self, idx: usize, letter: char, sent: &str) {
+        let mut text = self.peek_for(idx).unwrap_or_default();
+        text.push(letter);
+        self.edit(idx, text, sent);
+    }
+
+    /// Tell the session what the box for `idx` holds now, unless it has heard
+    /// exactly that already. A debounce still waiting has nothing left to do.
+    fn commit(mut self, idx: usize) {
+        self.cancel_pending();
+        let Some(text) = self.peek_for(idx) else {
+            return;
+        };
+        if matches!(&*self.heard.peek(), Some((at, heard)) if *at == idx && *heard == text) {
+            return;
+        }
+        self.heard.set(Some((idx, text.clone())));
+        self.on_change.call((idx, text));
+    }
+
+    /// A new group is up, or this one is over: nothing waiting goes out, and
+    /// a finished group's draft is gone.
+    fn settle(mut self, finished: bool) {
+        self.cancel_pending();
+        if finished {
+            self.at.set(None);
+            self.text.set(String::new());
+        }
+    }
+
+    fn cancel_pending(mut self) -> u64 {
+        let next = self.epoch.peek().wrapping_add(1);
+        self.epoch.set(next);
+        next
+    }
 }
 
 /// One group: what was sent, the box you answer it in, and the comparison
@@ -110,38 +160,29 @@ fn push_keyed_char(
 /// an inline loop body every keystroke rebuilt and re-diffed all of them —
 /// twenty cards of roughly twenty nodes each, over the wire to the webview,
 /// between the key going down and the letter appearing. Given props to compare
-/// instead, the nineteen that did not move are skipped.
+/// instead, the nineteen that did not move are skipped. That holds only while
+/// every prop is stable: a handler built afresh in the parent's body is a new
+/// prop on every render, and redraws them all.
 ///
-/// The active card may read the draft signal. The others must not: a read
-/// would subscribe every card to every keystroke and quietly undo the split.
+/// The active card may read the draft. The others must not: a read would
+/// subscribe every card to every keystroke and quietly undo the split.
 #[component]
 #[allow(clippy::too_many_arguments)]
 fn GroupCard(
     idx: usize,
     sent: String,
-    shown: String,
+    /// What the session holds for this group.
     value: String,
-    correct: bool,
     disabled: bool,
     input_locked: bool,
     is_focused: bool,
     is_active: bool,
     is_confirmed: bool,
     send_badge: Option<String>,
-    placeholder: String,
-    draft: Signal<String>,
-    draft_at: Signal<usize>,
-    committed: Signal<String>,
-    committed_at: Signal<usize>,
-    debounce_gen: Signal<u64>,
-    on_change: EventHandler<(usize, String)>,
-    on_confirm: EventHandler<usize>,
-    #[props(default)] paddle_swap: bool,
-    #[props(default)] on_paddle_down: EventHandler<Paddle>,
-    #[props(default)] on_paddle_up: EventHandler<Paddle>,
+    placeholder: &'static str,
+    draft: AnswerDraft,
+    on_confirm: EventHandler<()>,
 ) -> Element {
-    let mut committed = committed;
-    let mut committed_at = committed_at;
     let cls = if is_focused {
         "group focused"
     } else if is_confirmed {
@@ -154,13 +195,15 @@ fn GroupCard(
     } else {
         "answer"
     };
-    let sent_for_input = sent.clone();
+    let live = is_active && !input_locked;
     let closed = disabled || input_locked;
-    let display = if is_active && draft_at() == idx {
-        draft()
+    let shown = if is_active {
+        draft.read_for(idx).unwrap_or_else(|| value.clone())
     } else {
         value.clone()
     };
+    let correct = value.trim().eq_ignore_ascii_case(&sent);
+    let sent_for_input = sent.clone();
     rsx! {
         div { id: "group-card-{idx}", class: cls,
             div { class: "row-between",
@@ -171,23 +214,24 @@ fn GroupCard(
                     }
                 }
                 div { class: "row", style: "gap: 0.4rem;",
-                    span { class: "sent", "{shown}" }
                     if is_confirmed {
+                        span { class: "sent", "{sent}" }
                         span { class: if correct { "badge good" } else { "badge bad" },
-                            Icon { name: if correct { "check" } else { "x" } }
+                            Icon { name: if correct { IconName::Check } else { IconName::X } }
                         }
+                    } else {
+                        span { class: "sent", "•••" }
                     }
                 }
             }
             input {
-                key: if is_active && !input_locked { "live" } else { "idle" },
                 id: "group-input-{idx}",
                 class: input_cls,
-                value: "{display}",
+                aria_label: "Answer for group {idx + 1}",
+                value: "{shown}",
                 disabled: html_bool(disabled),
                 readonly: html_bool(input_locked || is_confirmed),
-                autofocus: html_bool(is_active && !input_locked),
-                placeholder: "{placeholder}",
+                placeholder,
                 autocomplete: "off",
                 autocorrect: "off",
                 autocapitalize: "characters",
@@ -195,76 +239,51 @@ fn GroupCard(
                 enterkeyhint: "done",
                 inputmode: "text",
                 lang: "zxx",
+                // The card is keyed on whether its box is live, so a box that
+                // opens is a new element, and mounting is when it takes the
+                // focus — the one place that does.
                 onmounted: move |evt| {
-                    if is_active && !input_locked {
-                        focus_group_input(idx);
-                        // Tests rebuild a VirtualDom with no webview; set_focus
-                        // panics if it tries to query one.
-                        #[cfg(not(test))]
+                    if live {
                         spawn(async move {
-                            let _ = evt.data().set_focus(true).await;
+                            let element = evt.data();
+                            // Centred, and at once: a smooth scroll is an
+                            // animation running for a few hundred
+                            // milliseconds just as the group opens and you
+                            // start typing, and the browser spends it laying
+                            // out rather than echoing your keys.
+                            let _ = element
+                                .scroll_to_with_options(ScrollToOptions {
+                                    behavior: ScrollBehavior::Instant,
+                                    vertical: ScrollLogicalPosition::Center,
+                                    horizontal: ScrollLogicalPosition::Nearest,
+                                })
+                                .await;
+                            let _ = element.set_focus(true).await;
                         });
-                        #[cfg(test)]
-                        let _ = evt;
                     }
                 },
-
+                onblur: move |_| draft.commit(idx),
                 oninput: move |e| {
-                    if closed {
-                        return;
+                    if !closed {
+                        draft.edit(idx, e.value(), &sent_for_input);
                     }
-                    commit_draft(
-                        idx,
-                        e.value(),
-                        &sent_for_input,
-                        draft,
-                        draft_at,
-                        committed,
-                        committed_at,
-                        debounce_gen,
-                        on_change,
-                    );
                 },
+                // `[` and `]` are paddles: the app's root keys them and keeps
+                // them out of the box.
                 onkeydown: move |e| {
-                    if let Some(ch) = bracket_from_key(&e) {
-                        e.prevent_default();
-                        if e.is_auto_repeating() {
-                            return;
-                        }
-                        if capture_dom_paddles()
-                            && let Some(paddle) = paddle_from_bracket(ch, paddle_swap) {
-                                on_paddle_down.call(paddle);
-                            }
-                        return;
-                    }
                     if closed {
                         e.prevent_default();
                         return;
                     }
                     if e.key() == Key::Enter {
-                        let value = draft.peek().clone();
-                        let _ = bump_epoch(debounce_gen);
-                        if *committed_at.peek() != idx || committed.peek().as_str() != value {
-                            committed.set(value.clone());
-                            committed_at.set(idx);
-                            on_change.call((idx, value));
-                        }
-                        on_confirm.call(idx);
+                        draft.commit(idx);
+                        on_confirm.call(());
                     }
                 },
-                onkeyup: move |e| {
-                    if let Some(ch) = bracket_from_key(&e) {
-                        e.prevent_default();
-                        if capture_dom_paddles()
-                            && let Some(paddle) = paddle_from_bracket(ch, paddle_swap) {
-                                on_paddle_up.call(paddle);
-                            }
-                    }
-                }
             }
             if is_confirmed {
                 div { style: "margin-top: 0.5rem;",
-                    crate::ui::widgets::CharacterComparison {
+                    CharacterComparison {
                         sent,
                         received: value.trim().to_ascii_uppercase(),
                     }
@@ -276,9 +295,8 @@ fn GroupCard(
 
 /// The group list and the way out of the session.
 ///
-/// The answer box is local. The session machine hears a commit when the
-/// length matches, when an incomplete draft has sat still, or when Enter /
-/// End session flush what's there. Typing itself does not clone the session.
+/// The answer box is local: [`AnswerDraft`] says when the session hears it.
+/// Typing itself does not clone the session.
 #[component]
 pub fn TrainingView(
     current: usize,
@@ -291,126 +309,33 @@ pub fn TrainingView(
     repeat_total: u32,
     repeat_done: u32,
     on_change: EventHandler<(usize, String)>,
-    on_confirm: EventHandler<usize>,
+    on_confirm: EventHandler<()>,
     on_submit: EventHandler<()>,
     on_stop: EventHandler<()>,
-    #[props(default)] paddle_swap: bool,
     #[props(default)] keyer_mode: KeyerMode,
-    #[props(default)] dit_ms: u64,
-    #[props(default)] on_tone: EventHandler<bool>,
 ) -> Element {
-    let dit_ms = if dit_ms == 0 { 60 } else { dit_ms };
     let send_index = (repeat_done + 1).min(repeat_total.max(1));
-    let mut draft = use_signal(String::new);
-    let mut draft_at = use_signal(|| usize::MAX);
-    let mut committed = use_signal(String::new);
-    let mut committed_at = use_signal(|| usize::MAX);
-    let debounce_gen = use_signal(|| 0u64);
-    let mut keyer = use_signal(|| PaddleKeyer::with_mode(keyer_mode));
-    let mut keying = use_signal(|| false);
-    let paddle_gen = use_signal(|| 0u64);
-    let training_sink = use_hook(try_consume_context::<TrainingPaddleSink>);
+    let draft = AnswerDraft::use_new(on_change);
     let current_done = confirmed.get(current).copied().unwrap_or(false);
     let can_paddle = !playing && !locked && !current_done;
     let sent_now = groups.get(current).cloned().unwrap_or_default();
-    // The live box remounts when the send ends. `focused`/`current` do not
-    // change then, so this effect has to watch the lock as well — otherwise
-    // the webview never hears that it should grab the new node.
-    let box_open = !current_done && !(playing && locked);
-    use_effect(use_reactive!(|focused, box_open| {
-        if box_open {
-            focus_group_input(focused);
-        }
-    }));
-    use_effect(use_reactive!(|keyer_mode| {
-        keyer.write().set_mode(keyer_mode);
-    }));
+    // The paddles key into the box that is open, and only while it is.
+    let keys = use_context::<PaddleKeys>();
+    keys.use_answer_box(can_paddle, move |letter: char| {
+        draft.push(current, letter, &sent_now);
+    });
     use_effect(use_reactive!(|current, current_done| {
-        let _ = bump_epoch(debounce_gen);
-        let _ = bump_epoch(paddle_gen);
-        keyer.write().reset();
-        keying.set(false);
-        on_tone.call(false);
-        if current_done {
-            draft.set(String::new());
-            draft_at.set(usize::MAX);
-        }
         let _ = current;
+        draft.settle(current_done);
+        // A letter half keyed for one group is not the next one's.
+        keys.stop();
     }));
-    use_drop(move || {
-        let _ = bump_epoch(debounce_gen);
-        let _ = bump_epoch(paddle_gen);
-        on_tone.call(false);
-    });
-    let on_paddle_down = EventHandler::new({
-        let sent_now = sent_now.clone();
-        move |paddle: Paddle| {
-            let on_letter = EventHandler::new({
-                let sent_now = sent_now.clone();
-                move |ch: char| {
-                    push_keyed_char(
-                        ch,
-                        current,
-                        &sent_now,
-                        draft,
-                        draft_at,
-                        committed,
-                        committed_at,
-                        debounce_gen,
-                        on_change,
-                    );
-                }
-            });
-            paddle_down(
-                paddle, dit_ms, can_paddle, keyer, keying, paddle_gen, on_tone, on_letter,
-            );
-        }
-    });
-    let on_paddle_up = EventHandler::new({
-        move |paddle: Paddle| {
-            let on_letter = EventHandler::new({
-                let sent_now = sent_now.clone();
-                move |ch: char| {
-                    push_keyed_char(
-                        ch,
-                        current,
-                        &sent_now,
-                        draft,
-                        draft_at,
-                        committed,
-                        committed_at,
-                        debounce_gen,
-                        on_change,
-                    );
-                }
-            });
-            paddle_up(paddle, dit_ms, keyer, paddle_gen, on_tone, on_letter);
-        }
-    });
-    if let Some(sink) = &training_sink {
-        sink.bind(on_paddle_down, on_paddle_up);
-    }
-    use_drop(move || {
-        if let Some(sink) = training_sink {
-            sink.clear();
-        }
-    });
     let hint = if playing && locked {
-        "Listen — the answer box unlocks when the group finishes."
+        "Listen — the answer box unlocks when the group finishes.".to_string()
     } else if playing {
-        "Listen, or type along — the box stays open while this group is sent."
+        "Listen, or type along — the box stays open while this group is sent.".to_string()
     } else {
-        match keyer_mode {
-            KeyerMode::Straight => {
-                "Type the letters, or hold [ or ] as a straight key — a short press is a dit, a long one a dah."
-            }
-            KeyerMode::Ultimatic => {
-                "Type the letters, or hold [ for dits and ] for dahs. The last paddle you close repeats — squeeze for the middle of X or P."
-            }
-            KeyerMode::IambicA | KeyerMode::IambicB => {
-                "Type the letters, or hold [ for dits and ] for dahs. Squeeze both to alternate. A hold repeats at the key speed."
-            }
-        }
+        format!("Type the letters, or key them. {}", paddle_hint(keyer_mode))
     };
     rsx! {
         div { style: "display: contents;",
@@ -419,7 +344,7 @@ pub fn TrainingView(
                     p { class: "muted", style: "margin: 0;", "{hint}" }
                     if repeat_total > 1 {
                         span { class: "chip",
-                            Icon { name: "repeat" }
+                            Icon { name: IconName::Repeat }
                             "{repeat_total}× per group"
                         }
                     }
@@ -434,20 +359,22 @@ pub fn TrainingView(
                             let disabled = is_confirmed || (!is_active && !awaiting_play);
                             let input_locked =
                                 (locked && is_active && !is_confirmed) || awaiting_play;
-                            let value = inputs.get(idx).cloned().unwrap_or_default();
-                            let correct = value.trim().eq_ignore_ascii_case(sent);
-                            let card_key = format!(
-                                "{idx}-{}",
-                                if is_active && !input_locked { "live" } else { "wait" }
-                            );
+                            let live = is_active && !input_locked;
+                            let placeholder = if awaiting_play {
+                                "Waiting…"
+                            } else if input_locked {
+                                "Listening…"
+                            } else if disabled {
+                                "Waiting…"
+                            } else {
+                                "Type the group"
+                            };
                             rsx! {
                                 GroupCard {
-                                    key: "{card_key}",
+                                    key: "{idx}-{live}",
                                     idx,
                                     sent: sent.clone(),
-                                    shown: if is_confirmed { sent.clone() } else { "•••".into() },
-                                    value,
-                                    correct,
+                                    value: inputs.get(idx).cloned().unwrap_or_default(),
                                     disabled,
                                     input_locked,
                                     is_focused,
@@ -455,25 +382,9 @@ pub fn TrainingView(
                                     is_confirmed,
                                     send_badge: (is_focused && playing && repeat_total > 1)
                                         .then(|| format!("Send {send_index}/{repeat_total}")),
-                                    placeholder: if awaiting_play {
-                                        "Waiting…".to_string()
-                                    } else if input_locked {
-                                        "Listening…".to_string()
-                                    } else if disabled {
-                                        "Waiting…".to_string()
-                                    } else {
-                                        "Type the group".to_string()
-                                    },
+                                    placeholder,
                                     draft,
-                                    draft_at,
-                                    committed,
-                                    committed_at,
-                                    debounce_gen,
-                                    on_change,
                                     on_confirm,
-                                    paddle_swap,
-                                    on_paddle_down,
-                                    on_paddle_up,
                                 }
                             }
                         }
@@ -485,26 +396,17 @@ pub fn TrainingView(
                     id: control_id("btn", "end session"),
                     class: "btn btn-primary",
                     onclick: move |_| {
-                        let _ = bump_epoch(debounce_gen);
-                        let value = draft.peek().clone();
-                        if *draft_at.peek() == current
-                            && (*committed_at.peek() != current
-                                || committed.peek().as_str() != value)
-                        {
-                            committed.set(value.clone());
-                            committed_at.set(current);
-                            on_change.call((current, value));
-                        }
+                        draft.commit(current);
                         on_submit.call(());
                     },
-                    Icon { name: "flag" }
+                    Icon { name: IconName::Flag }
                     "End session"
                 }
                 button {
                     id: control_id("btn", "discard"),
                     class: "btn btn-danger",
                     onclick: move |_| on_stop.call(()),
-                    Icon { name: "x" }
+                    Icon { name: IconName::X }
                     "Discard"
                 }
             }

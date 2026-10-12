@@ -21,8 +21,15 @@
 //!   dit and the still-held dah continues. A tap of the opposite paddle inserts
 //!   one opposite element (dit/dah memory) and then the held paddle resumes.
 //!   That last-dash-or-dot rule is how X (`-..-`) and P (`.--.`) are sent.
+//!
+//! [`Keyer`] puts those rules on a clock: it times the elements and the
+//! letter space, and says when the sidetone sounds and which letter was keyed.
 
 use serde::{Deserialize, Serialize};
+
+mod clock;
+
+pub use clock::{Keyer, KeyerOutput};
 
 use crate::morse::{decode_morse_pattern, is_morse_code_prefix};
 use crate::timing::dot_seconds;
@@ -34,10 +41,10 @@ pub fn dit_ms_for_wpm(wpm: f64) -> u64 {
 
 /// Gap, in dits, at which a letter is over. Intra-character spacing is one
 /// dit; inter-character is three. Two is the split between them.
-pub const LETTER_GAP_DITS: u64 = 2;
+const LETTER_GAP_DITS: u64 = 2;
 
 /// Hold longer than this many dits and a straight key is a dah.
-pub const STRAIGHT_DAH_DITS: u64 = 2;
+const STRAIGHT_DAH_DITS: u64 = 2;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -96,8 +103,7 @@ pub fn paddle_from_bracket(ch: char, swap: bool) -> Option<Paddle> {
     Some(if swap { paddle.flipped() } else { paddle })
 }
 
-/// The Morse character being keyed, element by element, and the letter gap
-/// that ends it.
+/// The Morse character being keyed, element by element.
 #[derive(Clone, Debug, Default)]
 pub struct PaddleDecoder {
     pattern: String,
@@ -106,8 +112,6 @@ pub struct PaddleDecoder {
     /// is what dropping the stray element used to make of it: eight dits, the
     /// error sign, came out as a 5.
     invalid: bool,
-    /// When the paddles last went quiet, for timing the letter gap.
-    quiet_since: Option<u64>,
 }
 
 impl PaddleDecoder {
@@ -117,7 +121,6 @@ impl PaddleDecoder {
     }
 
     pub fn push(&mut self, paddle: Paddle) {
-        self.quiet_since = None;
         if self.invalid {
             return;
         }
@@ -126,19 +129,6 @@ impl PaddleDecoder {
             self.invalid = true;
             self.pattern.clear();
         }
-    }
-
-    /// The paddles went quiet at `now_ms`: the letter gap starts here.
-    pub fn quiet_from(&mut self, now_ms: u64) {
-        self.quiet_since = Some(now_ms);
-    }
-
-    /// Whether the paddles have been quiet for a letter space, so whatever
-    /// was keyed is a letter.
-    pub fn letter_gap_over(&self, now_ms: u64, dit_ms: u64) -> bool {
-        self.quiet_since.is_some_and(|since| {
-            now_ms.saturating_sub(since) >= dit_ms.saturating_mul(LETTER_GAP_DITS)
-        })
     }
 
     /// End the letter: what it decodes to, if it is one, and a clean slate.
@@ -171,7 +161,6 @@ pub struct PaddleKeyer {
     dit_mem: bool,
     dah_mem: bool,
     straight_down_at: Option<u64>,
-    decoder: PaddleDecoder,
 }
 
 impl Default for PaddleKeyer {
@@ -193,7 +182,6 @@ impl PaddleKeyer {
             dit_mem: false,
             dah_mem: false,
             straight_down_at: None,
-            decoder: PaddleDecoder::default(),
         }
     }
 
@@ -204,14 +192,6 @@ impl PaddleKeyer {
     pub fn set_mode(&mut self, mode: KeyerMode) {
         self.mode = mode;
         self.reset();
-    }
-
-    pub fn decoder(&self) -> &PaddleDecoder {
-        &self.decoder
-    }
-
-    pub fn decoder_mut(&mut self) -> &mut PaddleDecoder {
-        &mut self.decoder
     }
 
     pub fn any_held(&self) -> bool {
@@ -371,8 +351,7 @@ mod tests {
         assert_eq!(paddle_from_bracket('A', false), None);
     }
 
-    /// Keys `paddles` into a decoder the way the UI does: each element, then
-    /// quiet from the end of it.
+    /// A decoder with `paddles` keyed into it.
     fn keyed(paddles: &[Paddle]) -> PaddleDecoder {
         let mut decoder = PaddleDecoder::default();
         for paddle in paddles {
@@ -382,28 +361,11 @@ mod tests {
     }
 
     #[test]
-    fn a_letter_ends_after_a_two_dit_gap() {
-        let dit = 60;
+    fn a_letter_is_its_elements_and_then_a_clean_slate() {
         let mut decoder = keyed(&[Paddle::Dah, Paddle::Dit, Paddle::Dah]);
-        assert!(!decoder.letter_gap_over(1_000, dit), "not quiet yet");
-        decoder.quiet_from(1_000);
-        assert!(!decoder.letter_gap_over(1_000 + dit, dit));
-        assert!(decoder.letter_gap_over(1_000 + 2 * dit, dit));
         assert_eq!(decoder.take_letter(), Some('K'));
         assert!(decoder.is_empty());
-        assert!(
-            !decoder.letter_gap_over(5_000, dit),
-            "a new letter starts unquiet"
-        );
-
-        // Another element puts the letter gap off again.
-        let mut decoder = keyed(&[Paddle::Dit]);
-        decoder.quiet_from(0);
-        decoder.push(Paddle::Dit);
-        assert!(!decoder.letter_gap_over(500, dit));
-        decoder.quiet_from(500);
-        assert!(decoder.letter_gap_over(500 + 2 * dit, dit));
-        assert_eq!(decoder.take_letter(), Some('I'));
+        assert_eq!(decoder.take_letter(), None, "nothing keyed is no letter");
     }
 
     /// A pattern that leaves the table is no letter. Dropping the element

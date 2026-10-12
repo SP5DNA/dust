@@ -1,13 +1,18 @@
-//! Smoke tests that render every screen to HTML.
+//! Smoke tests that render every screen to HTML, and drive the ones that
+//! own state.
 //!
 //! They run the real component bodies — the rsx, the formatting, the SVG
 //! geometry — so a panic or a broken template shows up here instead of on a
-//! phone. Effects and audio never run: the virtual DOM is rebuilt in place and
-//! thrown away.
+//! phone. The plain renders rebuild the virtual DOM in place and throw it
+//! away, so their effects never run; the `interactions` below go through the
+//! [`Ui`](crate::testing::Ui) harness, which settles effects after every
+//! event the way a renderer would. Audio is a recorder throughout.
+
+use std::rc::Rc;
 
 use cw_core::{
-    AutoLevelProgress, CharSetMode, GroupResult, KeyerMode, MixedAutoLevelAxis, Paddle,
-    PaddleKeyer, SessionResult, SessionTiming, StreakState, StreakStatus, TrainingSettings,
+    AutoLevelProgress, CharSetMode, GroupResult, KeyerMode, MixedAutoLevelAxis, SessionResult,
+    SessionTiming, StreakState, StreakStatus, TrainingSettings,
 };
 use dioxus::prelude::*;
 
@@ -16,14 +21,62 @@ use super::envelope::EnvelopeCard;
 use super::heatmap::{StreakCard, StreakCardProps};
 use super::home::Home;
 use super::listen::ListenView;
-use super::paddle::{PaddlePad, paddle_down, paddle_up};
+use super::paddle::{PaddlePad, use_paddle_keys};
 use super::results::ResultsView;
 use super::settings::SettingsView;
 use super::stats::{StatsView, StatsViewProps};
-use super::training::{TrainingScope, TrainingView};
+use super::training::{TrainingProgress, TrainingView};
+use crate::audio::fake::Recorder;
+use crate::state::{AppState, Screen};
 
-/// Same shape the router draws: the scope is a sibling of the answer list,
-/// not a child of it.
+std::thread_local! {
+    /// How many times a [`Keyed`] with no sound device has looked for one.
+    static DEVICE_LOOKS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// The app's paddle keyer around a screen drawn on its own, keyed from a
+/// root the way the shell keys it, with a player that records — or, with
+/// `no_device`, no sound device to be found, however often it is looked for.
+#[component]
+fn Keyed(
+    screen: Screen,
+    #[props(default)] keyer_mode: KeyerMode,
+    #[props(default)] no_device: bool,
+    children: Element,
+) -> Element {
+    let settings = use_signal(|| {
+        let mut settings = crate::testing::test_settings();
+        settings.playback.keyer_mode = keyer_mode;
+        settings
+    });
+    let screen = use_signal(|| screen);
+    let app = use_hook(|| {
+        let factory: crate::player::BackendFactory = if no_device {
+            Rc::new(|| {
+                DEVICE_LOOKS.with(|looks| looks.set(looks.get() + 1));
+                Err("No audio output device found".to_string())
+            })
+        } else {
+            Recorder::new().factory()
+        };
+        Rc::new(AppState::with(
+            factory,
+            Rc::new(crate::persist::memory::MemoryStore::default()),
+        ))
+    });
+    let keys = use_paddle_keys(settings, screen, app);
+    rsx! {
+        div {
+            id: crate::ui::widgets::control_id("keyed", "root"),
+            onkeydown: move |e| keys.keydown(e),
+            onkeyup: move |e| keys.keyup(e),
+            {children}
+        }
+    }
+}
+
+/// Same shape the router draws: the progress header is a sibling of the
+/// answer list, not a child of it.
 #[component]
 fn TrainingScreen(
     current: usize,
@@ -37,35 +90,37 @@ fn TrainingScreen(
     repeat_total: u32,
     repeat_done: u32,
     on_change: EventHandler<(usize, String)>,
-    on_confirm: EventHandler<usize>,
+    on_confirm: EventHandler<()>,
     on_submit: EventHandler<()>,
     on_stop: EventHandler<()>,
     #[props(default)] keyer_mode: KeyerMode,
 ) -> Element {
     rsx! {
-        div { class: "stack",
-            TrainingScope {
-                focused,
-                total,
-                playing,
-                repeat_total,
-                repeat_done,
-            }
-            TrainingView {
-                current,
-                groups,
-                inputs,
-                confirmed,
-                focused,
-                playing,
-                locked,
-                repeat_total,
-                repeat_done,
-                keyer_mode,
-                on_change,
-                on_confirm,
-                on_submit,
-                on_stop,
+        Keyed { screen: Screen::Training, keyer_mode,
+            div { class: "stack",
+                TrainingProgress {
+                    focused,
+                    total,
+                    playing,
+                    repeat_total,
+                    repeat_done,
+                }
+                TrainingView {
+                    current,
+                    groups,
+                    inputs,
+                    confirmed,
+                    focused,
+                    playing,
+                    locked,
+                    repeat_total,
+                    repeat_done,
+                    keyer_mode,
+                    on_change,
+                    on_confirm,
+                    on_submit,
+                    on_stop,
+                }
             }
         }
     }
@@ -152,9 +207,38 @@ fn home_renders_the_hero_and_stats() {
     assert!(html.contains("94%"));
     // Desktop and web builds have audio, so the silent-build notice stays away.
     assert_eq!(
-        html.contains("no audio yet"),
+        html.contains("This build has no audio"),
         super::super::audio::AUDIO_IS_SILENT
     );
+}
+
+/// A callsign tier brings in no new character, and a callsign has no group
+/// size: Home claims neither.
+#[test]
+fn home_in_callsign_mode_points_at_no_character_and_counts_calls() {
+    let html = render(|| {
+        let mut settings = TrainingSettings::default();
+        settings.curriculum.char_set_mode = CharSetMode::Callsign;
+        settings.curriculum.num_groups = 12;
+        rsx! {
+            Home {
+                settings,
+                last_accuracy: None,
+                session_count: 0,
+                pool: String::new(),
+                sessions: Vec::new(),
+                today: "2026-09-03".to_string(),
+                auto_progress: None,
+                on_start: move |_| {},
+                on_listen: move |_| {},
+            }
+        }
+    });
+    assert!(html.contains("pool-chip"), "{html}");
+    assert!(!html.contains("pool-chip fresh"), "{html}");
+    assert!(!html.contains("Newest character"));
+    assert!(html.contains(">12<") && html.contains("Calls"), "{html}");
+    assert!(html.contains("Callsign tier 1"));
 }
 
 #[test]
@@ -268,42 +352,10 @@ fn the_app_shell_renders_the_practice_screen() {
 
 #[test]
 fn every_icon_draws_something() {
-    for name in [
-        "signal",
-        "chart",
-        "sliders",
-        "play",
-        "stop",
-        "headphones",
-        "check",
-        "x",
-        "chevron",
-        "back",
-        "sun",
-        "moon",
-        "auto",
-        "envelope",
-        "gauge",
-        "waves",
-        "target",
-        "shuffle",
-        "repeat",
-        "letters",
-        "timer",
-        "volume",
-        "trophy",
-        "sparkle",
-        "flag",
-        "nonsense",
-    ] {
-        let html = render_props(
-            super::widgets::Icon,
-            super::widgets::IconProps {
-                name: name.to_string(),
-            },
-        );
-        assert!(html.contains("<svg"), "{name} rendered no svg");
-        assert!(html.contains("<path"), "{name} rendered no path");
+    for name in super::widgets::IconName::ALL {
+        let html = render_props(super::widgets::Icon, super::widgets::IconProps { name });
+        assert!(html.contains("<svg"), "{name:?} rendered no svg");
+        assert!(html.contains("<path"), "{name:?} rendered no path");
     }
 }
 
@@ -316,13 +368,15 @@ fn settings_renders_the_digit_and_custom_modes() {
             settings
         });
         rsx! {
-            SettingsView {
-                settings,
-                previewing: true,
-                sample_playing: None,
-                on_preview_band: move |_| {},
-                on_stop_band: move |_| {},
-                on_play_sample: move |_: String| {},
+            Keyed { screen: Screen::Settings,
+                SettingsView {
+                    settings,
+                    previewing: true,
+                    sample_playing: None,
+                    on_preview_band: move |_| {},
+                    on_stop_band: move |_| {},
+                    on_play_sample: move |_: String| {},
+                }
             }
         }
     });
@@ -339,13 +393,15 @@ fn settings_renders_the_digit_and_custom_modes() {
             settings
         });
         rsx! {
-            SettingsView {
-                settings,
-                previewing: false,
-                sample_playing: None,
-                on_preview_band: move |_| {},
-                on_stop_band: move |_| {},
-                on_play_sample: move |_: String| {},
+            Keyed { screen: Screen::Settings,
+                SettingsView {
+                    settings,
+                    previewing: false,
+                    sample_playing: None,
+                    on_preview_band: move |_| {},
+                    on_stop_band: move |_| {},
+                    on_play_sample: move |_: String| {},
+                }
             }
         }
     });
@@ -360,13 +416,15 @@ fn settings_renders_every_card() {
     let html = render(|| {
         let settings = use_signal(TrainingSettings::default);
         rsx! {
-            SettingsView {
-                settings,
-                previewing: false,
-                sample_playing: None,
-                on_preview_band: move |_| {},
-                on_stop_band: move |_| {},
-                on_play_sample: move |_: String| {},
+            Keyed { screen: Screen::Settings,
+                SettingsView {
+                    settings,
+                    previewing: false,
+                    sample_playing: None,
+                    on_preview_band: move |_| {},
+                    on_stop_band: move |_| {},
+                    on_play_sample: move |_: String| {},
+                }
             }
         }
     });
@@ -399,6 +457,13 @@ fn settings_renders_every_card() {
         html.contains("class=\"stepper\""),
         "number fields should keep their steppers"
     );
+    // Every control says what it is to a screen reader: a number field's
+    // label is tied to its input, and a step button names what it steps.
+    assert!(html.contains("for=\"number-key-speed\""), "{html}");
+    assert!(html.contains("aria-label=\"Decrease Key speed\""));
+    assert!(html.contains("aria-label=\"Increase Rise time\""));
+    assert!(html.contains("for=\"field-sequence-order\""));
+    assert!(html.contains("aria-label=\"Rise time\""));
 }
 
 #[test]
@@ -490,6 +555,53 @@ fn listen_renders_the_selected_character() {
     assert!(html.contains("Stream groups"));
 }
 
+/// Punctuation used to slug to a bare `chip`, so five chips shared an id.
+#[test]
+fn every_listen_chip_has_an_id_of_its_own() {
+    #[component]
+    fn Everything() -> Element {
+        let mut settings = TrainingSettings::default();
+        settings.curriculum.char_set_mode = CharSetMode::Koch;
+        settings.curriculum.level = 40;
+        rsx! {
+            ListenView {
+                settings,
+                playing: false,
+                on_play: move |_: String| {},
+                on_stop: move |_| {},
+                on_back: move |_| {},
+            }
+        }
+    }
+    let ui = crate::testing::Ui::new(Everything, ());
+    let chips = ui
+        .page_ids()
+        .into_iter()
+        .filter(|id| id.starts_with("chip-"))
+        .count();
+    assert!(chips > 36, "{chips} chips");
+}
+
+#[test]
+fn listen_in_callsign_mode_calls_no_character_the_newest() {
+    let html = render(|| {
+        let mut settings = TrainingSettings::default();
+        settings.curriculum.char_set_mode = CharSetMode::Callsign;
+        rsx! {
+            ListenView {
+                settings,
+                playing: false,
+                on_play: move |_: String| {},
+                on_stop: move |_| {},
+                on_back: move |_| {},
+            }
+        }
+    });
+    assert!(!html.contains("letter-chip newest"), "{html}");
+    assert!(!html.contains("Newest unlocked character"));
+    assert!(html.contains("From your current pool"));
+}
+
 #[test]
 fn training_shows_the_send_counter_while_repeating() {
     let html = render(|| {
@@ -506,7 +618,7 @@ fn training_shows_the_send_counter_while_repeating() {
                 repeat_total: 2,
                 repeat_done: 1,
                 on_change: move |_: (usize, String)| {},
-                on_confirm: move |_: usize| {},
+                on_confirm: move |()| {},
                 on_submit: move |_| {},
                 on_stop: move |_| {},
             }
@@ -534,7 +646,7 @@ fn training_without_repeats_omits_the_counter() {
                 repeat_total: 1,
                 repeat_done: 1,
                 on_change: move |_: (usize, String)| {},
-                on_confirm: move |_: usize| {},
+                on_confirm: move |()| {},
                 on_submit: move |_| {},
                 on_stop: move |_| {},
             }
@@ -577,7 +689,7 @@ fn an_unlocked_answer_box_does_not_look_disabled() {
                 repeat_total: 1,
                 repeat_done: 1,
                 on_change: move |_: (usize, String)| {},
-                on_confirm: move |_: usize| {},
+                on_confirm: move |()| {},
                 on_submit: move |_| {},
                 on_stop: move |_| {},
             }
@@ -592,10 +704,7 @@ fn an_unlocked_answer_box_does_not_look_disabled() {
         !tag.contains("readonly"),
         "HTML treats readonly=\"false\" as readonly, so the attribute must be absent: {tag}"
     );
-    assert!(
-        tag.contains("autofocus"),
-        "the live box must autofocus so typing works without a click: {tag}"
-    );
+    assert!(tag.contains("aria-label=\"Answer for group 1\""), "{tag}");
 }
 
 #[test]
@@ -614,7 +723,7 @@ fn a_locked_answer_box_is_readonly_not_disabled() {
                 repeat_total: 1,
                 repeat_done: 0,
                 on_change: move |_: (usize, String)| {},
-                on_confirm: move |_: usize| {},
+                on_confirm: move |()| {},
                 on_submit: move |_| {},
                 on_stop: move |_| {},
             }
@@ -628,10 +737,6 @@ fn a_locked_answer_box_is_readonly_not_disabled() {
     assert!(
         !tag.contains("disabled"),
         "disabled would also swallow the click that focuses it after the send: {tag}"
-    );
-    assert!(
-        !tag.contains("autofocus"),
-        "autofocus on a locked box would steal keys while the group is still being sent: {tag}"
     );
 }
 
@@ -651,7 +756,7 @@ fn a_confirmed_answer_box_cannot_be_typed_in() {
                 repeat_total: 1,
                 repeat_done: 1,
                 on_change: move |_: (usize, String)| {},
-                on_confirm: move |_: usize| {},
+                on_confirm: move |()| {},
                 on_submit: move |_| {},
                 on_stop: move |_| {},
             }
@@ -785,9 +890,11 @@ mod interactions {
 
         // The noise reads as a signal-to-noise ratio through the filter you
         // have set, so the readout follows both controls. The test settings
-        // start with the noise switched off; switch it on first.
-        ui.click("switch-band-noise");
+        // start with the noise switched off, which reads as off whatever the
+        // level; switch it on first.
         ui.type_into("slider-noise-level", "0.5");
+        assert!(ui.has("class=\"slider-value\">Off<"), "switched off");
+        ui.commit("switch-band-noise", "true");
         assert!(
             ui.has("class=\"slider-value\">S/N 23 dB<"),
             "sharp, 300 Hz, at half level"
@@ -860,13 +967,15 @@ mod interactions {
     fn SettingsHarness() -> Element {
         let settings = use_signal(test_settings);
         rsx! {
-            SettingsView {
-                settings,
-                previewing: false,
-                sample_playing: Some("E".to_string()),
-                on_preview_band: move |_| {},
-                on_stop_band: move |_| {},
-                on_play_sample: move |_: String| {},
+            Keyed { screen: Screen::Settings,
+                SettingsView {
+                    settings,
+                    previewing: false,
+                    sample_playing: Some("E".to_string()),
+                    on_preview_band: move |_| {},
+                    on_stop_band: move |_| {},
+                    on_play_sample: move |_: String| {},
+                }
             }
         }
     }
@@ -908,29 +1017,9 @@ mod interactions {
 
     #[component]
     fn PaddlePadHarness() -> Element {
-        let keyer = use_signal(|| PaddleKeyer::with_mode(KeyerMode::IambicA));
-        let keying = use_signal(|| false);
-        let generation = use_signal(|| 0u64);
-        let mut heard = use_signal(String::new);
-        let on_tone = EventHandler::new(move |_: bool| {});
-        let on_letter = EventHandler::new(move |ch: char| {
-            heard.write().push(ch);
-        });
-        let down = EventHandler::new(move |paddle: Paddle| {
-            paddle_down(
-                paddle, 60, true, keyer, keying, generation, on_tone, on_letter,
-            );
-        });
-        let up = EventHandler::new(move |paddle: Paddle| {
-            paddle_up(paddle, 60, keyer, generation, on_tone, on_letter);
-        });
         rsx! {
-            PaddlePad {
-                heard: heard(),
-                mode: KeyerMode::IambicA,
-                capture_keys: true,
-                on_down: down,
-                on_up: up,
+            Keyed { screen: Screen::Settings,
+                PaddlePad { mode: KeyerMode::IambicA }
             }
         }
     }
@@ -941,9 +1030,11 @@ mod interactions {
             let mut ui = Ui::new(PaddlePadHarness, ());
             let key = Key::Character("]".into());
             let code = Code::BracketRight;
-            ui.press_key("paddle-practice", key.clone(), code);
+            // The pad has no listener of its own: a key pressed on it lands
+            // on the nearest element that has one, the root.
+            ui.press_key("keyed-root", key.clone(), code);
             ui.advance(500).await;
-            ui.release_key("paddle-practice", key, code);
+            ui.release_key("keyed-root", key, code);
             ui.advance(160).await;
             ui.advance(60).await;
             ui.advance(120).await;
@@ -952,6 +1043,122 @@ mod interactions {
                 "decoded letters have to land on the pad: {}",
                 ui.html()
             );
+        });
+    }
+
+    /// Tap the dit paddle `times` times, a letter space apart: that many Es.
+    async fn tap_dits(ui: &mut Ui, on: &str, times: usize) {
+        for _ in 0..times {
+            ui.press_key(on, Key::Character("[".into()), Code::BracketLeft);
+            ui.advance(30).await;
+            ui.release_key(on, Key::Character("[".into()), Code::BracketLeft);
+            ui.advance(250).await;
+        }
+    }
+
+    #[test]
+    fn the_pad_keeps_only_the_last_line_it_heard() {
+        crate::testing::run(|| async {
+            let mut ui = Ui::new(PaddlePadHarness, ());
+            tap_dits(&mut ui, "keyed-root", 40).await;
+            let heard = ui
+                .html()
+                .split("id=\"paddle-heard\"")
+                .nth(1)
+                .and_then(|rest| rest.split('>').nth(1))
+                .and_then(|text| text.split('<').next())
+                .unwrap_or_default()
+                .to_string();
+            assert_eq!(heard, "E".repeat(32), "{}", ui.html());
+        });
+    }
+
+    #[component]
+    fn NoDeviceHarness() -> Element {
+        rsx! {
+            Keyed { screen: Screen::Settings, no_device: true,
+                PaddlePad { mode: KeyerMode::IambicA }
+            }
+        }
+    }
+
+    /// With no sound device, the pad says so, and a held paddle looks for
+    /// one when it closes — not twice an element while it is held, which
+    /// is a device search on the UI thread for every dit.
+    #[test]
+    fn a_missing_sound_device_is_said_and_looked_for_once_a_squeeze() {
+        crate::testing::run(|| async {
+            DEVICE_LOOKS.with(|looks| looks.set(0));
+            let mut ui = Ui::new(NoDeviceHarness, ());
+            assert!(
+                ui.has("No sidetone: No audio output device found"),
+                "{}",
+                ui.html()
+            );
+            let looks = || DEVICE_LOOKS.with(std::cell::Cell::get);
+            let before = looks();
+            let key = Key::Character("]".into());
+            ui.press_key("keyed-root", key.clone(), Code::BracketRight);
+            ui.advance(1_000).await;
+            ui.release_key("keyed-root", key, Code::BracketRight);
+            ui.advance(500).await;
+            assert_eq!(looks() - before, 1, "one squeeze, one look");
+            // The letter is keyed all the same; it just cannot be heard.
+            assert!(ui.has("paddle-heard"));
+        });
+    }
+
+    #[component]
+    fn ClosingBoxHarness() -> Element {
+        let mut shown = use_signal(|| true);
+        let mut typed = use_signal(String::new);
+        rsx! {
+            Keyed { screen: Screen::Training,
+                if shown() {
+                    TrainingView {
+                        current: 0,
+                        groups: vec!["E".to_string()],
+                        inputs: vec![typed()],
+                        confirmed: vec![false],
+                        focused: 0,
+                        playing: false,
+                        locked: false,
+                        repeat_total: 1,
+                        repeat_done: 1,
+                        on_change: move |(_, value): (usize, String)| typed.set(value),
+                        on_confirm: move |()| {},
+                        on_submit: move |_| {},
+                        on_stop: move |_| {},
+                    }
+                }
+                button {
+                    id: control_id("btn", "close the box"),
+                    onclick: move |_| shown.set(false),
+                    "close"
+                }
+                p { "typed:{typed}" }
+            }
+        }
+    }
+
+    /// Once the training view has gone, nothing it lent the keyer is called:
+    /// a paddle on a training screen with no answer box open keys nothing.
+    #[test]
+    fn a_paddle_after_the_answer_box_has_gone_keys_nothing() {
+        crate::testing::run(|| async {
+            let mut ui = Ui::new(ClosingBoxHarness, ());
+            // Half a letter keyed into the box, then the box goes.
+            ui.press_key(
+                "group-input-0",
+                Key::Character("[".into()),
+                Code::BracketLeft,
+            );
+            ui.advance(20).await;
+            ui.click("btn-close-the-box");
+            ui.release_key("keyed-root", Key::Character("[".into()), Code::BracketLeft);
+            tap_dits(&mut ui, "keyed-root", 2).await;
+            ui.advance(500).await;
+            assert!(ui.has("typed:<") || ui.has("typed:</"), "{}", ui.html());
         });
     }
 
@@ -971,15 +1178,15 @@ mod interactions {
                 repeat_total: 2,
                 repeat_done: 0,
                 on_change: move |(_, value): (usize, String)| typed.set(value),
-                on_confirm: move |_: usize| typed.set("confirmed".into()),
+                on_confirm: move |()| typed.set("confirmed".into()),
                 on_submit: move |_| {},
                 on_stop: move |_| {},
             }
         }
     }
 
-    // Under a runtime because the training screen now carries a live scope,
-    // and a scope redraws itself on a timer.
+    // Under a runtime: typing and keying are timed, by the debounce and the
+    // keyer.
     #[test]
     fn typing_is_refused_while_the_group_is_still_being_sent() {
         crate::testing::run(|| async {
@@ -1008,7 +1215,7 @@ mod interactions {
                 repeat_total: 1,
                 repeat_done: 1,
                 on_change: move |(_, value): (usize, String)| typed.set(value),
-                on_confirm: move |_: usize| {},
+                on_confirm: move |()| {},
                 on_submit: move |_| {},
                 on_stop: move |_| {},
             }
@@ -1034,7 +1241,7 @@ mod interactions {
                 repeat_total: 1,
                 repeat_done: 1,
                 on_change: move |(_, value): (usize, String)| typed.set(value),
-                on_confirm: move |_: usize| {},
+                on_confirm: move |()| {},
                 on_submit: move |_| {},
                 on_stop: move |_| {},
             }
@@ -1063,7 +1270,7 @@ mod interactions {
                 repeat_total: 1,
                 repeat_done: 1,
                 on_change: move |(_, value): (usize, String)| typed.set(value),
-                on_confirm: move |_: usize| {},
+                on_confirm: move |()| {},
                 on_submit: move |_| {},
                 on_stop: move |_| {},
             }
@@ -1084,20 +1291,58 @@ mod interactions {
     #[test]
     fn typing_costs_the_same_whatever_the_session_length() {
         crate::testing::run(|| async {
-            let cost_at = |count: usize| {
-                let mut ui = Ui::new(ManyGroupsHarness, ManyGroupsHarnessProps { count });
-                let _ = ui.take_work();
-                ui.type_into("group-input-0", "K");
-                ui.take_work()
-            };
-            let small = cost_at(3);
-            let large = cost_at(30);
-            assert!(small > 0, "the keystroke did nothing at all");
+            let small = typing_cost(3).await;
+            let large = typing_cost(30).await;
+            assert!(small.key > 0, "the keystroke did nothing at all");
             assert!(
-                large <= small * 2,
-                "a key cost {small} mutations in a three-group session and {large} in a \
-                 thirty-group one — the whole list is being rebuilt per character"
+                large.key <= small.key * 2,
+                "a key cost {} mutations in a three-group session and {} in a \
+                 thirty-group one — the whole list is being rebuilt per character",
+                small.key,
+                large.key
             );
+            // The session hearing it, once typing has paused, is one box too:
+            // the cards whose groups did not change are not redrawn.
+            assert!(small.commit > 0, "the debounce never committed");
+            assert!(
+                large.commit <= small.commit * 2,
+                "a commit cost {} mutations in a three-group session and {} in a \
+                 thirty-group one — every card is redrawn when one answer lands",
+                small.commit,
+                large.commit
+            );
+        });
+    }
+
+    struct TypingCost {
+        key: usize,
+        commit: usize,
+    }
+
+    /// What one key costs the renderer in a session of `count` groups, and
+    /// what the session hearing it after the debounce costs.
+    async fn typing_cost(count: usize) -> TypingCost {
+        let mut ui = Ui::new(ManyGroupsHarness, ManyGroupsHarnessProps { count });
+        let _ = ui.take_work();
+        ui.type_into("group-input-0", "K");
+        let key = ui.take_work();
+        ui.advance(60).await;
+        TypingCost {
+            key,
+            commit: ui.take_work(),
+        }
+    }
+
+    /// Leaving the box — for the header's Exit, say, or anywhere else on the
+    /// page — hands the session what was typed, without the debounce.
+    #[test]
+    fn leaving_the_box_commits_what_it_holds() {
+        crate::testing::run(|| async {
+            let mut ui = Ui::new(AnsweringHarness, ());
+            ui.type_into("group-input-0", "K");
+            assert!(!ui.has("committed:"));
+            ui.blur("group-input-0");
+            assert!(ui.has("committed:K"), "{}", ui.html());
         });
     }
 
@@ -1168,7 +1413,7 @@ mod interactions {
                 repeat_done: 1,
                 keyer_mode: KeyerMode::Straight,
                 on_change: move |(_, value): (usize, String)| typed.set(value),
-                on_confirm: move |_: usize| {},
+                on_confirm: move |()| {},
                 on_submit: move |_| {},
                 on_stop: move |_| {},
             }
@@ -1211,7 +1456,7 @@ mod interactions {
                 repeat_total: 1,
                 repeat_done: if playing() { 0 } else { 1 },
                 on_change: move |(_, value): (usize, String)| typed.set(value),
-                on_confirm: move |_: usize| {},
+                on_confirm: move |()| {},
                 on_submit: move |_| {},
                 on_stop: move |_| {},
             }
@@ -1229,16 +1474,14 @@ mod interactions {
         }
     }
 
-    /// The live box used to keep its first-mount identity when the send ended.
-    /// Webview autofocus only applies on first insert of that node, so unlock
-    /// remounts it (`key=live`) with autofocus set.
+    /// The box locked while the group is sent opens when it ends, and takes
+    /// what is typed into it from then on.
     #[test]
-    fn unlocking_the_answer_box_remounts_it_with_autofocus() {
+    fn unlocking_the_answer_box_opens_it_for_typing() {
         crate::testing::run(|| async {
             let mut ui = Ui::new(LockCycleHarness, ());
             let locked = ui.input_tag("group-input-0");
             assert!(locked.contains("readonly"), "{locked}");
-            assert!(!locked.contains("autofocus"), "{locked}");
             ui.type_into("group-input-0", "KM");
             assert!(!ui.has("committed:"), "typing must not land while locked");
 
@@ -1246,7 +1489,6 @@ mod interactions {
             let open = ui.input_tag("group-input-0");
             assert!(!open.contains("readonly"), "{open}");
             assert!(!open.contains("disabled"), "{open}");
-            assert!(open.contains("autofocus"), "{open}");
             ui.type_into("group-input-0", "KM");
             assert!(ui.has("committed:KM"), "{}", ui.html());
         });

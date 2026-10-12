@@ -1,7 +1,7 @@
 use cw_core::{HeatmapColorMode, HeatmapGrid, SessionResult, StreakState, StreakStatus};
 use dioxus::prelude::*;
 
-use crate::ui::widgets::{Icon, Seg, control_id, html_bool};
+use crate::ui::widgets::{CardHead, IconName, Seg, control_id, html_bool};
 
 #[component]
 pub fn StreakCard(status: StreakStatus) -> Element {
@@ -103,15 +103,11 @@ pub fn ActivityHeatmap(sessions: Vec<SessionResult>, today: String) -> Element {
         }
     });
     rsx! {
-        div { class: "card stack-sm heatmap-card",
-            div { class: "card-head",
-                div { class: "card-head-main",
-                    span { class: "card-icon", Icon { name: "timer" } }
-                    div {
-                        h3 { class: "card-title", "Practice calendar" }
-                        p { class: "card-note", "One square per day" }
-                    }
-                }
+        div { class: "card stack-sm",
+            CardHead {
+                icon: IconName::Timer,
+                title: "Practice calendar",
+                note: "One square per day",
                 div { class: "segmented",
                     Seg {
                         label: "Volume".to_string(),
@@ -175,6 +171,7 @@ fn HeatmapGridView(
                                 class: cls,
                                 style: paint,
                                 title: "{title}",
+                                aria_label: "{title}",
                                 disabled: html_bool(cell.in_future),
                                 onclick: move |_| on_select.call(date.clone()),
                             }

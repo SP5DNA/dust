@@ -1,32 +1,38 @@
-//! Software paddle keyer wired to `[` / `]` — USB HID paddles included.
+//! The paddle keyer wired to `[` / `]` — USB HID paddles included.
 //!
-//! Training owns a copy so it can type decoded letters into the answer box.
-//! The rest of the app shares one instance so a paddle works on Settings and
-//! Home without that box being focused, and so the sidetone is not waiting on
-//! a training session to have opened the player.
+//! The app has one keyer, so a paddle works on every screen and its sidetone
+//! does not wait on a training session to have opened the player. While a
+//! training group's answer box is open the keyer types into it; on Settings
+//! what it decodes shows on the practice pad. Its timing is cw-core's
+//! [`Keyer`]; this module gives it keys, a clock and a sound.
 
-use std::cell::RefCell;
 use std::rc::Rc;
 
-use cw_core::{KeyerMode, Paddle, PaddleKeyer, dit_ms_for_wpm, paddle_from_bracket};
+use cw_core::{Keyer, KeyerMode, KeyerOutput, Paddle, TrainingSettings, paddle_from_bracket};
 use dioxus::prelude::*;
 
 use crate::state::{AppState, Screen};
 use crate::time::mono_ms;
 #[cfg(not(all(feature = "desktop", not(test))))]
 use crate::time::sleep_ms;
-use crate::ui::widgets::{control_id, html_bool};
+use crate::ui::widgets::control_id;
 
-/// Squeeze poll while waiting for a letter gap. Coarser than this and iambic
-/// squeezes feel late; this is not the sidetone path. When the gap is over is
-/// the decoder's rule, read off the clock; this is only how often it is asked.
-const KEYER_POLL_MS: u32 = 4;
+/// How many decoded characters the practice pad keeps: about a line's worth.
+const HEARD_KEEP: usize = 32;
+
+/// Whether the key events that reach the page's root are what key the
+/// paddles. The desktop build hears them from its window instead, so a USB
+/// keyer works without the webview's focus and without waiting on its IPC,
+/// and the web build from the whole document, so they work with nothing
+/// focused at all. Tests, and the mobile builds, drive the root.
+const ROOT_KEYS_THE_PADDLES: bool =
+    cfg!(test) || !(cfg!(feature = "desktop") || cfg!(feature = "web"));
 
 /// X11 key auto-repeat is a fake release+press pair. tao on Linux never marks
 /// those as `repeat`, so a leftover press after you let go keeps the keyer
 /// running. Wait this long for the fake press; a real re-squeeze is slower.
 #[cfg(all(feature = "desktop", not(test)))]
-const REPEAT_RELEASE_MS: u32 = 16;
+const REPEAT_RELEASE_MS: u64 = 16;
 
 /// Held-paddle contacts after X11 auto-repeat has been stripped. Only the
 /// desktop build listens to raw key events, so only it — and the tests — need
@@ -83,8 +89,9 @@ impl RepeatFilter {
     }
 }
 
-async fn sleep_element(ms: u32) {
-    let ms = ms.max(1);
+/// Wait `ms` on the keyer's clock.
+async fn sleep_keyer(ms: u64) {
+    let ms = u32::try_from(ms).unwrap_or(u32::MAX).max(1);
     // The UI runtime shares a thread with WebKit. A timer there fires late, so
     // a dah is cut off before it has finished sounding. Sleep on a worker.
     #[cfg(all(feature = "desktop", not(test)))]
@@ -100,417 +107,296 @@ async fn sleep_element(ms: u32) {
     }
 }
 
-pub fn bump_epoch(mut epoch: Signal<u64>) -> u64 {
-    let next = epoch.peek().saturating_add(1);
-    epoch.set(next);
-    next
-}
-
-pub fn bracket_from_key(e: &Event<KeyboardData>) -> Option<char> {
-    match e.key() {
-        Key::Character(ref s) if s == "[" => Some('['),
-        Key::Character(ref s) if s == "]" => Some(']'),
-        _ => match e.code() {
-            Code::BracketLeft => Some('['),
-            Code::BracketRight => Some(']'),
-            _ => None,
+/// The paddle a key is, if it is one: `[` or `]`, by the character it types
+/// or else by where it sits on the keyboard — and only with no Ctrl, Alt or
+/// Meta held, which make it a shortcut. `swap` turns the paddles round.
+fn paddle_for_key(key: &str, code: &str, shortcut: bool, swap: bool) -> Option<Paddle> {
+    if shortcut {
+        return None;
+    }
+    let bracket = match key {
+        "[" => '[',
+        "]" => ']',
+        _ => match code {
+            "BracketLeft" => '[',
+            "BracketRight" => ']',
+            _ => return None,
         },
-    }
-}
-
-/// DOM paddle handlers run in tests and on web. Desktop production reads the
-/// paddles from the native window so a USB keyer works without a focused input
-/// and without waiting on WebKitGTK IPC.
-pub fn capture_dom_paddles() -> bool {
-    cfg!(test) || !cfg!(feature = "desktop")
-}
-
-fn modifiers_block_paddle(e: &Event<KeyboardData>) -> bool {
-    let mods = e.modifiers();
-    mods.ctrl() || mods.alt() || mods.meta()
-}
-
-#[allow(clippy::too_many_arguments)]
-pub fn paddle_down(
-    paddle: Paddle,
-    dit_ms: u64,
-    enabled: bool,
-    mut keyer: Signal<PaddleKeyer>,
-    mut keying: Signal<bool>,
-    generation: Signal<u64>,
-    on_tone: EventHandler<bool>,
-    on_letter: EventHandler<char>,
-) {
-    if !enabled {
-        return;
-    }
-    let dit_ms = dit_ms.max(1);
-    if keyer.peek().mode().is_straight() {
-        let already = keyer.peek().any_held();
-        let _ = bump_epoch(generation);
-        keyer.write().press(paddle, mono_ms());
-        if !already {
-            on_tone.call(true);
-        }
-        return;
-    }
-    keyer.write().press(paddle, mono_ms());
-    if *keying.peek() {
-        return;
-    }
-    keying.set(true);
-    let run = bump_epoch(generation);
-    // The first element has to start in this keydown, not after spawn is
-    // polled — a dit at 20 WPM is 60 ms, and a tick of delay is the whole
-    // character feeling late.
-    let Some(first) = keyer.write().next_element() else {
-        keying.set(false);
-        return;
     };
-    on_tone.call(true);
-    keyer.write().decoder_mut().push(first);
-    spawn(async move {
-        sleep_element(dit_ms.saturating_mul(first.dits()).max(1) as u32).await;
-        if *generation.peek() != run {
-            on_tone.call(false);
-            keying.set(false);
-            return;
-        }
-        on_tone.call(false);
-        sleep_element(dit_ms as u32).await;
-        run_iambic_loop(dit_ms, keyer, keying, generation, run, on_tone, on_letter).await;
-    });
+    paddle_from_bracket(bracket, swap)
 }
 
-async fn run_iambic_loop(
-    dit_ms: u64,
-    mut keyer: Signal<PaddleKeyer>,
-    mut keying: Signal<bool>,
-    generation: Signal<u64>,
-    run: u64,
-    on_tone: EventHandler<bool>,
-    on_letter: EventHandler<char>,
-) {
-    loop {
-        if *generation.peek() != run {
-            on_tone.call(false);
-            keying.set(false);
-            return;
-        }
-        let next = keyer.write().next_element();
-        if let Some(paddle) = next {
-            on_tone.call(true);
-            keyer.write().decoder_mut().push(paddle);
-            sleep_element(dit_ms.saturating_mul(paddle.dits()).max(1) as u32).await;
-            if *generation.peek() != run {
-                on_tone.call(false);
-                keying.set(false);
-                return;
-            }
-            on_tone.call(false);
-            sleep_element(dit_ms.max(1) as u32).await;
-            continue;
-        }
-        keyer.write().decoder_mut().quiet_from(mono_ms());
-        match wait_for_letter_gap(dit_ms, keyer, generation, run).await {
-            LetterGap::Squeezed => continue,
-            LetterGap::Superseded => {
-                keying.set(false);
-                return;
-            }
-            LetterGap::Over => {
-                keying.set(false);
-                if let Some(ch) = keyer.write().decoder_mut().take_letter() {
-                    on_letter.call(ch);
-                }
-                return;
-            }
-        }
-    }
+/// What a screen taking paddled letters lends the keyer: whether it is
+/// taking them at this moment, and where they go.
+#[derive(Clone, Copy)]
+struct AnswerBox {
+    open: CopyValue<bool>,
+    letter: Callback<char>,
 }
 
-/// How a wait for the end of a letter came out.
-enum LetterGap {
-    /// The paddles stayed quiet for a letter space: the letter is done.
-    Over,
-    /// A paddle closed first, so the letter goes on.
-    Squeezed,
-    /// Something newer took the keyer over.
-    Superseded,
-}
-
-/// Wait out the letter gap the decoder is timing, asking it on the clock
-/// rather than adding up sleeps, which run long.
-async fn wait_for_letter_gap(
-    dit_ms: u64,
-    keyer: Signal<PaddleKeyer>,
-    generation: Signal<u64>,
-    run: u64,
-) -> LetterGap {
-    loop {
-        if *generation.peek() != run {
-            return LetterGap::Superseded;
-        }
-        if keyer.peek().any_held() {
-            return LetterGap::Squeezed;
-        }
-        if keyer.peek().decoder().letter_gap_over(mono_ms(), dit_ms) {
-            return LetterGap::Over;
-        }
-        sleep_element(KEYER_POLL_MS).await;
-    }
-}
-
-pub fn paddle_up(
-    paddle: Paddle,
-    dit_ms: u64,
-    mut keyer: Signal<PaddleKeyer>,
-    generation: Signal<u64>,
-    on_tone: EventHandler<bool>,
-    on_letter: EventHandler<char>,
-) {
-    let dit_ms = dit_ms.max(1);
-    if keyer.peek().mode().is_straight() {
-        keyer.write().release(paddle);
-        if keyer.peek().any_held() {
-            return;
-        }
-        on_tone.call(false);
-        let Some(element) = keyer.write().take_straight(mono_ms(), dit_ms) else {
-            return;
-        };
-        let now = mono_ms();
-        let mut keyed = keyer.write();
-        keyed.decoder_mut().push(element);
-        keyed.decoder_mut().quiet_from(now);
-        drop(keyed);
-        let run = bump_epoch(generation);
-        spawn(async move {
-            // A squeeze or a newer press carries the letter on; only a full
-            // letter space ends it.
-            if let LetterGap::Over = wait_for_letter_gap(dit_ms, keyer, generation, run).await
-                && let Some(ch) = keyer.write().decoder_mut().take_letter()
-            {
-                on_letter.call(ch);
-            }
-        });
-        return;
-    }
-    keyer.write().release(paddle);
-}
-
-/// Latest training paddle handlers. Native window keys have to reach the
-/// session keyer; `use_wry_event_handler` keeps the first closure it is given,
-/// so TrainingView writes the current handlers here each render.
-#[derive(Clone)]
-pub struct TrainingPaddleSink {
-    down: Rc<RefCell<EventHandler<Paddle>>>,
-    up: Rc<RefCell<EventHandler<Paddle>>>,
-}
-
-impl Default for TrainingPaddleSink {
-    fn default() -> Self {
-        Self {
-            down: Rc::new(RefCell::new(EventHandler::new(|_| {}))),
-            up: Rc::new(RefCell::new(EventHandler::new(|_| {}))),
-        }
-    }
-}
-
-impl TrainingPaddleSink {
-    pub fn bind(&self, down: EventHandler<Paddle>, up: EventHandler<Paddle>) {
-        *self.down.borrow_mut() = down;
-        *self.up.borrow_mut() = up;
-    }
-
-    pub fn clear(&self) {
-        *self.down.borrow_mut() = EventHandler::new(|_| {});
-        *self.up.borrow_mut() = EventHandler::new(|_| {});
-    }
-
-    #[cfg(all(feature = "desktop", not(test)))]
-    fn call_down(&self, paddle: Paddle) {
-        self.down.borrow().call(paddle);
-    }
-
-    #[cfg(all(feature = "desktop", not(test)))]
-    fn call_up(&self, paddle: Paddle) {
-        self.up.borrow().call(paddle);
-    }
-}
-
-/// Shared keyer for every screen that is not a live training answer.
+/// The app's paddle keyer, as the shell and the screens reach it.
+///
+/// Every part is a handle, so this is `Copy` and travels by context.
+#[derive(Clone, Copy)]
 pub struct PaddleKeys {
-    pub keydown: EventHandler<Event<KeyboardData>>,
-    pub keyup: EventHandler<Event<KeyboardData>>,
-    pub down: EventHandler<Paddle>,
-    pub up: EventHandler<Paddle>,
-    pub heard: Signal<String>,
+    keyer: CopyValue<Keyer>,
+    /// The wake the clock is waiting for. A timer that finds another one here
+    /// has been superseded and does nothing.
+    armed: CopyValue<Option<u64>>,
+    answer: CopyValue<Option<AnswerBox>>,
+    app: CopyValue<Rc<AppState>>,
+    settings: Signal<TrainingSettings>,
+    screen: Signal<Screen>,
+    /// What the practice pad shows: the last few letters keyed on Settings.
+    heard: Signal<String>,
+    /// Why the sidetone cannot sound, once a try has found out.
+    sidetone_error: Signal<Option<String>>,
 }
 
+/// Start the app's keyer, and hand it to every screen below.
 pub fn use_paddle_keys(
-    settings: Signal<cw_core::TrainingSettings>,
+    settings: Signal<TrainingSettings>,
     screen: Signal<Screen>,
     app: Rc<AppState>,
 ) -> PaddleKeys {
-    let mut keyer = use_signal(|| PaddleKeyer::with_mode(settings.peek().playback.keyer_mode));
-    let mut keying = use_signal(|| false);
-    let generation = use_signal(|| 0u64);
-    let mut heard = use_signal(String::new);
-    let training = use_hook(TrainingPaddleSink::default);
-    use_hook({
-        let training = training.clone();
-        move || provide_context(training)
+    let mut keys = use_context_provider(|| {
+        let playback = &settings.peek().playback;
+        PaddleKeys {
+            keyer: CopyValue::new(Keyer::new(playback.keyer_mode, playback.keyer_wpm)),
+            armed: CopyValue::new(None),
+            answer: CopyValue::new(None),
+            app: CopyValue::new(app),
+            settings,
+            screen,
+            heard: Signal::new(String::new()),
+            sidetone_error: Signal::new(None),
+        }
     });
-    let app_tone = app.clone();
-    let app_warm = app.clone();
 
-    use_effect(use_reactive!(|settings| {
-        let mode = settings().playback.keyer_mode;
-        if keyer.peek().mode() != mode {
-            keyer.write().set_mode(mode);
+    let mode = use_memo(move || settings.read().playback.keyer_mode);
+    use_effect(move || {
+        let out = keys.keyer.write().set_mode(mode());
+        keys.act(out);
+    });
+
+    // A new screen starts the keyer clean: a letter half keyed on one screen
+    // is not the next one's. Settings is where the paddles are tried, so
+    // arriving there opens the sidetone ahead of the first squeeze — the
+    // first element is then one audio buffer late, not a stream start — and
+    // finds out whether it can sound at all.
+    use_effect(move || {
+        let on_settings = screen() == Screen::Settings;
+        keys.stop();
+        let mut heard = keys.heard;
+        if !heard.peek().is_empty() {
+            heard.set(String::new());
         }
-    }));
-
-    use_effect(use_reactive!(|screen| {
-        if matches!(screen(), Screen::Training) {
-            let _ = bump_epoch(generation);
-            keyer.write().reset();
-            keying.set(false);
-            app_tone.set_live_tone(false, &settings.peek());
+        if on_settings {
+            keys.open_sidetone();
         }
-    }));
+    });
 
-    use_effect(use_reactive!(|screen, settings| {
-        if !matches!(screen(), Screen::Settings) {
+    listen_native_paddles(keys);
+    listen_document_paddles(keys);
+    keys
+}
+
+impl PaddleKeys {
+    /// The page root's keydown. `[` and `]` are paddles, never text — on the
+    /// desktop the window keys them, but the answer box must not type them.
+    pub fn keydown(self, e: Event<KeyboardData>) {
+        let Some(paddle) = self.paddle_for(&e) else {
+            return;
+        };
+        e.prevent_default();
+        if ROOT_KEYS_THE_PADDLES && !e.is_auto_repeating() {
+            self.press(paddle);
+        }
+    }
+
+    /// The page root's keyup.
+    pub fn keyup(self, e: Event<KeyboardData>) {
+        let Some(paddle) = self.paddle_for(&e) else {
+            return;
+        };
+        e.prevent_default();
+        if ROOT_KEYS_THE_PADDLES {
+            self.release(paddle);
+        }
+    }
+
+    fn paddle_for(self, e: &Event<KeyboardData>) -> Option<Paddle> {
+        let key = match e.key() {
+            Key::Character(text) => text,
+            _ => String::new(),
+        };
+        let mods = e.modifiers();
+        let shortcut = mods.ctrl() || mods.alt() || mods.meta();
+        let swap = self.settings.peek().playback.paddle_swap;
+        paddle_for_key(&key, &e.code().to_string(), shortcut, swap)
+    }
+
+    /// A paddle closed.
+    fn press(mut self, paddle: Paddle) {
+        if !self.taking_paddles() {
             return;
         }
-        let _ = app_warm.ensure_live_sidetone(&settings());
-    }));
-
-    let on_tone = EventHandler::new({
-        move |on: bool| {
-            app.set_live_tone(on, &settings.peek());
+        // A squeeze is the moment to find out whether the sidetone can sound:
+        // a device plugged in since the last one is picked up here, and one
+        // that is still missing costs one look per squeeze, not one per
+        // element.
+        if !self.keyer.peek().sounding() {
+            self.open_sidetone();
         }
-    });
-    let on_letter = EventHandler::new(move |ch: char| {
-        heard.write().push(ch);
-    });
+        let wpm = self.settings.peek().playback.keyer_wpm;
+        let out = {
+            let mut keyer = self.keyer.write();
+            keyer.set_wpm(wpm);
+            keyer.press(paddle, mono_ms())
+        };
+        self.act(out);
+    }
 
-    let down = EventHandler::new({
-        move |paddle: Paddle| {
-            if matches!(screen(), Screen::Training) {
+    /// A paddle opened. Always heard, whatever is taking paddles now: a
+    /// release lost is a paddle stuck down.
+    fn release(mut self, paddle: Paddle) {
+        let out = self.keyer.write().release(paddle, mono_ms());
+        self.act(out);
+    }
+
+    /// Drop whatever is half keyed and fall silent: a new group, a new screen.
+    pub fn stop(mut self) {
+        let out = self.keyer.write().stop();
+        self.act(out);
+    }
+
+    /// Key into an answer box rather than the practice pad, for as long as
+    /// the calling component is mounted, and only while `open`.
+    pub fn use_answer_box(self, open: bool, letter: impl FnMut(char) + 'static) {
+        let letter = use_callback(letter);
+        let mut gate = use_hook(|| CopyValue::new(open));
+        gate.set(open);
+        let mut answer = self.answer;
+        use_hook(move || answer.set(Some(AnswerBox { open: gate, letter })));
+        use_drop(move || {
+            // Only its own: a box that has already taken over stays.
+            if answer.peek().is_some_and(|held| held.letter == letter) {
+                answer.set(None);
+            }
+            self.stop();
+        });
+    }
+
+    fn taking_paddles(self) -> bool {
+        match *self.answer.peek() {
+            Some(answer) => *answer.open.peek(),
+            // Training keys into its answer box or not at all.
+            None => *self.screen.peek() != Screen::Training,
+        }
+    }
+
+    /// Try the sidetone, and keep what the try found out for the pad to show.
+    fn open_sidetone(self) {
+        let found = self
+            .app
+            .read()
+            .ensure_live_sidetone(&self.settings.peek())
+            .err()
+            .map(|err| err.to_string());
+        let mut error = self.sidetone_error;
+        if *error.peek() != found {
+            error.set(found);
+        }
+    }
+
+    fn act(self, out: KeyerOutput) {
+        if let Some(on) = out.tone {
+            self.sound(on);
+        }
+        if let Some(letter) = out.letter {
+            self.deliver(letter);
+        }
+        self.arm(out.wake_at);
+    }
+
+    fn sound(self, on: bool) {
+        // Only when the sidetone was there at the start of the squeeze. The
+        // player opens itself on demand, so asking a missing device for every
+        // element of it would be a device search twice an element. Nothing
+        // can be sounding to turn off: the try comes before the tone goes on.
+        if self.sidetone_error.peek().is_some() {
+            return;
+        }
+        self.app.read().set_live_tone(on, &self.settings.peek());
+    }
+
+    fn deliver(mut self, letter: char) {
+        if let Some(answer) = *self.answer.peek() {
+            if *answer.open.peek() {
+                answer.letter.call(letter);
+            }
+            return;
+        }
+        if *self.screen.peek() != Screen::Settings {
+            return;
+        }
+        let mut heard = self.heard.write();
+        heard.push(letter);
+        let excess = heard.chars().count().saturating_sub(HEARD_KEEP);
+        if let Some((cut, _)) = heard.char_indices().nth(excess) {
+            heard.drain(..cut);
+        }
+    }
+
+    /// Wake the keyer at `wake`, or not at all.
+    fn arm(mut self, wake: Option<u64>) {
+        let mut armed = self.armed;
+        if *armed.peek() == wake {
+            return;
+        }
+        armed.set(wake);
+        let Some(at) = wake else {
+            return;
+        };
+        // In the root scope: the keyer outlives whichever screen pressed it.
+        dioxus::core::spawn_forever(async move {
+            sleep_keyer(at.saturating_sub(mono_ms())).await;
+            if *armed.peek() != Some(at) {
                 return;
             }
-            let dit_ms = dit_ms_for_wpm(settings.peek().playback.keyer_wpm);
-            paddle_down(
-                paddle, dit_ms, true, keyer, keying, generation, on_tone, on_letter,
-            );
-        }
-    });
-    let up = EventHandler::new({
-        move |paddle: Paddle| {
-            if matches!(screen(), Screen::Training) {
-                return;
-            }
-            let dit_ms = dit_ms_for_wpm(settings.peek().playback.keyer_wpm);
-            paddle_up(paddle, dit_ms, keyer, generation, on_tone, on_letter);
-        }
-    });
-
-    listen_native_paddles(settings, screen, training, down, up);
-
-    let keydown = EventHandler::new({
-        move |e: Event<KeyboardData>| {
-            if !capture_dom_paddles() || modifiers_block_paddle(&e) {
-                return;
-            }
-            let Some(ch) = bracket_from_key(&e) else {
-                return;
-            };
-            if e.is_auto_repeating() {
-                e.prevent_default();
-                return;
-            }
-            let swap = settings.peek().playback.paddle_swap;
-            let Some(paddle) = paddle_from_bracket(ch, swap) else {
-                return;
-            };
-            e.prevent_default();
-            down.call(paddle);
-        }
-    });
-    let keyup = EventHandler::new({
-        move |e: Event<KeyboardData>| {
-            if !capture_dom_paddles() || modifiers_block_paddle(&e) {
-                return;
-            }
-            let Some(ch) = bracket_from_key(&e) else {
-                return;
-            };
-            let swap = settings.peek().playback.paddle_swap;
-            let Some(paddle) = paddle_from_bracket(ch, swap) else {
-                return;
-            };
-            e.prevent_default();
-            up.call(paddle);
-        }
-    });
-
-    PaddleKeys {
-        keydown,
-        keyup,
-        down,
-        up,
-        heard,
+            armed.set(None);
+            let out = self.keyer.write().tick(mono_ms());
+            self.act(out);
+        });
     }
 }
 
 #[cfg(all(feature = "desktop", not(test)))]
-fn listen_native_paddles(
-    settings: Signal<cw_core::TrainingSettings>,
-    screen: Signal<Screen>,
-    training: TrainingPaddleSink,
-    down: EventHandler<Paddle>,
-    up: EventHandler<Paddle>,
-) {
+fn listen_native_paddles(keys: PaddleKeys) {
+    use std::cell::RefCell;
+
     let contacts = use_hook(|| Rc::new(RefCell::new(RepeatFilter::default())));
-    let dispatch = use_callback({
-        let contacts = Rc::clone(&contacts);
-        move |(paddle, pressed): (Paddle, bool)| {
-            let in_training = matches!(*screen.peek(), Screen::Training);
-            if pressed {
-                if !contacts.borrow_mut().press(paddle) {
-                    return;
-                }
-                if in_training {
-                    training.call_down(paddle);
-                } else {
-                    down.call(paddle);
-                }
-                return;
+    let dispatch = use_callback(move |(paddle, pressed): (Paddle, bool)| {
+        if pressed {
+            if contacts.borrow_mut().press(paddle) {
+                keys.press(paddle);
             }
-            let Some(generation) = contacts.borrow_mut().release(paddle) else {
-                return;
-            };
-            let contacts = Rc::clone(&contacts);
-            let training = training.clone();
-            spawn(async move {
-                sleep_element(REPEAT_RELEASE_MS).await;
-                if !contacts.borrow_mut().confirm_release(paddle, generation) {
-                    return;
-                }
-                if matches!(*screen.peek(), Screen::Training) {
-                    training.call_up(paddle);
-                } else {
-                    up.call(paddle);
-                }
-            });
+            return;
         }
+        let Some(generation) = contacts.borrow_mut().release(paddle) else {
+            return;
+        };
+        let contacts = Rc::clone(&contacts);
+        dioxus::core::spawn_forever(async move {
+            sleep_keyer(REPEAT_RELEASE_MS).await;
+            if contacts.borrow_mut().confirm_release(paddle, generation) {
+                keys.release(paddle);
+            }
+        });
     });
     dioxus::desktop::use_wry_event_handler(move |event, _| {
-        use tao::event::{ElementState, Event, WindowEvent};
-        use tao::keyboard::{Key, KeyCode};
+        use dioxus::desktop::tao::event::{ElementState, Event, WindowEvent};
+        use dioxus::desktop::tao::keyboard::{Key, KeyCode};
         let Event::WindowEvent {
             event: WindowEvent::KeyboardInput { event: key, .. },
             ..
@@ -530,7 +416,7 @@ fn listen_native_paddles(
                 _ => return,
             },
         };
-        let swap = settings.peek().playback.paddle_swap;
+        let swap = keys.settings.peek().playback.paddle_swap;
         let Some(paddle) = paddle_from_bracket(ch, swap) else {
             return;
         };
@@ -543,81 +429,108 @@ fn listen_native_paddles(
 }
 
 #[cfg(not(all(feature = "desktop", not(test))))]
-fn listen_native_paddles(
-    _settings: Signal<cw_core::TrainingSettings>,
-    _screen: Signal<Screen>,
-    _training: TrainingPaddleSink,
-    _down: EventHandler<Paddle>,
-    _up: EventHandler<Paddle>,
-) {
+fn listen_native_paddles(_keys: PaddleKeys) {}
+
+/// The browser delivers keys to whatever has focus, and with nothing focused
+/// — a page just loaded, a click on the background — that is the document
+/// body, outside the app's root. Listening on the document hears them all.
+#[cfg(feature = "web")]
+fn listen_document_paddles(keys: PaddleKeys) {
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen::closure::Closure;
+    use web_sys::KeyboardEvent;
+
+    type Listener = Closure<dyn FnMut(KeyboardEvent)>;
+    let listeners = use_hook(|| {
+        let document = web_sys::window()?.document()?;
+        let paddle_for = move |e: &KeyboardEvent| {
+            let shortcut = e.ctrl_key() || e.alt_key() || e.meta_key();
+            let swap = keys.settings.peek().playback.paddle_swap;
+            paddle_for_key(&e.key(), &e.code(), shortcut, swap)
+        };
+        let down: Listener = Closure::new(move |e: KeyboardEvent| {
+            if let Some(paddle) = paddle_for(&e) {
+                e.prevent_default();
+                if !e.repeat() {
+                    keys.press(paddle);
+                }
+            }
+        });
+        let up: Listener = Closure::new(move |e: KeyboardEvent| {
+            if let Some(paddle) = paddle_for(&e) {
+                e.prevent_default();
+                keys.release(paddle);
+            }
+        });
+        let listen = |name: &str, listener: &Listener| {
+            let _ =
+                document.add_event_listener_with_callback(name, listener.as_ref().unchecked_ref());
+        };
+        listen("keydown", &down);
+        listen("keyup", &up);
+        Some(Rc::new((document, down, up)))
+    });
+    use_drop(move || {
+        if let Some(held) = listeners.as_deref() {
+            let (document, down, up) = held;
+            let _ = document
+                .remove_event_listener_with_callback("keydown", down.as_ref().unchecked_ref());
+            let _ =
+                document.remove_event_listener_with_callback("keyup", up.as_ref().unchecked_ref());
+        }
+    });
 }
 
-#[component]
-pub fn PaddlePad(
-    heard: String,
-    mode: KeyerMode,
-    #[props(default)] capture_keys: bool,
-    #[props(default)] on_down: EventHandler<Paddle>,
-    #[props(default)] on_up: EventHandler<Paddle>,
-    #[props(default)] swap: bool,
-) -> Element {
-    let hint = match mode {
+#[cfg(not(feature = "web"))]
+fn listen_document_paddles(_keys: PaddleKeys) {}
+
+/// How to key with the paddles in `mode`: what the practice pad and the
+/// training screen both tell you.
+pub fn paddle_hint(mode: KeyerMode) -> &'static str {
+    match mode {
         KeyerMode::Straight => {
             "Hold [ or ] as a straight key — a short press is a dit, a long one a dah."
         }
         KeyerMode::Ultimatic => {
-            "Hold [ for dits and ] for dahs. The last paddle you close repeats. The sidetone plays here, not only in training."
+            "Hold [ for dits and ] for dahs. The last paddle you close repeats — squeeze for the middle of X or P."
         }
         KeyerMode::IambicA | KeyerMode::IambicB => {
-            "Hold [ for dits and ] for dahs. Squeeze both to alternate. The sidetone plays here, not only in training."
+            "Hold [ for dits and ] for dahs. Squeeze both to alternate; a hold repeats at the key speed."
         }
-    };
+    }
+}
+
+/// Where the paddles are tried out on Settings: a focus target with the
+/// letters they key, and why there is no sidetone when there is none. The
+/// keys themselves are the app's: they reach the keyer from the page root.
+#[component]
+pub fn PaddlePad(mode: KeyerMode) -> Element {
+    let keys = use_context::<PaddleKeys>();
+    let hint = paddle_hint(mode);
+    let heard = keys.heard.read();
     let shown = if heard.is_empty() {
-        "· −".to_string()
+        "· −"
     } else {
-        heard
+        heard.as_str()
     };
     rsx! {
         div {
             id: control_id("paddle", "practice"),
             class: "paddle-practice",
             tabindex: "0",
-            autofocus: html_bool(false),
-            onkeydown: move |e| {
-                if !capture_keys {
-                    return;
-                }
-                let Some(ch) = bracket_from_key(&e) else {
-                    return;
-                };
-                e.prevent_default();
-                e.stop_propagation();
-                if e.is_auto_repeating() {
-                    return;
-                }
-                if let Some(paddle) = paddle_from_bracket(ch, swap) {
-                    on_down.call(paddle);
-                }
-            },
-            onkeyup: move |e| {
-                if !capture_keys {
-                    return;
-                }
-                let Some(ch) = bracket_from_key(&e) else {
-                    return;
-                };
-                e.prevent_default();
-                e.stop_propagation();
-                if let Some(paddle) = paddle_from_bracket(ch, swap) {
-                    on_up.call(paddle);
-                }
-            },
-            p { class: "muted", style: "margin: 0; font-size: 0.8rem;", "{hint}" }
+            p { class: "muted", style: "margin: 0; font-size: 0.8rem;",
+                "{hint} The sidetone plays here, not only in training."
+            }
             p {
                 id: "paddle-heard",
                 class: "paddle-heard",
                 aria_live: "polite",
                 "{shown}"
+            }
+            if let Some(error) = keys.sidetone_error.read().as_deref() {
+                p { class: "muted", style: "margin: 0; font-size: 0.8rem; color: var(--warn);",
+                    "No sidetone: {error}"
+                }
             }
         }
     }
@@ -647,5 +560,28 @@ mod tests {
         let generation = contacts.release(Paddle::Dit).expect("was down");
         assert!(contacts.confirm_release(Paddle::Dit, generation));
         assert!(contacts.press(Paddle::Dit));
+    }
+
+    #[test]
+    fn a_bracket_is_a_paddle_by_what_it_types_or_where_it_sits() {
+        assert_eq!(paddle_for_key("[", "", false, false), Some(Paddle::Dit));
+        assert_eq!(paddle_for_key("]", "", false, false), Some(Paddle::Dah));
+        // A layout where the key types something else: its place decides.
+        assert_eq!(
+            paddle_for_key("ü", "BracketLeft", false, false),
+            Some(Paddle::Dit)
+        );
+        // What it types wins over where it sits.
+        assert_eq!(
+            paddle_for_key("]", "BracketLeft", false, false),
+            Some(Paddle::Dah)
+        );
+        assert_eq!(paddle_for_key("[", "", false, true), Some(Paddle::Dah));
+        assert_eq!(paddle_for_key("a", "KeyA", false, false), None);
+    }
+
+    #[test]
+    fn a_bracket_with_a_modifier_is_a_shortcut_not_a_paddle() {
+        assert_eq!(paddle_for_key("[", "BracketLeft", true, false), None);
     }
 }

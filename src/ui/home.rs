@@ -1,28 +1,57 @@
 use cw_core::{
-    AutoLevelProgress, SessionResult, TrainingSettings, compute_char_pool, compute_streak_status,
+    AutoLevelProgress, CharSetMode, LevelAxis, SessionResult, TrainingSettings, compute_char_pool,
+    compute_streak_status, newest_unlocked,
 };
 use dioxus::prelude::*;
 
 use crate::audio::AUDIO_IS_SILENT;
 use crate::ui::auto_level::AutoLevelCard;
 use crate::ui::heatmap::{ActivityHeatmap, StreakCard};
-use crate::ui::listen::newest_index;
 use crate::ui::tips::TipsCarousel;
-use crate::ui::widgets::{Icon, control_id, pretty_number};
+use crate::ui::widgets::{CardHead, Icon, IconName, control_id, pretty_number};
 
-fn level_summary(settings: &TrainingSettings) -> String {
-    match settings.curriculum.char_set_mode {
-        cw_core::CharSetMode::Callsign => {
-            format!("Callsign tier {}", settings.curriculum.callsign_level)
+/// Where the learner is, as Home says it: in the hero, and on the tile.
+#[derive(Debug, PartialEq)]
+struct LevelReading {
+    /// One line, for the hero: "Level 7 · digits 3".
+    summary: String,
+    /// The tile's caption and figure: "Levels", "7 / 3".
+    label: &'static str,
+    value: String,
+}
+
+/// The levels the settings are trained at — as far as the alphabets in use
+/// reach, not what is stored for a longer one.
+fn level_reading(settings: &TrainingSettings) -> LevelReading {
+    let letters = settings.level(LevelAxis::Letters);
+    let digits = settings.level(LevelAxis::Digits);
+    let (label, value, summary) = match settings.curriculum.char_set_mode {
+        CharSetMode::Callsign => {
+            let tier = settings.level(LevelAxis::Callsign);
+            (
+                "Callsign tier",
+                tier.to_string(),
+                format!("Callsign tier {tier}"),
+            )
         }
-        cw_core::CharSetMode::Digits => {
-            format!("Digits level {}", settings.curriculum.digits_level)
-        }
-        cw_core::CharSetMode::Mixed => format!(
-            "Level {} · digits {}",
-            settings.curriculum.level, settings.curriculum.digits_level
+        CharSetMode::Digits => (
+            "Digits level",
+            digits.to_string(),
+            format!("Digits level {digits}"),
         ),
-        _ => format!("Level {}", settings.curriculum.level),
+        CharSetMode::Mixed => (
+            "Levels",
+            format!("{letters} / {digits}"),
+            format!("Level {letters} · digits {digits}"),
+        ),
+        CharSetMode::Koch | CharSetMode::Custom => {
+            ("Level", letters.to_string(), format!("Level {letters}"))
+        }
+    };
+    LevelReading {
+        summary,
+        label,
+        value,
     }
 }
 
@@ -46,23 +75,7 @@ pub fn Home(
     on_start: EventHandler<()>,
     on_listen: EventHandler<()>,
 ) -> Element {
-    let level_label = match settings.curriculum.char_set_mode {
-        cw_core::CharSetMode::Callsign => "Callsign tier",
-        cw_core::CharSetMode::Digits => "Digits level",
-        cw_core::CharSetMode::Mixed => "Levels",
-        _ => "Level",
-    };
-    let level_value = match settings.curriculum.char_set_mode {
-        cw_core::CharSetMode::Callsign => format!("{}", settings.curriculum.callsign_level),
-        cw_core::CharSetMode::Digits => format!("{}", settings.curriculum.digits_level),
-        cw_core::CharSetMode::Mixed => {
-            format!(
-                "{} / {}",
-                settings.curriculum.level, settings.curriculum.digits_level
-            )
-        }
-        _ => format!("{}", settings.curriculum.level),
-    };
+    let level = level_reading(&settings);
     let acc = last_accuracy
         .map(|a| format!("{}%", (a * 100.0).round()))
         .unwrap_or_else(|| "—".into());
@@ -70,7 +83,8 @@ pub fn Home(
     let streak = compute_streak_status(&dates, &today);
 
     let chars = compute_char_pool(&settings);
-    let newest = newest_index(&settings, &chars);
+    let newest = newest_unlocked(&settings);
+    let callsigns = settings.curriculum.char_set_mode == CharSetMode::Callsign;
     let speed = range_label(
         settings.playback.char_wpm_min,
         settings.playback.char_wpm_max,
@@ -92,11 +106,11 @@ pub fn Home(
             }
             if AUDIO_IS_SILENT {
                 div { class: "notice",
-                    Icon { name: "volume" }
+                    Icon { name: IconName::Volume }
                     div {
-                        div { style: "font-weight: 700;", "This build has no audio yet" }
+                        div { style: "font-weight: 700;", "This build has no audio" }
                         p { class: "muted", style: "margin: 0.15rem 0 0;",
-                            "Sessions still run and score at the right pace, they just play nothing. Android audio is the next piece of work."
+                            "It is the one for bringing up a new phone toolchain. Sessions still run and score at the right pace; they just play nothing."
                         }
                     }
                 }
@@ -105,19 +119,19 @@ pub fn Home(
                 div { class: "hero-top",
                     span { class: "eyebrow", "Current alphabet" }
                     span { class: "hero-level",
-                        Icon { name: "flag" }
-                        "{level_summary(&settings)}"
+                        Icon { name: IconName::Flag }
+                        "{level.summary}"
                     }
                 }
                 if chars.is_empty() {
                     p { class: "muted", style: "color: var(--hero-ink-soft);", "No characters unlocked yet." }
                 } else {
                     div { class: "pool-chips",
-                        for (i, ch) in chars.iter().copied().enumerate() {
-                            span {
-                                class: if i == newest { "pool-chip fresh" } else { "pool-chip" },
-                                title: if i == newest { "Newest character" } else { "" },
-                                "{ch}"
+                        for ch in chars.iter().copied() {
+                            if Some(ch) == newest {
+                                span { class: "pool-chip fresh", title: "Newest character", "{ch}" }
+                            } else {
+                                span { class: "pool-chip", "{ch}" }
                             }
                         }
                     }
@@ -127,9 +141,17 @@ pub fn Home(
                         span { class: "spec-value", "{speed}" }
                         span { class: "spec-label", "WPM" }
                     }
-                    div {
-                        span { class: "spec-value", "{settings.curriculum.num_groups} × {size}" }
-                        span { class: "spec-label", "Groups" }
+                    // A callsign is as long as it is: there is no size to give.
+                    if callsigns {
+                        div {
+                            span { class: "spec-value", "{settings.curriculum.num_groups}" }
+                            span { class: "spec-label", "Calls" }
+                        }
+                    } else {
+                        div {
+                            span { class: "spec-value", "{settings.curriculum.num_groups} × {size}" }
+                            span { class: "spec-label", "Groups" }
+                        }
                     }
                     div {
                         span { class: "spec-value", "{repeats}×" }
@@ -141,14 +163,14 @@ pub fn Home(
                         id: control_id("btn", "start training"),
                         class: "btn btn-primary",
                         onclick: move |_| on_start.call(()),
-                        Icon { name: "play" }
+                        Icon { name: IconName::Play }
                         "Start training"
                     }
                     button {
                         id: control_id("btn", "listen to letters"),
                         class: "btn btn-hero",
                         onclick: move |_| on_listen.call(()),
-                        Icon { name: "headphones" }
+                        Icon { name: IconName::Headphones }
                         "Listen"
                     }
                 }
@@ -164,20 +186,16 @@ pub fn Home(
                         div { class: "value", "{session_count}" }
                     }
                     div { class: "kpi blue",
-                        div { class: "tiny", "{level_label}" }
-                        div { class: "value", "{level_value}" }
+                        div { class: "tiny", "{level.label}" }
+                        div { class: "value", "{level.value}" }
                     }
                 }
             } else {
                 div { class: "card",
-                    div { class: "card-head",
-                        div { class: "card-head-main",
-                            span { class: "card-icon", Icon { name: "sparkle" } }
-                            div {
-                                h3 { class: "card-title", "First session" }
-                                p { class: "card-note", "{pool_len} characters are in the pool right now." }
-                            }
-                        }
+                    CardHead {
+                        icon: IconName::Sparkle,
+                        title: "First session",
+                        note: format!("{pool_len} characters are in the pool right now."),
                     }
                     p { class: "muted", style: "margin: 0;",
                         "Type what you hear — the trainer scores every character, then moves the level for you."
@@ -198,21 +216,50 @@ pub fn Home(
 
 #[cfg(test)]
 mod tests {
-    use super::{level_summary, range_label};
+    use super::{LevelReading, level_reading, range_label};
     use cw_core::{CharSetMode, TrainingSettings};
 
     #[test]
-    fn the_level_summary_follows_the_mode() {
+    fn the_level_reading_follows_the_mode() {
         let mut settings = TrainingSettings::default();
         settings.curriculum.level = 7;
         settings.curriculum.digits_level = 3;
+        settings.curriculum.callsign_level = 2;
+        let reading = |settings: &TrainingSettings, mode| {
+            let mut settings = settings.clone();
+            settings.curriculum.char_set_mode = mode;
+            level_reading(&settings)
+        };
+        assert_eq!(reading(&settings, CharSetMode::Koch).summary, "Level 7");
+        assert_eq!(
+            reading(&settings, CharSetMode::Digits).summary,
+            "Digits level 3"
+        );
+        assert_eq!(
+            reading(&settings, CharSetMode::Mixed),
+            LevelReading {
+                summary: "Level 7 · digits 3".to_string(),
+                label: "Levels",
+                value: "7 / 3".to_string(),
+            }
+        );
+        assert_eq!(
+            reading(&settings, CharSetMode::Callsign).summary,
+            "Callsign tier 2"
+        );
+    }
 
-        settings.curriculum.char_set_mode = CharSetMode::Koch;
-        assert_eq!(level_summary(&settings), "Level 7");
-        settings.curriculum.char_set_mode = CharSetMode::Digits;
-        assert_eq!(level_summary(&settings), "Digits level 3");
+    /// A level stored for a longer alphabet is kept for it, but not shown as
+    /// the level of a shorter one: Mixed has only its letters to climb.
+    #[test]
+    fn the_level_shown_is_the_one_the_alphabet_in_use_reaches() {
+        let mut settings = TrainingSettings::default();
+        settings.curriculum.level = 38;
         settings.curriculum.char_set_mode = CharSetMode::Mixed;
-        assert_eq!(level_summary(&settings), "Level 7 · digits 3");
+        let mixed = level_reading(&settings);
+        assert_ne!(mixed.summary, "Level 38 · digits 1", "{mixed:?}");
+        settings.curriculum.char_set_mode = CharSetMode::Koch;
+        assert_eq!(level_reading(&settings).summary, "Level 38");
     }
 
     #[test]

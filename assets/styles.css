@@ -80,52 +80,8 @@
   --pill: 999px;
   --ease: cubic-bezier(0.22, 0.75, 0.3, 1);
 
-  /* Legacy aliases still referenced from inline styles */
-  --paper: var(--surface);
-  --linen: var(--bg);
-  --slate-50: var(--surface-2);
-  --slate-100: var(--surface-sunken);
-  --slate-200: var(--line);
-  --slate-300: var(--line-strong);
-  --slate-400: var(--ink-dim);
-  --slate-500: var(--ink-dim);
-  --slate-600: var(--ink-soft);
-  --slate-700: var(--ink-soft);
-  --slate-800: var(--ink);
-  --emerald-50: var(--good-soft);
-  --emerald-100: rgba(47, 125, 74, 0.2);
-  --emerald-200: rgba(47, 125, 74, 0.32);
-  --emerald-600: var(--good);
-  --emerald-700: var(--good);
-  --emerald-800: var(--good);
-  --rose-50: var(--bad-soft);
-  --rose-100: rgba(192, 57, 47, 0.18);
-  --rose-200: rgba(192, 57, 47, 0.3);
-  --rose-300: rgba(192, 57, 47, 0.45);
-  --rose-500: var(--bad);
-  --rose-600: var(--bad);
-  --amber-50: var(--warn-soft);
-  --amber-100: rgba(184, 134, 11, 0.22);
-  --amber-200: rgba(184, 134, 11, 0.34);
-  --amber-500: var(--warn);
-  --amber-600: var(--warn);
-  --amber-800: var(--warn);
-  --blue-50: var(--info-soft);
-  --blue-100: rgba(61, 90, 128, 0.2);
-  --blue-200: rgba(61, 90, 128, 0.3);
-  --blue-400: var(--info);
-  --blue-500: var(--info);
-  --blue-600: var(--info);
-  --blue-700: var(--info);
-  --indigo-50: var(--info-soft);
-  --indigo-100: rgba(61, 90, 128, 0.2);
-  --indigo-500: var(--info);
-  --indigo-600: var(--info);
-  --indigo-700: var(--info);
-  --purple-50: rgba(92, 61, 112, 0.12);
-  --purple-200: rgba(92, 61, 112, 0.28);
+  /* The third accent: the score tile and the sampling bars */
   --purple-700: #5c3d70;
-  --radius: var(--r-lg);
 
   font-family: Figtree, "Segoe UI", system-ui, sans-serif;
 }
@@ -254,6 +210,20 @@
   --purple-700: #b79bd0;
 }
 
+/* The page behind the app — its scrollbar, and whatever shows past an
+   overscroll — goes dark with it, wherever the engine can see the app's theme
+   from the root. One that cannot keeps the light page behind, as before. */
+html:has(.app-root[data-theme="dark"]) {
+  color-scheme: dark;
+  background: #0d1017;
+}
+@media (prefers-color-scheme: dark) {
+  html:has(.app-root[data-theme="auto"]) {
+    color-scheme: dark;
+    background: #0d1017;
+  }
+}
+
 /* ==========================================================================
    Base
    ========================================================================== */
@@ -289,16 +259,12 @@ html, body {
   background-color: #f2e9d9;
   background-color: var(--bg);
 }
-.app-root[data-theme="dark"] {
-  background-color: #0d1017;
-  background-color: var(--bg);
-}
 
 button, input, select, textarea { font: inherit; color: inherit; }
 button { cursor: pointer; touch-action: manipulation; background: none; border: 0; }
 code, .mono { font-family: "IBM Plex Mono", ui-monospace, monospace; }
 
-h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .hero-figure {
+h1, h2, h3, .page-title, .listen-glyph, .kpi .value {
   font-family: Fraunces, Georgia, serif;
   font-optical-sizing: auto;
 }
@@ -471,11 +437,8 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .hero-figure {
 .stack-sm { display: flex; flex-direction: column; gap: 0.6rem; }
 .row { display: flex; flex-wrap: wrap; gap: 0.6rem; align-items: center; }
 .row-between { display: flex; flex-wrap: wrap; gap: 0.6rem; align-items: center; justify-content: space-between; }
-.spacer { flex: 1; }
 .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.7rem; }
-.grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.7rem; }
 @media (max-width: 640px) {
-  .grid-4 { grid-template-columns: 1fr 1fr; }
   .grid-3 { gap: 0.5rem; }
   .grid-3 .kpi { padding: 0.7rem 0.6rem; }
   .grid-3 .tiny { font-size: 0.6rem; letter-spacing: 0.08em; }
@@ -525,7 +488,6 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .hero-figure {
 .card-title { margin: 0; font-size: 0.98rem; font-weight: 700; letter-spacing: -0.01em; }
 .card-note { margin: 0.1rem 0 0; font-size: 0.78rem; color: var(--ink-dim); }
 .card-tools { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; }
-.divider { height: 1px; background: var(--line-soft); margin: 0.25rem 0; border: 0; }
 
 /* KPI tiles */
 .kpi {
@@ -554,10 +516,6 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .hero-figure {
 }
 .kpi.emerald::after { background: var(--good); }
 .kpi.emerald .value { color: var(--good); }
-.kpi.rose::after { background: var(--bad); }
-.kpi.rose .value { color: var(--bad); }
-.kpi.amber::after { background: var(--warn); }
-.kpi.amber .value { color: var(--warn); }
 .kpi.blue::after,
 .kpi.indigo::after { background: var(--info); }
 .kpi.blue .value, .kpi.indigo .value { color: var(--ink); }
@@ -689,11 +647,7 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .hero-figure {
 }
 .btn-hero:hover { border-color: var(--copper); color: var(--copper-deep); }
 .btn-danger { background: var(--bad-soft); color: var(--bad); border-color: transparent; }
-.btn-ghost { background: transparent; color: var(--copper-deep); }
-.btn-ghost:hover { background: var(--copper-soft); }
 .btn-sm { padding: 0.42rem 0.8rem; font-size: 0.85rem; border-radius: 11px; }
-.btn-block { width: 100%; }
-.header-ghost { color: var(--ink-soft) !important; }
 
 /* Pills / segmented control */
 .mode-pills { display: flex; flex-wrap: wrap; gap: 0.35rem; }
@@ -707,14 +661,13 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .hero-figure {
   color: var(--ink-soft);
   transition: all 0.15s var(--ease);
 }
-.pill:hover:not(:disabled) { border-color: var(--line-strong); color: var(--ink); }
+.pill:hover { border-color: var(--line-strong); color: var(--ink); }
 .pill.active {
   background: linear-gradient(180deg, var(--copper-lift), var(--copper));
   border-color: transparent;
   color: #fff;
   box-shadow: 0 6px 14px rgba(196, 92, 38, 0.24);
 }
-.pill:disabled { opacity: 0.4; cursor: not-allowed; }
 
 .segmented {
   display: flex;
@@ -725,7 +678,6 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .hero-figure {
   background: var(--surface-sunken);
   border: 1px solid var(--line);
 }
-.segmented::-webkit-scrollbar { display: none; }
 .segmented .seg {
   flex: 1 0 auto;
   border-radius: var(--pill);
@@ -754,9 +706,7 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .hero-figure {
   font-size: 0.72rem;
   font-weight: 700;
 }
-.chip.neutral { background: var(--surface-sunken); color: var(--ink-soft); }
 .chip.good { background: var(--good-soft); color: var(--good); }
-.chip.bad { background: var(--bad-soft); color: var(--bad); }
 .chip .icon { width: 0.8rem; height: 0.8rem; }
 
 /* ==========================================================================
@@ -1023,7 +973,9 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .hero-figure {
 }
 .switch.on i { left: 22px; background: #fff; }
 .switch input:focus-visible + i { outline: 2px solid var(--copper); outline-offset: 2px; }
-.check { display: flex; gap: 0.5rem; align-items: center; font-size: 0.9rem; color: var(--ink-soft); }
+/* The range input is all but transparent, so keyboard focus shows on the knob
+   it moves instead. */
+.slider-bar:focus-within .slider-knob { box-shadow: 0 0 0 3px var(--copper-soft); }
 
 /* ==========================================================================
    Envelope card
@@ -1380,6 +1332,8 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .hero-figure {
   font-size: 1.2rem;
   letter-spacing: 0.14em;
   color: var(--ink);
+  /* One unbroken run of letters: break it anywhere rather than overflow. */
+  overflow-wrap: anywhere;
 }
 
 /* ==========================================================================
@@ -1531,37 +1485,6 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .hero-figure {
   padding: 0.26rem 0.5rem;
   margin-top: 0.1rem;
 }
-.sequence-preview {
-  font-family: "IBM Plex Mono", ui-monospace, monospace;
-  letter-spacing: 0.08em;
-  overflow-wrap: anywhere;
-}
-.pool {
-  font-family: "IBM Plex Mono", ui-monospace, monospace;
-  letter-spacing: 0.14em;
-  font-weight: 700;
-  color: var(--ink);
-  overflow-wrap: anywhere;
-}
-
-/* Collapsible */
-.advanced-toggle {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.75rem;
-  width: 100%;
-  text-align: left;
-  background: var(--surface-2);
-  border: 1px solid var(--line-soft);
-  border-radius: var(--r-md);
-  padding: 0.7rem 0.85rem;
-  transition: border-color 0.15s var(--ease);
-}
-.advanced-toggle:hover { border-color: var(--line-strong); }
-.advanced-toggle .icon { width: 1rem; height: 1rem; color: var(--ink-dim); transition: transform 0.2s var(--ease); }
-.advanced-toggle.open .icon { transform: rotate(90deg); }
-
 /* Toast — same flex-center trick as the dock. */
 .toast-dock {
   position: fixed;
@@ -1585,8 +1508,6 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .hero-figure {
   max-width: calc(100% - 2rem);
   font-size: 0.92rem;
 }
-
-.screen { animation: none; }
 
 .icon { width: 1rem; height: 1rem; flex: 0 0 auto; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 

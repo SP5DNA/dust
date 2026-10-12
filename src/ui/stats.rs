@@ -5,7 +5,7 @@ use cw_core::{
 use dioxus::prelude::*;
 
 use crate::ui::stats_detail::{HistoryTab, LettersTab, MistakesTab, SamplingTab};
-use crate::ui::widgets::{Icon, Seg};
+use crate::ui::widgets::{CardHead, IconName, Seg};
 
 // 420×96 keeps the drawing box at the same aspect the card gives it, so the
 // SVG can scale uniformly: stretched coordinates would turn the dots into
@@ -21,6 +21,15 @@ enum StatsTab {
     Sampling,
     History,
 }
+
+/// The tabs, in the order the control offers them.
+const TABS: [(StatsTab, &str); 5] = [
+    (StatsTab::Overview, "Overview"),
+    (StatsTab::Letters, "Letters"),
+    (StatsTab::Mistakes, "Mistakes"),
+    (StatsTab::Sampling, "Sampling"),
+    (StatsTab::History, "History"),
+];
 
 /// Chart shape for the accuracy series. `None` when there is nothing to draw.
 struct ChartGeometry {
@@ -104,31 +113,30 @@ pub fn StatsView(settings: TrainingSettings, sessions: Vec<SessionResult>) -> El
     // Accuracy, letters and mistakes are counted over the whole history: a
     // letter is the same letter whichever character set it was sent under.
     // Only the sampling snapshot narrows to the current set, and it does that
-    // itself so it keeps matching what the trainer will actually draw.
-    let letters = character_diagnostics(&sessions);
+    // itself so it keeps matching what the trainer will actually draw. Each
+    // tab works out its own figures when it is shown, and only then: a tab
+    // that is not open costs nothing.
     rsx! {
-        div { class: "stack stats-page",
+        div { class: "stack",
             header { class: "page-head",
                 h2 { class: "page-title", "Stats" }
-                p { class: "page-sub", "Everything scored on this device for the current alphabet." }
+                p { class: "page-sub", "Every session scored on this device, whatever it practised." }
             }
             div { class: "segmented",
-                Seg { label: "Overview".to_string(), active: tab() == StatsTab::Overview, onclick: move |_| tab.set(StatsTab::Overview) }
-                Seg { label: "Letters".to_string(), active: tab() == StatsTab::Letters, onclick: move |_| tab.set(StatsTab::Letters) }
-                Seg { label: "Mistakes".to_string(), active: tab() == StatsTab::Mistakes, onclick: move |_| tab.set(StatsTab::Mistakes) }
-                Seg { label: "Sampling".to_string(), active: tab() == StatsTab::Sampling, onclick: move |_| tab.set(StatsTab::Sampling) }
-                Seg { label: "History".to_string(), active: tab() == StatsTab::History, onclick: move |_| tab.set(StatsTab::History) }
+                for (which, label) in TABS {
+                    Seg { label, active: tab() == which, onclick: move |_| tab.set(which) }
+                }
             }
             match tab() {
                 StatsTab::Overview => rsx! {
                     OverviewTab {
-                        sessions: sessions,
+                        sessions,
                         threshold: settings.auto_level.auto_adjust_threshold,
                     }
                 },
-                StatsTab::Letters => rsx! { LettersTab { letters } },
-                StatsTab::Mistakes => rsx! { MistakesTab { sessions: sessions } },
-                StatsTab::Sampling => rsx! { SamplingTab { settings, sessions: sessions } },
+                StatsTab::Letters => rsx! { LettersTab { sessions } },
+                StatsTab::Mistakes => rsx! { MistakesTab { sessions } },
+                StatsTab::Sampling => rsx! { SamplingTab { settings, sessions } },
                 StatsTab::History => rsx! { HistoryTab { sessions } },
             }
         }
@@ -164,12 +172,7 @@ fn OverviewTab(sessions: Vec<SessionResult>, threshold: f64) -> Element {
         div { class: "stack",
             if sessions.is_empty() {
                 div { class: "card",
-                    div { class: "card-head",
-                        div { class: "card-head-main",
-                            span { class: "card-icon", Icon { name: "chart" } }
-                            div { h3 { class: "card-title", "Nothing scored yet" } }
-                        }
-                    }
+                    CardHead { icon: IconName::Chart, title: "Nothing scored yet" }
                     p { class: "muted", style: "margin: 0;",
                         "Finish a session to unlock accuracy over time, letter mastery and sampling weights."
                     }
@@ -191,14 +194,10 @@ fn OverviewTab(sessions: Vec<SessionResult>, threshold: f64) -> Element {
                 }
                 if let Some(geometry) = geometry {
                     div { class: "card chart-card",
-                        div { class: "card-head",
-                            div { class: "card-head-main",
-                                span { class: "card-icon", Icon { name: "chart" } }
-                                div {
-                                    h3 { class: "card-title", "Accuracy over time" }
-                                    p { class: "card-note", "{session_count} {session_noun} · latest {latest.round()}%" }
-                                }
-                            }
+                        CardHead {
+                            icon: IconName::Chart,
+                            title: "Accuracy over time",
+                            note: format!("{session_count} {session_noun} · latest {}%", latest.round()),
                         }
                         svg {
                             class: "sparkline",

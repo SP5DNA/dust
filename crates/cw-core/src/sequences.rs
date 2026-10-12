@@ -127,11 +127,69 @@ impl TrainingSettings {
         }
         *self = std::mem::take(self).clamp();
     }
+
+    /// Take an unlock order the learner typed out. Only what can be sent
+    /// counts, each character once. A preset's own order is that preset,
+    /// however it got there, and nothing at all is LCWO's, the order an empty
+    /// sequence has always meant; anything else is the learner's own.
+    pub fn type_sequence(&mut self, typed: &str) {
+        let order = Self::unique_alphabet(&typed.chars().collect::<Vec<_>>());
+        if order.is_empty() {
+            return self.choose_sequence(SequenceChoice::Preset(PresetId::Lcwo));
+        }
+        if let Some(preset) = SEQUENCE_PRESETS.iter().find(|p| p.sequence == order) {
+            return self.choose_sequence(SequenceChoice::Preset(preset.id));
+        }
+        self.curriculum.custom_sequence = order;
+        self.curriculum.sequence_is_custom = true;
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_typed_order_is_cleaned_and_kept_as_the_learners_own() {
+        let mut settings = TrainingSettings::default();
+        settings.type_sequence("km k?x 9");
+        assert_eq!(
+            settings.curriculum.custom_sequence,
+            ['K', 'M', '?', 'X', '9']
+        );
+        assert_eq!(settings.sequence_choice(), SequenceChoice::Custom);
+    }
+
+    #[test]
+    fn a_typed_order_that_is_a_preset_selects_it() {
+        let mut settings = TrainingSettings::default();
+        settings.choose_sequence(SequenceChoice::Custom);
+        let alphabetical: String = ALPHABETICAL_SEQUENCE.iter().collect();
+        settings.type_sequence(&alphabetical);
+        assert_eq!(
+            settings.sequence_choice(),
+            SequenceChoice::Preset(PresetId::Alphabetical)
+        );
+        let lcwo: String = LCWO_SEQUENCE.iter().collect();
+        settings.type_sequence(&lcwo);
+        assert_eq!(
+            settings.sequence_choice(),
+            SequenceChoice::Preset(PresetId::Lcwo)
+        );
+        assert!(settings.curriculum.custom_sequence.is_empty());
+    }
+
+    #[test]
+    fn an_empty_typed_order_is_lcwos() {
+        let mut settings = TrainingSettings::default();
+        settings.type_sequence("KM");
+        settings.type_sequence(" ");
+        assert_eq!(
+            settings.sequence_choice(),
+            SequenceChoice::Preset(PresetId::Lcwo)
+        );
+        assert_eq!(settings.sequence(), LCWO_SEQUENCE);
+    }
 
     #[test]
     fn an_order_matching_a_preset_is_that_preset() {
