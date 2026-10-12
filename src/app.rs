@@ -651,18 +651,6 @@ mod ui_tests {
     }
 
     #[test]
-    fn focusing_a_group_is_reported_to_the_session() {
-        run(|| async {
-            let mut settings = test_settings();
-            settings.curriculum.num_groups = 2;
-            let (mut ui, _recorder) = awaiting_answer(settings).await;
-            ui.focus("group-input-0");
-            assert!(ui.has("group focused"));
-            assert_eq!(ui.screen(), "training");
-        });
-    }
-
-    #[test]
     fn an_audio_failure_is_shown_as_a_toast_that_clears_itself() {
         run(|| async {
             let (mut ui, recorder) = Ui::app_with_settings(short_session());

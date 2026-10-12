@@ -151,7 +151,13 @@ fn dispatch(app: &AppState, signals: SessionSignals, lease: &Lease, event: Sessi
             return;
         };
         let effects = live.machine.apply(event, MonoMs(mono_ms()));
-        runtime.set(Some(live.machine.session().clone()));
+        // Much of what arrives changes nothing — a key while the box is
+        // locked, a timer the machine has forgotten — and publishing it
+        // anyway would copy the whole session and redraw the screen for it.
+        let session = live.machine.session();
+        if runtime.peek().as_ref() != Some(session) {
+            runtime.set(Some(session.clone()));
+        }
         effects
     };
     run_effects(app, signals, lease, effects);
@@ -854,6 +860,49 @@ mod tests {
                 sends,
                 "the answered group was sent again: {:?}",
                 h.texts()
+            );
+        });
+    }
+
+    /// What changes nothing is not published: no copy of the session, and
+    /// no redraw of the screen showing it.
+    #[test]
+    fn an_event_that_changes_nothing_is_not_published() {
+        run(|| async {
+            use std::sync::Arc;
+            use std::sync::atomic::{AtomicUsize, Ordering};
+
+            let mut h = Harness::new();
+            h.start_training();
+            let writes = Arc::new(AtomicUsize::new(0));
+            let counted = writes.clone();
+            let runtime = h.runtime;
+            h.in_app(|| {
+                let watcher = dioxus::core::ReactiveContext::new_with_callback(
+                    move || {
+                        counted.fetch_add(1, Ordering::Relaxed);
+                    },
+                    ScopeId::ROOT,
+                    std::panic::Location::caller(),
+                );
+                watcher.run_in(|| {
+                    let _ = runtime.read();
+                });
+            });
+            // The group is still being sent, and the box is locked.
+            h.type_answer(0, "K");
+            assert_eq!(
+                writes.load(Ordering::Relaxed),
+                0,
+                "a refused key was published"
+            );
+
+            assert!(h.run_until(4_000, |h| h.awaiting_answer() == Some(0)).await);
+            let before = writes.load(Ordering::Relaxed);
+            h.type_answer(0, "K");
+            assert!(
+                writes.load(Ordering::Relaxed) > before,
+                "an answer went unpublished"
             );
         });
     }

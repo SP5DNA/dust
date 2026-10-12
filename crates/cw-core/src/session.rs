@@ -165,7 +165,7 @@ pub struct SessionView {
     pub repeat_done: u32,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct GroupSession {
     session_id: SessionId,
     phase: SessionPhase,
@@ -253,12 +253,6 @@ impl GroupSession {
 
     pub(crate) fn set_phase(&mut self, phase: SessionPhase) {
         self.phase = phase;
-    }
-
-    pub(crate) fn set_focused_group(&mut self, index: usize) {
-        if index == self.current_group {
-            self.focused_group = index;
-        }
     }
 
     pub(crate) fn group_repeats(&self, index: usize) -> u32 {
@@ -776,12 +770,10 @@ mod tests {
     }
 
     #[test]
-    fn the_focus_only_moves_onto_the_current_group() {
+    fn the_focus_moves_with_the_group_being_sent() {
         let mut session = GroupSession::new(SessionId::new(1), 2, TrainingSettings::default());
-        session.set_focused_group(1);
         assert_eq!(session.view().focused, 0);
         session.begin_group(1, MonoMs(10));
-        session.set_focused_group(1);
         assert_eq!(session.view().focused, 1);
         // Beginning a group that is not there changes nothing.
         session.begin_group(9, MonoMs(20));

@@ -132,7 +132,7 @@ pub fn app_routes(
                 let playing = view.playing;
                 let app_change = app.clone();
                 let app_confirm = app.clone();
-                let app_focus = app.clone();
+
                 let app_submit = app.clone();
                 let app_stop = app.clone();
                 let app_tone = app;
@@ -172,9 +172,7 @@ pub fn app_routes(
                             on_confirm: move |_idx| {
                                 send_event(&app_confirm, signals, SessionEvent::Confirm);
                             },
-                            on_focus: move |idx| {
-                                send_event(&app_focus, signals, SessionEvent::Focus { index: idx });
-                            },
+
                             on_submit: move |_| {
                                 send_event(&app_submit, signals, SessionEvent::FinishNow);
                             },

@@ -679,14 +679,6 @@ impl Ui {
         self.fire("change", id, Self::form(value));
     }
 
-    pub fn focus(&mut self, id: &str) {
-        self.fire(
-            "focus",
-            id,
-            Box::new(dioxus::html::SerializedFocusData::default()),
-        );
-    }
-
     pub fn press_enter(&mut self, id: &str) {
         self.press_key(id, Key::Enter, dioxus::prelude::Code::Enter);
     }

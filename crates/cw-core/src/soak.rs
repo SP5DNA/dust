@@ -267,7 +267,7 @@ fn random_event(rng: &mut FastrandRng, groups: usize, timers: &[u64]) -> Session
     let text: String = (0..rng.usize_in(0, 12))
         .map(|_| KEYS[rng.usize_in(0, KEYS.len() - 1)])
         .collect();
-    match rng.usize_in(0, 8) {
+    match rng.usize_in(0, 7) {
         0 => SessionEvent::PlaybackEnded {
             index,
             duration_sec: rng.pick_in_range(0.0, 5.0),
@@ -284,9 +284,8 @@ fn random_event(rng: &mut FastrandRng, groups: usize, timers: &[u64]) -> Session
                 .copied()
                 .unwrap_or(rng.usize_in(0, 40) as u64),
         },
-        5 => SessionEvent::Focus { index },
-        6 => SessionEvent::FinishNow,
-        7 => SessionEvent::TimerFired {
+        5 => SessionEvent::FinishNow,
+        6 => SessionEvent::TimerFired {
             id: timers.last().copied().unwrap_or(0),
         },
         _ => SessionEvent::Abort,
