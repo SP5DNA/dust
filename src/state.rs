@@ -2,7 +2,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use cw_core::{
-    CharSamplingState, FastrandRng, GroupSession, SessionMachine, SessionResult, StationVoice,
+    FastrandRng, GroupSession, Sampler, SessionMachine, SessionResult, StationVoice,
     TrainingSettings, Transmission, resolve_pileup, resolve_station,
 };
 use dioxus::prelude::*;
@@ -43,8 +43,7 @@ pub struct AppState {
     pub session_gen: Rc<Cell<u64>>,
     pub player: Rc<RefCell<Option<Box<dyn MorseBackend>>>>,
     pub rng: Rc<RefCell<FastrandRng>>,
-    pub sampling: Rc<RefCell<CharSamplingState>>,
-    pub machine: Rc<RefCell<Option<SessionMachine>>>,
+    pub machine: Rc<RefCell<Option<SessionMachine<Sampler>>>>,
     make_player: BackendFactory,
 }
 
@@ -58,7 +57,6 @@ impl AppState {
             session_gen: Rc::new(Cell::new(0)),
             player: Rc::new(RefCell::new(None)),
             rng: Rc::new(RefCell::new(FastrandRng(seed_rng()))),
-            sampling: Rc::new(RefCell::new(CharSamplingState::default())),
             machine: Rc::new(RefCell::new(None)),
             make_player,
         }

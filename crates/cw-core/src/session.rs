@@ -1,34 +1,38 @@
-//! Group-training session runtime and result construction.
+//! One training session: its groups, what was answered, and the result it
+//! scores to. [`crate::machine::SessionMachine`] is the only thing that moves
+//! it on; everyone else reads it.
+
+use std::borrow::Cow;
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::alignment::CopyTally;
+use crate::alignment::{CopyTally, LetterAccuracy};
+use crate::level::LEVEL_MIN;
 use crate::score::{
-    ScoreConstants, calculate_alphabet_size, calculate_effective_alphabet_size,
-    calculate_total_chars, compute_average_response_ms, compute_session_score,
+    ScoreConstants, calculate_effective_alphabet_size, calculate_total_chars,
+    compute_average_response_ms, compute_session_score,
 };
-use crate::settings::{CharSetMode, TrainingSettings};
+use crate::settings::{CharSetMode, LevelAxis, PlaybackSettings, TrainingSettings};
 
-fn session_level_default() -> u32 {
-    1
-}
+/// The quickest a listener can be said to answer, per character.
+///
+/// An answer finished while the group was still being sent — with the input
+/// left open during the send, real-time copying always is — has no response
+/// time worth the name. Scored as the 1 ms it measured, the speed term ran
+/// away with the score: ten to twenty times an answer given a second after
+/// the send. A tenth of a second a character is about as fast as anyone
+/// types one.
+pub const MIN_RESPONSE_MS_PER_CHAR: f64 = 100.0;
 
-fn session_mode_legacy() -> CharSetMode {
-    CharSetMode::Koch
-}
-
-fn session_wpm_default() -> f64 {
-    18.0
-}
+/// The longest an answer is kept, against the group it answers: twice its
+/// length, or this many characters for a short one. Room for every honest
+/// mistake, and none for a paste of a novel to be stored, scored and aligned
+/// on every visit to the stats screen.
+const LONGEST_ANSWER: usize = 32;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct SessionId(u64);
-
-impl From<u64> for SessionId {
-    fn from(raw: u64) -> Self {
-        Self(raw)
-    }
-}
 
 impl SessionId {
     pub fn new(raw: u64) -> Self {
@@ -40,24 +44,63 @@ impl SessionId {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum RuntimeStatus {
-    Starting,
-    PlayingGroup,
-    WaitingForAnswer,
+/// A moment on a clock that only runs forward, in milliseconds from wherever
+/// that clock starts.
+///
+/// Response times are measured between two of these, so they must come from
+/// a monotonic clock: the wall clock steps when it is corrected, and a step
+/// back between a send ending and its answer used to score the answer as
+/// instant.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct MonoMs(pub u64);
+
+impl MonoMs {
+    /// Milliseconds since `earlier`; none if it is not earlier.
+    pub fn since(self, earlier: Self) -> u64 {
+        self.0.saturating_sub(earlier.0)
+    }
+
+    #[must_use]
+    pub fn plus(self, ms: u64) -> Self {
+        Self(self.0.saturating_add(ms))
+    }
+}
+
+/// Where a session is. Every phase that is about a group names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionPhase {
+    Playing {
+        index: usize,
+    },
+    /// Word-space pause between two sends of the same group.
+    RepeatGap {
+        index: usize,
+    },
+    InterGroupGap {
+        next: usize,
+    },
+    AwaitingAnswer {
+        index: usize,
+    },
+    Finished,
+    Aborted,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Group {
     sent: String,
     input: String,
-    confirmed: bool,
-    start_at: u64,
-    end_at: u64,
-    answer_at: u64,
-    char_wpm: f64,
-    effective_wpm: f64,
+    /// What was copied, once the group is answered. Answered is exactly
+    /// when there is one.
+    tally: Option<CopyTally>,
+    start_at: MonoMs,
+    /// When the last send of the group ended; none while it is still going.
+    end_at: Option<MonoMs>,
+    /// When the answer was complete: the moment its length first matched,
+    /// or the confirm.
+    answer_at: Option<MonoMs>,
+    /// The character and effective speed it was sent at, once measured.
+    played_wpm: Option<(f64, f64)>,
     /// How many times this group is sent before the answer window opens.
     repeats: u32,
     /// Sends already finished for this group.
@@ -69,12 +112,11 @@ impl Group {
         Self {
             sent: String::new(),
             input: String::new(),
-            confirmed: false,
-            start_at: 0,
-            end_at: 0,
-            answer_at: 0,
-            char_wpm: 0.0,
-            effective_wpm: 0.0,
+            tally: None,
+            start_at: MonoMs::default(),
+            end_at: None,
+            answer_at: None,
+            played_wpm: None,
             repeats: 1,
             plays_done: 0,
         }
@@ -89,31 +131,34 @@ impl Group {
     }
 
     pub fn confirmed(&self) -> bool {
-        self.confirmed
+        self.tally.is_some()
     }
 
-    pub fn repeats(&self) -> u32 {
-        self.repeats
-    }
-
-    pub fn plays_done(&self) -> u32 {
-        self.plays_done
-    }
-
-    pub fn char_wpm(&self) -> f64 {
-        self.char_wpm
+    /// How long the answer took, from the end of the send — never quicker
+    /// than a person types.
+    fn timing(&self) -> SessionTiming {
+        let chars = self.sent.chars().count().max(1) as f64;
+        let measured = match (self.end_at, self.answer_at) {
+            (Some(end), Some(answer)) => answer.since(end) as f64,
+            // Answered before the send ended: as fast as it gets.
+            _ => 0.0,
+        };
+        SessionTiming {
+            time_to_complete_ms: measured.max(MIN_RESPONSE_MS_PER_CHAR * chars),
+            char_wpm: self.played_wpm.map(|(char_wpm, _)| char_wpm),
+        }
     }
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct SessionView {
-    pub session_id: SessionId,
-    pub status: RuntimeStatus,
     pub current: usize,
     pub focused: usize,
     pub sent: Vec<String>,
     pub inputs: Vec<String>,
     pub confirmed: Vec<bool>,
+    /// The current group is being sent, or is between two of its sends.
+    pub playing: bool,
     pub locked: bool,
     /// Planned sends for the group being played, and how many are done.
     pub repeat_total: u32,
@@ -122,9 +167,8 @@ pub struct SessionView {
 
 #[derive(Clone, Debug)]
 pub struct GroupSession {
-    status: RuntimeStatus,
     session_id: SessionId,
-    started_at: u64,
+    phase: SessionPhase,
     groups: Vec<Group>,
     current_group: usize,
     focused_group: usize,
@@ -132,16 +176,14 @@ pub struct GroupSession {
 }
 
 impl GroupSession {
-    pub fn new(
-        session_id: impl Into<SessionId>,
-        started_at: u64,
+    pub(crate) fn new(
+        session_id: SessionId,
         num_groups: usize,
         settings: TrainingSettings,
     ) -> Self {
         Self {
-            status: RuntimeStatus::Starting,
-            session_id: session_id.into(),
-            started_at,
+            session_id,
+            phase: SessionPhase::Playing { index: 0 },
             groups: vec![Group::blank(); num_groups.max(1)],
             current_group: 0,
             focused_group: 0,
@@ -153,12 +195,8 @@ impl GroupSession {
         self.session_id
     }
 
-    pub fn started_at(&self) -> u64 {
-        self.started_at
-    }
-
-    pub fn status(&self) -> RuntimeStatus {
-        self.status
+    pub fn phase(&self) -> SessionPhase {
+        self.phase
     }
 
     pub fn current_group(&self) -> usize {
@@ -169,12 +207,8 @@ impl GroupSession {
         self.focused_group
     }
 
-    pub fn set_focused_group(&mut self, index: usize) {
-        if index == self.current_group {
-            self.focused_group = index;
-        }
-    }
-
+    /// The settings the session was started with. Every group is built from
+    /// these, not from whatever the settings screen holds now.
     pub fn settings(&self) -> &TrainingSettings {
         &self.settings
     }
@@ -187,223 +221,238 @@ impl GroupSession {
         self.groups.get(index)
     }
 
-    pub fn sent_texts(&self) -> Vec<String> {
-        self.groups.iter().map(|g| g.sent.clone()).collect()
-    }
-
-    pub fn inputs(&self) -> Vec<String> {
-        self.groups.iter().map(|g| g.input.clone()).collect()
-    }
-
-    pub fn confirmed_flags(&self) -> Vec<bool> {
-        self.groups.iter().map(|g| g.confirmed).collect()
-    }
-
     pub fn any_confirmed(&self) -> bool {
-        self.groups.iter().any(|g| g.confirmed)
+        self.groups.iter().any(Group::confirmed)
+    }
+
+    /// Whether typing into `index` is refused: while its group is being sent,
+    /// if the settings lock the box for that.
+    pub fn input_locked(&self, index: usize) -> bool {
+        self.settings.playback.lock_input_during_group_playback
+            && self.playing()
+            && index == self.current_group
+    }
+
+    fn playing(&self) -> bool {
+        matches!(
+            self.phase,
+            SessionPhase::Playing { .. } | SessionPhase::RepeatGap { .. }
+        )
     }
 
     pub fn view(&self) -> SessionView {
         let current = self.groups.get(self.current_group);
         SessionView {
-            session_id: self.session_id,
-            status: self.status,
             current: self.current_group,
             focused: self.focused_group,
-            sent: self.sent_texts(),
-            inputs: self.inputs(),
-            confirmed: self.confirmed_flags(),
+            sent: self.groups.iter().map(|g| g.sent.clone()).collect(),
+            inputs: self.groups.iter().map(|g| g.input.clone()).collect(),
+            confirmed: self.groups.iter().map(Group::confirmed).collect(),
+            playing: self.playing(),
             locked: self.input_locked(self.current_group),
-            repeat_total: current.map(|g| g.repeats.max(1)).unwrap_or(1),
-            repeat_done: current.map(|g| g.plays_done).unwrap_or(0),
+            repeat_total: current.map_or(1, |g| g.repeats.max(1)),
+            repeat_done: current.map_or(0, |g| g.plays_done),
         }
     }
 
-    pub fn group_repeats(&self, index: usize) -> u32 {
-        self.groups
-            .get(index)
-            .map(|g| g.repeats.max(1))
-            .unwrap_or(1)
+    pub(crate) fn set_phase(&mut self, phase: SessionPhase) {
+        self.phase = phase;
     }
 
-    /// Plan how many times `index` is sent. Clamped to at least one send.
-    pub fn set_group_repeats(&mut self, index: usize, repeats: u32) {
-        if let Some(group) = self.groups.get_mut(index) {
+    pub(crate) fn set_focused_group(&mut self, index: usize) {
+        if index == self.current_group {
+            self.focused_group = index;
+        }
+    }
+
+    pub(crate) fn group_repeats(&self, index: usize) -> u32 {
+        self.groups.get(index).map_or(1, |g| g.repeats.max(1))
+    }
+
+    pub(crate) fn played_wpm(&self, index: usize) -> Option<(f64, f64)> {
+        self.groups.get(index)?.played_wpm
+    }
+
+    pub(crate) fn group_start(&self, index: usize) -> Option<MonoMs> {
+        self.groups.get(index).map(|g| g.start_at)
+    }
+
+    /// Fill in what `index` sends, and how many times.
+    pub(crate) fn set_group(&mut self, index: usize, text: String, repeats: u32) {
+        if let Some(group) = self.groups.get_mut(index)
+            && !group.confirmed()
+        {
+            group.sent = text;
+            group.input.clear();
             group.repeats = repeats.max(1);
         }
     }
 
+    pub(crate) fn begin_group(&mut self, index: usize, now: MonoMs) {
+        let Some(group) = self.groups.get_mut(index) else {
+            return;
+        };
+        group.start_at = now;
+        group.plays_done = 0;
+        self.current_group = index;
+        self.focused_group = index;
+    }
+
     /// Count one finished send of `index`.
-    pub fn note_play_finished(&mut self, index: usize) {
+    pub(crate) fn note_play_finished(&mut self, index: usize) {
         if let Some(group) = self.groups.get_mut(index) {
             group.plays_done = group.plays_done.saturating_add(1);
         }
     }
 
-    pub fn played_wpm(&self, index: usize) -> Option<(f64, f64)> {
-        let group = self.groups.get(index)?;
-        (group.char_wpm > 0.0 && group.effective_wpm > 0.0)
-            .then_some((group.char_wpm, group.effective_wpm))
-    }
-
-    pub fn group_start_ms(&self, index: usize) -> Option<u64> {
-        self.groups.get(index).map(|g| g.start_at)
-    }
-
-    pub fn set_group(&mut self, index: usize, text: String) {
-        let Some(group) = self.groups.get_mut(index) else {
-            return;
-        };
-        group.sent = text;
-        if !group.confirmed {
-            group.input.clear();
-        }
-    }
-
-    pub fn begin_group(&mut self, index: usize, now_ms: u64) {
-        if index >= self.groups.len() {
-            return;
-        }
-        self.current_group = index;
-        self.focused_group = index;
-        self.status = RuntimeStatus::PlayingGroup;
+    pub(crate) fn end_playback(
+        &mut self,
+        index: usize,
+        now: MonoMs,
+        char_wpm: f64,
+        effective_wpm: f64,
+    ) {
         if let Some(group) = self.groups.get_mut(index) {
-            group.start_at = now_ms;
-            group.plays_done = 0;
+            group.end_at = Some(now);
+            group.played_wpm =
+                (char_wpm > 0.0 && effective_wpm > 0.0).then_some((char_wpm, effective_wpm));
         }
     }
 
-    pub fn end_playback(&mut self, index: usize, now_ms: u64, char_wpm: f64, effective_wpm: f64) {
-        if let Some(group) = self.groups.get_mut(index) {
-            group.end_at = now_ms;
-            group.char_wpm = char_wpm;
-            group.effective_wpm = effective_wpm;
-        }
-        self.status = RuntimeStatus::WaitingForAnswer;
-    }
-
-    pub fn set_input(&mut self, index: usize, value: String) {
+    /// Take what is typed into the current group, tidied: see
+    /// [`normalize_answer`].
+    pub(crate) fn set_input(&mut self, index: usize, typed: &str) {
         if index != self.current_group {
             return;
         }
-        let Some(group) = self.groups.get_mut(index) else {
-            return;
-        };
-        if group.confirmed {
-            return;
-        }
-        group.input = value;
-    }
-
-    /// Returns true the first time this group is confirmed.
-    pub fn confirm(&mut self, index: usize, value: String, answered_at: u64) -> bool {
-        if index != self.current_group {
-            return false;
-        }
-        let Some(group) = self.groups.get_mut(index) else {
-            return false;
-        };
-        if group.confirmed {
-            return false;
-        }
-        if group.end_at == 0 {
-            group.end_at = answered_at;
-        }
-        group.confirmed = true;
-        group.input = value;
-        if group.answer_at == 0 {
-            group.answer_at = answered_at;
-        }
-        if self.status == RuntimeStatus::PlayingGroup {
-            self.status = RuntimeStatus::WaitingForAnswer;
-        }
-        let next = (index + 1).min(self.groups.len().saturating_sub(1));
-        self.focused_group = next;
-        true
-    }
-
-    pub fn record_answer_time_if_empty(&mut self, index: usize, answered_at: u64) {
         if let Some(group) = self.groups.get_mut(index)
-            && group.answer_at == 0
+            && !group.confirmed()
         {
-            group.answer_at = answered_at;
+            group.input = normalize_answer(&group.sent, typed);
         }
     }
 
-    /// Drop a length-match stamp if the user backspaces before confirm.
-    pub fn clear_answer_time(&mut self, index: usize) {
-        let Some(group) = self.groups.get_mut(index) else {
-            return;
-        };
-        if group.confirmed {
-            return;
+    /// Stamp the moment the answer reached the group's length, the first
+    /// time it does; withdraw the stamp when it no longer does.
+    pub(crate) fn mark_answer_complete(&mut self, index: usize, complete: bool, now: MonoMs) {
+        if let Some(group) = self.groups.get_mut(index)
+            && !group.confirmed()
+        {
+            group.answer_at = if complete {
+                group.answer_at.or(Some(now))
+            } else {
+                None
+            };
         }
-        group.answer_at = 0;
     }
 
-    pub fn input_locked(&self, index: usize) -> bool {
-        self.settings.playback.lock_input_during_group_playback
-            && self.status == RuntimeStatus::PlayingGroup
-            && index == self.current_group
+    /// Answer the current group with what is in its box. Returns what was
+    /// copied, the first time only.
+    pub(crate) fn confirm(&mut self, index: usize, now: MonoMs) -> Option<&CopyTally> {
+        if index != self.current_group {
+            return None;
+        }
+        let last = self.groups.len().saturating_sub(1);
+        let group = self.groups.get_mut(index)?;
+        if group.confirmed() {
+            return None;
+        }
+        group.answer_at = group.answer_at.or(Some(now));
+        self.focused_group = (index + 1).min(last);
+        Some(group.tally.insert(CopyTally::of(&group.sent, &group.input)))
     }
 
-    pub fn all_groups_confirmed(&self) -> bool {
-        !self.groups.is_empty()
-            && self
-                .groups
-                .iter()
-                .all(|group| !group.sent.is_empty() && group.confirmed)
-    }
-
-    pub fn build_timings(&self, fallback_timeout_ms: f64) -> Vec<SessionTiming> {
-        self.groups
+    /// The finished session, scored, as it is stored. `finished_at` is wall
+    /// time, the moment it ended; `date` the local day it counts towards.
+    pub fn result(&self, finished_at: u64, date: String) -> SessionResult {
+        let scored: Vec<&Group> = self
+            .groups
             .iter()
-            .map(|group| {
-                let end_at = group.end_at;
-                let raw_answer = group.answer_at;
-                let fallback = if end_at > 0 && fallback_timeout_ms > 0.0 {
-                    end_at + fallback_timeout_ms as u64
-                } else {
-                    0
-                };
-                let answer_at = if raw_answer > 0 { raw_answer } else { fallback };
-                let delta = if answer_at > 0 && end_at > 0 && answer_at <= end_at {
-                    1.0
-                } else {
-                    answer_at.saturating_sub(end_at) as f64
-                };
-                // Rounded to the millisecond, but never to nothing: an answer
-                // in before the send even ended is the fastest there is, and
-                // a zero would be thrown out of the average as no answer at
-                // all — scoring the quickest copy as a slow one.
-                let per_char = if group.sent.is_empty() {
-                    0.0
-                } else {
-                    (delta / group.sent.chars().count() as f64).round().max(1.0)
-                };
-                let wpm = (group.char_wpm > 0.0).then_some(group.char_wpm);
-                SessionTiming {
-                    time_to_complete_ms: delta,
-                    per_char_ms: per_char,
-                    char_wpm: wpm,
-                }
-            })
-            .collect()
-    }
+            .filter(|group| group.confirmed() && !group.sent.is_empty())
+            .collect();
+        let mut tally = CopyTally::default();
+        for copied in scored.iter().filter_map(|group| group.tally.as_ref()) {
+            tally.merge(copied);
+        }
+        let accuracy = tally.accuracy();
+        let sent: Vec<&str> = scored.iter().map(|g| g.sent.as_str()).collect();
+        let timings: Vec<SessionTiming> = scored.iter().map(|g| g.timing()).collect();
+        let per_char: Vec<f64> = scored
+            .iter()
+            .zip(&timings)
+            .map(|(group, timing)| timing.time_to_complete_ms / group.sent.chars().count() as f64)
+            .collect();
+        let avg_response_ms = compute_average_response_ms(&per_char);
+        let total_chars = calculate_total_chars(&sent);
+        let score = compute_session_score(
+            calculate_effective_alphabet_size(&sent),
+            accuracy,
+            avg_response_ms,
+            total_chars,
+            ScoreConstants::default(),
+        );
+        let played: Vec<(f64, f64)> = scored.iter().filter_map(|g| g.played_wpm).collect();
+        let playback = &self.settings.playback;
+        let (char_wpm, effective_wpm) = if played.is_empty() {
+            (
+                playback.char_wpm_min,
+                playback.effective_wpm_min.min(playback.char_wpm_min),
+            )
+        } else {
+            let n = played.len() as f64;
+            (
+                played.iter().map(|(c, _)| c).sum::<f64>() / n,
+                played.iter().map(|(_, e)| e).sum::<f64>() / n,
+            )
+        };
 
-    #[cfg(test)]
-    fn force_timing(&mut self, index: usize, end_at: u64, char_wpm: f64, effective_wpm: f64) {
-        if let Some(group) = self.groups.get_mut(index) {
-            group.end_at = end_at;
-            group.char_wpm = char_wpm;
-            group.effective_wpm = effective_wpm;
+        SessionResult {
+            date,
+            timestamp: finished_at,
+            groups: scored
+                .iter()
+                .map(|group| GroupResult {
+                    sent: group.sent.clone(),
+                    received: group.input.clone(),
+                    correct: group.sent == group.input,
+                })
+                .collect(),
+            group_timings: timings,
+            accuracy,
+            tally,
+            avg_response_ms,
+            total_chars,
+            score,
+            // One level per mode, and `level` is the one this mode was run at —
+            // callsigns need no second field the way Mixed needs `digits_level`.
+            level: self.settings.active_level(),
+            digits_level: self.settings.level(LevelAxis::Digits),
+            char_set_mode: self.settings.curriculum.char_set_mode,
+            char_wpm,
+            effective_wpm,
+            alphabet_fingerprint: self.settings.alphabet_fingerprint(),
         }
     }
+}
 
-    #[cfg(test)]
-    fn set_lock_for_test(&mut self, lock: bool) {
-        self.settings.playback.lock_input_during_group_playback = lock;
-    }
+/// An answer as it is kept: upper case, with no whitespace — a group never
+/// has any, so a stray space is neither an error nor a reason the length
+/// does not match — and no longer than [`LONGEST_ANSWER`] allows.
+fn normalize_answer(sent: &str, typed: &str) -> String {
+    let longest = (2 * sent.chars().count()).max(LONGEST_ANSWER);
+    typed
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .map(|c| c.to_ascii_uppercase())
+        .take(longest)
+        .collect()
+}
+
+/// Whether `received` is as long as `sent`, not counting whitespace: when an
+/// answer is complete enough to confirm by itself.
+pub fn answer_length_matches(sent: &str, received: &str) -> bool {
+    !sent.is_empty()
+        && received.chars().filter(|c| !c.is_whitespace()).count() == sent.chars().count()
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -417,30 +466,43 @@ pub struct GroupResult {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionTiming {
+    /// From the end of the send to the answer, never quicker than
+    /// [`MIN_RESPONSE_MS_PER_CHAR`] a character.
     pub time_to_complete_ms: f64,
-    pub per_char_ms: f64,
     #[serde(default)]
     pub char_wpm: Option<f64>,
+}
+
+fn session_level_default() -> u32 {
+    LEVEL_MIN
+}
+
+fn session_mode_legacy() -> CharSetMode {
+    CharSetMode::Koch
+}
+
+/// Sessions saved before the speed was recorded were sent at the default.
+fn session_wpm_default() -> f64 {
+    PlaybackSettings::default().char_wpm_min
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionResult {
     pub date: String,
+    /// Wall time the session finished, in milliseconds: what history is
+    /// ordered by.
     pub timestamp: u64,
-    pub started_at: u64,
-    pub finished_at: u64,
     pub groups: Vec<GroupResult>,
     pub group_timings: Vec<SessionTiming>,
     pub accuracy: f64,
     /// What was copied, character by character.
     #[serde(flatten)]
     pub tally: CopyTally,
-    pub alphabet_size: u32,
     pub avg_response_ms: f64,
     pub total_chars: u32,
-    pub effective_alphabet_size: f64,
     pub score: f64,
+    /// Saves from the first versions called it the Koch level.
     #[serde(alias = "kochLevel", default = "session_level_default")]
     pub level: u32,
     #[serde(default = "session_level_default")]
@@ -456,131 +518,18 @@ pub struct SessionResult {
     pub alphabet_fingerprint: String,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct SessionSummary {
-    pub accuracy: f64,
-    pub groups: Vec<GroupResult>,
-    pub avg_response_ms: f64,
-    pub score: f64,
-}
-
-fn group_was_scored(session: &GroupSession, index: usize) -> bool {
-    session
-        .groups
-        .get(index)
-        .is_some_and(|group| group.confirmed && !group.sent.is_empty())
-}
-
-pub fn answer_length_matches(sent: &str, received: &str) -> bool {
-    !sent.is_empty() && received.trim().chars().count() == sent.chars().count()
-}
-
-pub fn build_session_result(
-    session: &GroupSession,
-    settings: &TrainingSettings,
-    finished_at: u64,
-    date: String,
-) -> SessionResult {
-    let pairs: Vec<(String, String)> = session
-        .groups
-        .iter()
-        .enumerate()
-        .filter(|(index, _)| group_was_scored(session, *index))
-        .map(|(_, group)| (group.sent.clone(), group.input.trim().to_ascii_uppercase()))
-        .collect();
-
-    let groups: Vec<GroupResult> = pairs
-        .iter()
-        .map(|(sent, received)| GroupResult {
-            sent: sent.clone(),
-            received: received.clone(),
-            correct: sent == received,
-        })
-        .collect();
-
-    let mut tally = CopyTally::default();
-    for (sent, received) in &pairs {
-        tally.add(sent, received);
-    }
-    let accuracy = tally.accuracy();
-    let sent_only: Vec<&str> = pairs.iter().map(|(s, _)| s.as_str()).collect();
-    let alphabet_size = calculate_alphabet_size(&sent_only);
-    let effective_alphabet_size = calculate_effective_alphabet_size(&sent_only);
-    let all_timings = session.build_timings(settings.playback.group_timeout * 1000.0);
-    let timings: Vec<SessionTiming> = all_timings
-        .into_iter()
-        .enumerate()
-        .filter(|(index, _)| group_was_scored(session, *index))
-        .map(|(_, timing)| timing)
-        .collect();
-    let avg_response_ms =
-        compute_average_response_ms(&timings.iter().map(|t| t.per_char_ms).collect::<Vec<_>>());
-    let total_chars = calculate_total_chars(&sent_only);
-    let score = compute_session_score(
-        effective_alphabet_size,
-        accuracy,
-        avg_response_ms,
-        total_chars,
-        ScoreConstants::default(),
-    );
-    let played_wpm: Vec<f64> = session
-        .groups
-        .iter()
-        .enumerate()
-        .filter(|(index, group)| group_was_scored(session, *index) && group.char_wpm > 0.0)
-        .map(|(_, group)| group.char_wpm)
-        .collect();
-    let char_wpm = if played_wpm.is_empty() {
-        settings.playback.char_wpm_min
-    } else {
-        played_wpm.iter().sum::<f64>() / played_wpm.len() as f64
-    };
-    let played_effective: Vec<f64> = session
-        .groups
-        .iter()
-        .enumerate()
-        .filter(|(index, group)| group_was_scored(session, *index) && group.effective_wpm > 0.0)
-        .map(|(_, group)| group.effective_wpm)
-        .collect();
-    let effective_wpm = if played_effective.is_empty() {
-        settings.playback.effective_wpm_min.min(char_wpm)
-    } else {
-        played_effective.iter().sum::<f64>() / played_effective.len() as f64
-    };
-
-    SessionResult {
-        date,
-        timestamp: finished_at,
-        started_at: session.started_at,
-        finished_at,
-        groups,
-        group_timings: timings,
-        accuracy,
-        tally,
-        alphabet_size,
-        avg_response_ms,
-        total_chars,
-        effective_alphabet_size,
-        score,
-        // One level per mode, and `level` is the one this mode was run at —
-        // callsigns need no second field the way Mixed needs `digits_level`.
-        level: settings.active_level(),
-        digits_level: settings.curriculum.digits_level,
-        char_set_mode: settings.curriculum.char_set_mode,
-        char_wpm,
-        effective_wpm,
-        alphabet_fingerprint: settings.alphabet_fingerprint(),
-    }
-}
-
 impl SessionResult {
-    pub fn summary(&self) -> SessionSummary {
-        SessionSummary {
-            accuracy: self.accuracy,
-            groups: self.groups.clone(),
-            avg_response_ms: self.avg_response_ms,
-            score: self.score,
+    /// How each character sent was copied. Sessions saved before that was
+    /// recorded have it worked out again from their groups.
+    pub fn letter_accuracy(&self) -> Cow<'_, BTreeMap<char, LetterAccuracy>> {
+        if !self.tally.sent.is_empty() || self.groups.is_empty() {
+            return Cow::Borrowed(&self.tally.sent);
         }
+        let mut tally = CopyTally::default();
+        for group in &self.groups {
+            tally.add(&group.sent, &group.received);
+        }
+        Cow::Owned(tally.sent)
     }
 
     /// Whether this session's letter stats should seed sampling for `settings`.
@@ -598,16 +547,12 @@ impl SessionResult {
         Self {
             date: "2026-09-01".into(),
             timestamp: 0,
-            started_at: 0,
-            finished_at: 0,
             groups: Vec::new(),
             group_timings: Vec::new(),
             accuracy: 0.0,
             tally: CopyTally::default(),
-            alphabet_size: 1,
             avg_response_ms: 0.0,
             total_chars: 1,
-            effective_alphabet_size: 1.0,
             score: 0.0,
             level: 1,
             digits_level: 1,
@@ -623,22 +568,38 @@ impl SessionResult {
 mod tests {
     use super::*;
 
+    /// A session of `copies`: each group sent, its send ending half a second
+    /// in at 18 WPM, then answered as typed `ms` later.
+    fn answered(settings: TrainingSettings, copies: &[(&str, &str, u64)]) -> GroupSession {
+        let mut session = GroupSession::new(SessionId::new(1), copies.len(), settings);
+        let mut now = MonoMs(1_000);
+        for (index, (sent, typed, ms)) in copies.iter().enumerate() {
+            session.set_group(index, (*sent).into(), 1);
+            session.begin_group(index, now);
+            now = now.plus(500);
+            session.end_playback(index, now, 18.0, 18.0);
+            session.set_input(index, typed);
+            now = now.plus(*ms);
+            session.confirm(index, now);
+        }
+        session
+    }
+
+    fn result(session: &GroupSession) -> SessionResult {
+        session.result(3_000, "2026-09-01".into())
+    }
+
     #[test]
     fn perfect_copy_is_full_accuracy() {
-        let mut session = GroupSession::new(1, 0, 2, TrainingSettings::default());
-        session.set_group(0, "KM".into());
-        session.set_group(1, "UK".into());
-        session.begin_group(0, 0);
-        session.confirm(0, "KM".into(), 1000);
-        session.force_timing(0, 500, 18.0, 18.0);
-        session.begin_group(1, 1000);
-        session.confirm(1, "UK".into(), 2000);
-        session.force_timing(1, 1500, 18.0, 18.0);
-        let settings = TrainingSettings::default();
-        let result = build_session_result(&session, &settings, 3000, "2026-09-01".into());
+        let session = answered(
+            TrainingSettings::default(),
+            &[("KM", "KM", 400), ("UK", "uk", 400)],
+        );
+        let result = result(&session);
         assert!((result.accuracy - 1.0).abs() < 1e-9);
         assert!(result.groups.iter().all(|g| g.correct));
         assert!((result.char_wpm - 18.0).abs() < 1e-9);
+        assert_eq!(result.timestamp, 3_000);
     }
 
     /// Characters typed that were never sent cost accuracy. Without that a
@@ -646,15 +607,11 @@ mod tests {
     /// score and the level both follow this accuracy.
     #[test]
     fn padding_an_answer_is_not_a_perfect_copy() {
-        let mut session = GroupSession::new(1, 0, 2, TrainingSettings::default());
-        session.set_group(0, "KMURE".into());
-        session.set_group(1, "KM".into());
-        session.begin_group(0, 0);
-        session.confirm(0, "KMUURE".into(), 1000);
-        session.begin_group(1, 1000);
-        session.confirm(1, "KMN".into(), 2000);
-        let settings = TrainingSettings::default();
-        let result = build_session_result(&session, &settings, 3000, "2026-09-01".into());
+        let session = answered(
+            TrainingSettings::default(),
+            &[("KMURE", "KMUURE", 400), ("KM", "KMN", 400)],
+        );
+        let result = result(&session);
         assert!(
             (result.accuracy - 7.0 / 9.0).abs() < 1e-9,
             "{}",
@@ -664,513 +621,226 @@ mod tests {
     }
 
     #[test]
-    fn unconfirmed_generated_groups_are_not_scored() {
-        let mut session = GroupSession::new(1, 0, 3, TrainingSettings::default());
-        session.set_group(0, "KM".into());
-        session.set_group(1, "UK".into());
-        session.set_group(2, "RS".into());
-        session.begin_group(0, 0);
-        session.confirm(0, "KM".into(), 1000);
-        session.force_timing(0, 500, 22.0, 22.0);
-        let settings = TrainingSettings::default();
-        let result = build_session_result(&session, &settings, 3000, "2026-09-01".into());
-        assert_eq!(result.groups.len(), 1);
-        assert_eq!(result.group_timings.len(), 1);
-        assert!(result.groups[0].correct);
-        assert!((result.accuracy - 1.0).abs() < 1e-9);
-        assert!((result.char_wpm - 22.0).abs() < 1e-9);
+    fn unconfirmed_and_empty_groups_are_not_scored() {
+        let mut session = answered(TrainingSettings::default(), &[("KM", "KM", 400)]);
+        session.groups.push(Group::blank());
+        session.groups[1].sent = "RS".into();
+        let scored = result(&session);
+        assert_eq!(scored.groups.len(), 1);
+        assert_eq!(scored.group_timings.len(), 1);
+
+        // A confirmed group with nothing in it scores nothing at all.
+        let silent = answered(TrainingSettings::default(), &[("", "", 400)]);
+        assert!(result(&silent).groups.is_empty());
     }
 
     #[test]
-    fn repeats_default_to_one_and_count_plays() {
-        let mut session = GroupSession::new(1, 0, 2, TrainingSettings::default());
-        assert_eq!(session.group_repeats(0), 1);
-        session.set_group_repeats(0, 0);
-        assert_eq!(session.group_repeats(0), 1);
-        session.set_group_repeats(0, 3);
-        session.set_group(0, "KM".into());
-        session.begin_group(0, 0);
-        session.note_play_finished(0);
-        let view = session.view();
-        assert_eq!(view.repeat_total, 3);
-        assert_eq!(view.repeat_done, 1);
-        session.begin_group(0, 10);
-        assert_eq!(session.view().repeat_done, 0);
-    }
-
-    #[test]
-    fn confirm_is_idempotent() {
-        let mut session = GroupSession::new(1, 0, 1, TrainingSettings::default());
-        session.set_group(0, "KM".into());
-        assert!(session.confirm(0, "KM".into(), 100));
-        assert!(!session.confirm(0, "XX".into(), 200));
-        assert_eq!(session.group(0).unwrap().input(), "KM");
-        session.set_input(0, "ZZ".into());
-        assert_eq!(session.group(0).unwrap().input(), "KM");
-    }
-
-    #[test]
-    fn set_input_ignores_other_groups() {
-        let mut session = GroupSession::new(1, 0, 2, TrainingSettings::default());
-        session.set_group(0, "KM".into());
-        session.set_group(1, "UK".into());
-        session.set_input(1, "UK".into());
-        assert_eq!(session.group(1).unwrap().input(), "");
-        session.set_input(0, "KM".into());
-        assert_eq!(session.group(0).unwrap().input(), "KM");
-    }
-
-    #[test]
-    fn all_groups_confirmed_requires_every_sent_group() {
-        let mut session = GroupSession::new(1, 0, 2, TrainingSettings::default());
-        session.set_group(0, "KM".into());
-        session.set_group(1, "UK".into());
-        session.confirm(0, "KM".into(), 1);
-        assert!(!session.all_groups_confirmed());
-        session.begin_group(1, 1);
-        session.confirm(1, "".into(), 2);
-        assert!(session.all_groups_confirmed());
-    }
-
-    #[test]
-    fn timeout_empty_answer_is_scored_wrong() {
-        let mut session = GroupSession::new(1, 0, 1, TrainingSettings::default());
-        session.set_group(0, "KM".into());
-        session.confirm(0, "".into(), 1000);
-        session.force_timing(0, 500, 0.0, 0.0);
-        let result = build_session_result(
-            &session,
-            &TrainingSettings::default(),
-            3000,
-            "2026-09-01".into(),
-        );
+    fn an_empty_answer_is_scored_wrong() {
+        let result = result(&answered(TrainingSettings::default(), &[("KM", "", 400)]));
         assert_eq!(result.groups.len(), 1);
         assert!(!result.groups[0].correct);
         assert!(result.accuracy < 0.01);
     }
 
+    /// Answers typed while the group is still being sent used to be timed at
+    /// a millisecond, and the speed term made them worth ten to twenty times
+    /// an answer a second after the send. They are as fast as a person types.
     #[test]
-    fn answer_length_uses_characters() {
-        assert!(answer_length_matches("KM", "km"));
-        assert!(answer_length_matches("KM", " km "));
-        assert!(!answer_length_matches("KM", "K"));
-        assert!(!answer_length_matches("", "KM"));
-    }
-
-    #[test]
-    fn set_group_clears_unconfirmed_input() {
-        let mut session = GroupSession::new(1, 0, 1, TrainingSettings::default());
-        session.set_input(0, "XX".into());
-        session.set_group(0, "KM".into());
-        assert_eq!(session.group(0).unwrap().input(), "");
-        session.set_input(0, "KM".into());
-        session.confirm(0, "KM".into(), 1);
-        session.set_group(0, "UK".into());
-        assert_eq!(session.group(0).unwrap().input(), "KM");
-    }
-
-    #[test]
-    fn answer_during_playback_counts_as_immediate() {
-        let mut session = GroupSession::new(1, 0, 1, TrainingSettings::default());
-        session.set_group(0, "KM".into());
-        session.force_timing(0, 2000, 18.0, 18.0);
-        session.confirm(0, "KM".into(), 1500);
-        let timings = session.build_timings(10_000.0);
-        assert_eq!(timings.len(), 1);
-        assert!((timings[0].time_to_complete_ms - 1.0).abs() < 1e-9);
-        assert!((timings[0].per_char_ms - 1.0).abs() < 1e-9);
-    }
-
-    /// The case the two-character test above cannot see: half a millisecond
-    /// rounds up to one, but a third of one rounds down to zero — and a zero
-    /// is discarded from the average as no answer at all, so the fastest
-    /// possible copy used to score as a slow one.
-    #[test]
-    fn an_early_answer_to_a_long_group_is_still_the_fastest() {
-        for group in ["KMU", "KMURE", "KMUREKMURE"] {
-            let mut session = GroupSession::new(1, 0, 1, TrainingSettings::default());
-            session.set_group(0, group.into());
-            session.force_timing(0, 2000, 18.0, 18.0);
-            session.confirm(0, group.into(), 1500);
-            let timings = session.build_timings(10_000.0);
-            assert_eq!(timings[0].per_char_ms, 1.0, "{group}");
-            let average = crate::score::compute_average_response_ms(&[timings[0].per_char_ms]);
-            assert_eq!(average, 1.0, "{group}: the early answer was thrown away");
-        }
-    }
-
-    #[test]
-    fn confirm_before_end_playback_is_immediate() {
-        let mut session = GroupSession::new(1, 0, 1, TrainingSettings::default());
-        session.set_group(0, "KM".into());
-        session.begin_group(0, 0);
-        session.confirm(0, "KM".into(), 400);
-        assert_eq!(session.view().status, RuntimeStatus::WaitingForAnswer);
-        let timings = session.build_timings(10_000.0);
-        assert_eq!(timings.len(), 1);
-        assert!((timings[0].time_to_complete_ms - 1.0).abs() < 1e-9);
-    }
-
-    #[test]
-    fn result_uses_played_effective_wpm() {
-        let mut session = GroupSession::new(1, 0, 1, TrainingSettings::default());
-        session.set_group(0, "KM".into());
-        session.confirm(0, "KM".into(), 1000);
-        session.force_timing(0, 500, 25.0, 12.0);
-        let mut settings = TrainingSettings::default();
-        settings.playback.effective_wpm_min = 18.0;
-        settings.playback.effective_wpm_max = 25.0;
-        let result = build_session_result(&session, &settings, 3000, "2026-09-01".into());
-        assert!((result.char_wpm - 25.0).abs() < 1e-9);
-        assert!((result.effective_wpm - 12.0).abs() < 1e-9);
-        assert_eq!(result.alphabet_fingerprint, settings.alphabet_fingerprint());
-    }
-
-    #[test]
-    fn sampling_history_requires_matching_mode_and_alphabet() {
-        let mut settings = TrainingSettings::default();
-        settings.curriculum.char_set_mode = CharSetMode::Koch;
-        let mut koch = build_session_result(
-            &GroupSession::new(1, 0, 1, settings.clone()),
-            &settings,
-            1,
-            "2026-09-01".into(),
-        );
-        koch.char_set_mode = CharSetMode::Koch;
-        koch.alphabet_fingerprint = settings.alphabet_fingerprint();
-        assert!(koch.usable_for_sampling(&settings));
-
-        let mut digits = koch.clone();
-        digits.char_set_mode = CharSetMode::Digits;
-        assert!(!digits.usable_for_sampling(&settings));
-
-        let mut other_seq = settings.clone();
-        other_seq.curriculum.custom_sequence = crate::sequences::TRADITIONAL_KOCH_SEQUENCE.to_vec();
-        koch.alphabet_fingerprint = settings.alphabet_fingerprint();
-        assert!(!koch.usable_for_sampling(&other_seq));
-
-        let mut legacy = koch;
-        legacy.char_set_mode = CharSetMode::Koch;
-        legacy.alphabet_fingerprint.clear();
-        assert!(legacy.usable_for_sampling(&settings));
-    }
-
-    #[test]
-    fn input_locked_uses_session_settings() {
-        let mut settings = TrainingSettings::default();
-        settings.playback.lock_input_during_group_playback = true;
-        let mut session = GroupSession::new(1, 0, 1, settings);
-        session.begin_group(0, 0);
-        assert!(session.input_locked(0));
-        session.set_lock_for_test(false);
-        assert!(!session.input_locked(0));
-        session.end_playback(0, 1, 20.0, 18.0);
-        session.set_lock_for_test(true);
-        assert!(!session.input_locked(0));
-    }
-
-    #[test]
-    fn digits_session_records_digits_level() {
-        let mut settings = TrainingSettings::default();
-        settings.curriculum.char_set_mode = CharSetMode::Digits;
-        settings.curriculum.digits_level = 4;
-        settings.curriculum.level = 1;
-        let mut session = GroupSession::new(1, 0, 1, settings.clone());
-        session.set_group(0, "01".into());
-        session.confirm(0, "01".into(), 1000);
-        session.force_timing(0, 500, 0.0, 0.0);
-        let result = build_session_result(&session, &settings, 3000, "2026-09-01".into());
-        assert_eq!(result.level, 4);
-        assert_eq!(result.digits_level, 4);
-        assert_eq!(result.char_set_mode, CharSetMode::Digits);
-    }
-
-    #[test]
-    fn shortening_answer_clears_completion_stamp() {
-        let mut session = GroupSession::new(1, 0, 1, TrainingSettings::default());
-        session.set_group(0, "KM".into());
-        session.force_timing(0, 1000, 0.0, 0.0);
-        session.record_answer_time_if_empty(0, 1100);
-        session.clear_answer_time(0);
-        session.confirm(0, "KM".into(), 1400);
-        let timings = session.build_timings(10_000.0);
-        assert!((timings[0].time_to_complete_ms - 400.0).abs() < 1e-9);
-    }
-
-    /// The tally is saved as the flat keys a session always had, plus the
-    /// characters typed but never sent when there were any.
-    #[test]
-    fn a_session_tally_round_trips_through_its_saved_keys() {
-        let mut session = GroupSession::new(1, 0, 1, TrainingSettings::default());
-        session.set_group(0, "KM".into());
-        session.confirm(0, "KMN".into(), 1000);
-        let result = build_session_result(
-            &session,
-            &TrainingSettings::default(),
-            2000,
-            "2026-01-01".into(),
-        );
-        let json = serde_json::to_value(&result).unwrap();
-        assert_eq!(json["letterAccuracy"]["K"]["correct"], 1);
-        assert_eq!(json["inserted"]["N"], 1);
-        assert!(json.get("tally").is_none());
-        let back: SessionResult = serde_json::from_value(json).unwrap();
-        assert_eq!(back, result);
-
-        let mut clean = result;
-        clean.tally.inserted.clear();
-        let json = serde_json::to_value(&clean).unwrap();
-        assert!(json.get("inserted").is_none());
-    }
-
-    #[test]
-    fn legacy_session_json_fills_new_fields() {
-        let timing: SessionTiming =
-            serde_json::from_str(r#"{"timeToCompleteMs":1,"perCharMs":1}"#).unwrap();
-        assert_eq!(timing.char_wpm, None);
-        let raw = r#"{
-            "date":"2026-01-01","timestamp":1,"startedAt":0,"finishedAt":1,
-            "groups":[],"groupTimings":[],"accuracy":1,
-            "letterAccuracy":{"K":{"correct":1,"total":2}},
-            "alphabetSize":0,"avgResponseMs":0,"totalChars":0,
-            "effectiveAlphabetSize":0,"score":0,"level":1
-        }"#;
-        let result: SessionResult = serde_json::from_str(raw).unwrap();
+    fn an_answer_that_beats_the_send_scores_as_a_fast_typist_not_as_instant() {
+        let mut session = GroupSession::new(SessionId::new(1), 1, TrainingSettings::default());
+        session.set_group(0, "KMURE".into(), 1);
+        session.begin_group(0, MonoMs(1_000));
+        session.set_input(0, "KMURE");
+        session.confirm(0, MonoMs(1_400));
+        let early = result(&session);
         assert_eq!(
-            result.tally.sent.get(&'K'),
-            Some(&crate::alignment::LetterAccuracy {
-                correct: 1,
-                total: 2
-            })
+            early.group_timings[0].time_to_complete_ms,
+            5.0 * MIN_RESPONSE_MS_PER_CHAR
         );
-        assert!(result.tally.inserted.is_empty());
-        assert_eq!(result.digits_level, 1);
-        assert_eq!(result.char_set_mode, CharSetMode::Koch);
-        assert_eq!(result.char_wpm, 18.0);
-        assert_eq!(result.effective_wpm, 18.0);
-        assert!(result.alphabet_fingerprint.is_empty());
-    }
-}
+        assert_eq!(early.avg_response_ms, MIN_RESPONSE_MS_PER_CHAR);
 
-#[cfg(test)]
-mod accessor_tests {
-    use super::*;
-
-    fn session() -> GroupSession {
-        let mut settings = TrainingSettings::default();
-        settings.playback.lock_input_during_group_playback = true;
-        let mut session = GroupSession::new(SessionId::new(3), 500, 2, settings);
-        session.set_group(0, "KM".into());
-        session.set_group(1, "UR".into());
-        session
+        let slower = result(&answered(
+            TrainingSettings::default(),
+            &[("KMURE", "KMURE", 1_500)],
+        ));
+        assert!(
+            early.score <= slower.score * 2.0,
+            "{} against {}",
+            early.score,
+            slower.score
+        );
     }
 
     #[test]
-    fn a_session_id_survives_the_round_trip() {
-        assert_eq!(SessionId::from(9u64).raw(), 9);
-        assert_eq!(SessionId::new(4), SessionId::from(4u64));
-    }
-
-    #[test]
-    fn a_fresh_session_reports_its_own_shape() {
-        let session = session();
-        assert_eq!(session.session_id().raw(), 3);
-        assert_eq!(session.started_at(), 500);
-        assert_eq!(session.status(), RuntimeStatus::Starting);
-        assert_eq!(session.group_count(), 2);
-        assert_eq!(session.current_group(), 0);
-        assert_eq!(session.focused_group(), 0);
-        assert_eq!(session.sent_texts(), vec!["KM", "UR"]);
-        assert_eq!(session.inputs(), vec!["", ""]);
-        assert_eq!(session.confirmed_flags(), vec![false, false]);
-        assert!(!session.any_confirmed());
-        assert!(session.group(9).is_none());
-        assert_eq!(session.group_repeats(9), 1);
-        assert_eq!(session.played_wpm(0), None);
-        assert_eq!(session.group_start_ms(9), None);
-        // A session always has at least one group, even if asked for none.
+    fn the_answer_is_timed_from_the_first_moment_it_was_complete() {
+        let mut session = GroupSession::new(SessionId::new(1), 1, TrainingSettings::default());
+        session.set_group(0, "KMURE".into(), 1);
+        session.begin_group(0, MonoMs(1_000));
+        session.end_playback(0, MonoMs(2_000), 20.0, 18.0);
+        session.mark_answer_complete(0, true, MonoMs(3_000));
+        session.mark_answer_complete(0, true, MonoMs(3_500));
+        session.confirm(0, MonoMs(4_000));
         assert_eq!(
-            GroupSession::new(SessionId::new(1), 0, 0, TrainingSettings::default()).group_count(),
-            1
+            result(&session).group_timings[0].time_to_complete_ms,
+            1_000.0
         );
+
+        // A stamp withdrawn by a backspace is gone; the confirm is the answer.
+        let mut session = GroupSession::new(SessionId::new(1), 1, TrainingSettings::default());
+        session.set_group(0, "KMURE".into(), 1);
+        session.end_playback(0, MonoMs(2_000), 20.0, 18.0);
+        session.mark_answer_complete(0, true, MonoMs(2_500));
+        session.mark_answer_complete(0, false, MonoMs(2_600));
+        session.confirm(0, MonoMs(4_000));
+        let timing = &result(&session).group_timings[0];
+        assert_eq!(timing.time_to_complete_ms, 2_000.0);
+        assert_eq!(timing.char_wpm, Some(20.0));
     }
 
+    /// Typing is kept the way a group is written: no spaces, upper case, and
+    /// not without end.
     #[test]
-    fn the_view_mirrors_the_current_group() {
-        let mut session = session();
-        session.set_group_repeats(0, 3);
-        session.begin_group(0, 1_000);
-        session.note_play_finished(0);
-        let view = session.view();
-        assert_eq!(view.session_id, SessionId::new(3));
-        assert_eq!(view.status, RuntimeStatus::PlayingGroup);
-        assert_eq!(view.current, 0);
-        assert_eq!(view.repeat_total, 3);
-        assert_eq!(view.repeat_done, 1);
-        assert!(view.locked);
-        assert_eq!(session.group(0).map(Group::repeats), Some(3));
-        assert_eq!(session.group(0).map(Group::plays_done), Some(1));
-    }
-
-    #[test]
-    fn repeats_are_never_below_one() {
-        let mut session = session();
-        session.set_group_repeats(0, 0);
-        assert_eq!(session.group_repeats(0), 1);
-        // Setting repeats on a group that is not there is a no-op.
-        session.set_group_repeats(9, 4);
-        assert_eq!(session.group_count(), 2);
-        session.note_play_finished(9);
-    }
-
-    #[test]
-    fn beginning_a_group_that_is_not_there_changes_nothing() {
-        let mut session = session();
-        session.begin_group(9, 1_000);
-        assert_eq!(session.current_group(), 0);
-        assert_eq!(session.status(), RuntimeStatus::Starting);
-    }
-
-    #[test]
-    fn replacing_the_text_of_a_confirmed_group_keeps_the_answer() {
-        let mut session = session();
-        session.begin_group(0, 1_000);
-        session.confirm(0, "KM".into(), 1_500);
-        session.set_group(0, "XX".into());
-        assert_eq!(session.group(0).map(|g| g.input()), Some("KM"));
-        // An unconfirmed group loses whatever was typed into it.
-        session.set_group(9, "ZZ".into());
-        assert_eq!(session.sent_texts(), vec!["XX", "UR"]);
+    fn an_answer_is_tidied_and_capped_on_the_way_in() {
+        let mut session = GroupSession::new(SessionId::new(1), 1, TrainingSettings::default());
+        session.set_group(0, "KM".into(), 1);
+        session.set_input(0, " k m\t");
+        assert_eq!(session.group(0).map(Group::input), Some("KM"));
+        session.set_input(0, &"E".repeat(100_000));
+        assert_eq!(
+            session.group(0).map(|g| g.input().len()),
+            Some(LONGEST_ANSWER)
+        );
+        let mut long = GroupSession::new(SessionId::new(1), 1, TrainingSettings::default());
+        long.set_group(0, "KMUREKMUREKMUREKMURE".into(), 1);
+        long.set_input(0, &"E".repeat(100));
+        assert_eq!(long.group(0).map(|g| g.input().len()), Some(40));
     }
 
     #[test]
     fn input_is_only_accepted_for_the_current_unconfirmed_group() {
-        let mut session = session();
-        session.begin_group(0, 1_000);
-        session.set_input(1, "nope".into());
-        assert_eq!(session.group(1).map(|g| g.input()), Some(""));
-        session.set_input(0, "km".into());
-        assert_eq!(session.group(0).map(|g| g.input()), Some("km"));
-        session.confirm(0, "KM".into(), 1_200);
-        session.set_input(0, "later".into());
-        assert_eq!(session.group(0).map(|g| g.input()), Some("KM"));
+        let mut session = GroupSession::new(SessionId::new(1), 2, TrainingSettings::default());
+        session.set_group(0, "KM".into(), 1);
+        session.set_group(1, "UR".into(), 1);
+        session.set_input(1, "nope");
+        assert_eq!(session.group(1).map(Group::input), Some(""));
+        session.set_input(0, "km");
+        assert_eq!(session.group(0).map(Group::input), Some("KM"));
+        assert!(session.confirm(0, MonoMs(1_200)).is_some());
+        assert!(session.confirm(0, MonoMs(1_300)).is_none(), "only once");
+        session.set_input(0, "later");
+        assert_eq!(session.group(0).map(Group::input), Some("KM"));
+        // A confirmed group keeps its text too.
+        session.set_group(0, "XX".into(), 1);
+        assert_eq!(session.group(0).map(Group::sent), Some("KM"));
     }
 
     #[test]
-    fn confirming_is_refused_for_anything_but_the_current_group() {
-        let mut session = session();
-        session.begin_group(0, 1_000);
-        assert!(!session.confirm(1, "UR".into(), 1_100));
-        assert!(!session.confirm(9, "??".into(), 1_100));
-        assert!(session.confirm(0, "KM".into(), 1_100));
-        assert!(!session.confirm(0, "KM".into(), 1_200));
+    fn confirming_only_takes_the_current_group_and_moves_the_focus_on() {
+        let mut session = GroupSession::new(SessionId::new(1), 2, TrainingSettings::default());
+        session.set_group(0, "KM".into(), 1);
+        assert!(session.confirm(1, MonoMs(1_100)).is_none());
+        assert!(session.confirm(9, MonoMs(1_100)).is_none());
+        assert!(session.confirm(0, MonoMs(1_100)).is_some());
         assert!(session.any_confirmed());
-        // Confirming moves the focus onto the next group.
+        assert_eq!(session.focused_group(), 1);
+
+        // The last group keeps the focus.
+        session.begin_group(1, MonoMs(2_000));
+        assert!(session.confirm(1, MonoMs(2_100)).is_some());
         assert_eq!(session.focused_group(), 1);
     }
 
     #[test]
-    fn the_last_group_keeps_the_focus_when_it_is_confirmed() {
-        let mut session = session();
-        session.begin_group(1, 1_000);
-        assert!(session.confirm(1, "UR".into(), 1_100));
-        assert_eq!(session.focused_group(), 1);
-    }
-
-    #[test]
-    fn an_answer_stamp_is_kept_until_the_answer_changes_length() {
-        let mut session = session();
-        session.begin_group(0, 1_000);
-        session.record_answer_time_if_empty(0, 1_400);
-        session.record_answer_time_if_empty(0, 1_900);
-        session.clear_answer_time(9);
-        session.record_answer_time_if_empty(9, 1_900);
-        session.end_playback(0, 1_200, 20.0, 18.0);
-        let timings = session.build_timings(0.0);
-        // The first stamp is the one that counts.
-        assert_eq!(timings[0].time_to_complete_ms, 200.0);
-
-        session.clear_answer_time(0);
-        let timings = session.build_timings(0.0);
-        assert_eq!(timings[0].time_to_complete_ms, 0.0);
-        // Confirmed groups keep their stamp.
-        session.confirm(0, "KM".into(), 2_000);
-        session.clear_answer_time(0);
-        assert_eq!(session.build_timings(0.0)[0].time_to_complete_ms, 800.0);
-    }
-
-    #[test]
-    fn an_answer_that_beats_the_send_is_recorded_as_one_millisecond() {
-        let mut session = session();
-        session.begin_group(0, 1_000);
-        session.end_playback(0, 2_000, 20.0, 18.0);
-        session.record_answer_time_if_empty(0, 1_500);
-        let timings = session.build_timings(0.0);
-        assert_eq!(timings[0].time_to_complete_ms, 1.0);
-        assert_eq!(timings[0].per_char_ms, 1.0);
-        assert_eq!(timings[0].char_wpm, Some(20.0));
-    }
-
-    #[test]
-    fn an_unanswered_group_falls_back_to_the_timeout() {
-        let mut session = session();
-        session.begin_group(0, 1_000);
-        session.end_playback(0, 2_000, 20.0, 18.0);
-        let timings = session.build_timings(5_000.0);
-        assert_eq!(timings[0].time_to_complete_ms, 5_000.0);
-        assert_eq!(timings[0].per_char_ms, 2_500.0);
-        // A group that was never sent has no timing at all.
-        assert_eq!(timings[1].time_to_complete_ms, 0.0);
-        assert_eq!(timings[1].char_wpm, None);
-    }
-
-    #[test]
-    fn playback_speeds_are_reported_once_they_are_measured() {
-        let mut session = session();
-        session.begin_group(0, 1_000);
-        session.end_playback(9, 1_500, 25.0, 20.0);
-        assert_eq!(session.played_wpm(0), None);
-        session.end_playback(0, 1_500, 25.0, 20.0);
-        assert_eq!(session.played_wpm(0), Some((25.0, 20.0)));
-        assert_eq!(session.status(), RuntimeStatus::WaitingForAnswer);
-        assert!(!session.input_locked(0));
-    }
-
-    #[test]
-    fn all_groups_confirmed_needs_text_in_every_group() {
+    fn the_view_mirrors_the_current_group() {
         let mut settings = TrainingSettings::default();
-        settings.curriculum.num_groups = 2;
-        let mut session = GroupSession::new(SessionId::new(1), 0, 2, settings);
-        assert!(!session.all_groups_confirmed());
-        session.set_group(0, "KM".into());
-        session.begin_group(0, 10);
-        session.confirm(0, "KM".into(), 20);
-        // Group 1 was never filled in, so the session is not complete.
-        assert!(!session.all_groups_confirmed());
-        session.set_group(1, "UR".into());
-        session.begin_group(1, 30);
-        session.confirm(1, "UR".into(), 40);
-        assert!(session.all_groups_confirmed());
+        settings.playback.lock_input_during_group_playback = true;
+        let mut session = GroupSession::new(SessionId::new(3), 2, settings);
+        session.set_group(0, "KM".into(), 3);
+        session.set_group(1, "UR".into(), 0);
+        session.begin_group(0, MonoMs(1_000));
+        session.note_play_finished(0);
+        let view = session.view();
+        assert!(view.playing && view.locked);
+        assert_eq!(
+            (view.current, view.repeat_total, view.repeat_done),
+            (0, 3, 1)
+        );
+        assert_eq!(view.sent, vec!["KM", "UR"]);
+        assert_eq!(view.confirmed, vec![false, false]);
+        // Repeats are never below one.
+        assert_eq!(session.group_repeats(1), 1);
+        assert_eq!(session.group_repeats(9), 1);
+
+        session.set_phase(SessionPhase::AwaitingAnswer { index: 0 });
+        assert!(!session.view().playing);
+        assert!(!session.input_locked(0));
+        // A session always has at least one group, even if asked for none.
+        let empty = GroupSession::new(SessionId::new(1), 0, TrainingSettings::default());
+        assert_eq!(empty.group_count(), 1);
+    }
+
+    #[test]
+    fn the_focus_only_moves_onto_the_current_group() {
+        let mut session = GroupSession::new(SessionId::new(1), 2, TrainingSettings::default());
+        session.set_focused_group(1);
+        assert_eq!(session.focused_group(), 0);
+        session.begin_group(1, MonoMs(10));
+        session.set_focused_group(1);
+        assert_eq!(session.focused_group(), 1);
+        // Beginning a group that is not there changes nothing.
+        session.begin_group(9, MonoMs(20));
+        assert_eq!(session.current_group(), 1);
     }
 
     #[test]
     fn an_answer_matches_only_at_the_same_length() {
         assert!(answer_length_matches("KM", "km"));
-        assert!(answer_length_matches("KM", " km "));
+        assert!(answer_length_matches("KM", " k m "));
         assert!(!answer_length_matches("KM", "k"));
         assert!(!answer_length_matches("KM", "kmu"));
         assert!(!answer_length_matches("", ""));
     }
 
     #[test]
+    fn the_result_records_the_speed_it_was_sent_at() {
+        let mut settings = TrainingSettings::default();
+        settings.playback.effective_wpm_min = 18.0;
+        let mut session = GroupSession::new(SessionId::new(1), 1, settings.clone());
+        session.set_group(0, "KM".into(), 1);
+        session.end_playback(0, MonoMs(500), 25.0, 12.0);
+        session.confirm(0, MonoMs(1_000));
+        let played = result(&session);
+        assert!((played.char_wpm - 25.0).abs() < 1e-9);
+        assert!((played.effective_wpm - 12.0).abs() < 1e-9);
+        assert_eq!(played.alphabet_fingerprint, settings.alphabet_fingerprint());
+
+        // A session whose sends never reported a speed records the settings'.
+        settings.playback.link_char_to_effective = false;
+        settings.playback.char_wpm_min = 22.0;
+        settings.playback.effective_wpm_min = 14.0;
+        let mut silent = GroupSession::new(SessionId::new(1), 1, settings);
+        silent.set_group(0, "KM".into(), 1);
+        silent.confirm(0, MonoMs(10));
+        let unplayed = result(&silent);
+        assert_eq!((unplayed.char_wpm, unplayed.effective_wpm), (22.0, 14.0));
+    }
+
+    #[test]
+    fn a_digits_session_records_the_digits_level() {
+        let mut settings = TrainingSettings::default();
+        settings.curriculum.char_set_mode = CharSetMode::Digits;
+        settings.curriculum.digits_level = 4;
+        let result = result(&answered(settings, &[("01", "01", 10)]));
+        assert_eq!(result.level, 4);
+        assert_eq!(result.digits_level, 4);
+        assert_eq!(result.alphabet_fingerprint, "0123456789");
+    }
+
+    #[test]
     fn history_is_reusable_only_for_the_same_alphabet() {
         let mut settings = TrainingSettings::default();
         settings.curriculum.char_set_mode = CharSetMode::Koch;
-        let mut session = GroupSession::new(SessionId::new(1), 0, 1, settings.clone());
-        session.set_group(0, "KM".into());
-        session.begin_group(0, 0);
-        session.confirm(0, "KM".into(), 10);
-        let result = build_session_result(&session, &settings, 20, "2026-09-01".into());
+        let result = result(&answered(settings.clone(), &[("KM", "KM", 10)]));
         assert!(result.usable_for_sampling(&settings));
 
         // A different character set never seeds another one's sampling.
@@ -1184,45 +854,75 @@ mod accessor_tests {
         assert!(!result.usable_for_sampling(&resequenced));
 
         // A legacy session carries no fingerprint and is accepted.
-        let mut legacy = result.clone();
+        let mut legacy = result;
         legacy.alphabet_fingerprint.clear();
         assert!(legacy.usable_for_sampling(&resequenced));
+    }
 
-        let summary = result.summary();
-        assert_eq!(summary.accuracy, result.accuracy);
-        assert_eq!(summary.groups, result.groups);
-        assert_eq!(summary.score, result.score);
-        assert_eq!(summary.avg_response_ms, result.avg_response_ms);
+    /// The tally is saved as the flat keys a session always had, plus the
+    /// characters typed but never sent when there were any.
+    #[test]
+    fn a_session_tally_round_trips_through_its_saved_keys() {
+        let result = result(&answered(TrainingSettings::default(), &[("KM", "KMN", 10)]));
+        let json = serde_json::to_value(&result).unwrap();
+        assert_eq!(json["letterAccuracy"]["K"]["correct"], 1);
+        assert_eq!(json["inserted"]["N"], 1);
+        assert!(json.get("tally").is_none());
+        let back: SessionResult = serde_json::from_value(json).unwrap();
+        assert_eq!(back, result);
+
+        let mut clean = result;
+        clean.tally.inserted.clear();
+        let json = serde_json::to_value(&clean).unwrap();
+        assert!(json.get("inserted").is_none());
+    }
+
+    /// Older saves carry fields this version no longer writes, and lack ones
+    /// it added. Both still load.
+    #[test]
+    fn legacy_session_json_fills_new_fields() {
+        let timing: SessionTiming =
+            serde_json::from_str(r#"{"timeToCompleteMs":1,"perCharMs":1}"#).unwrap();
+        assert_eq!(timing.char_wpm, None);
+        let raw = r#"{
+            "date":"2026-01-01","timestamp":1,"startedAt":0,"finishedAt":1,
+            "groups":[],"groupTimings":[],"accuracy":1,
+            "letterAccuracy":{"K":{"correct":1,"total":2}},
+            "alphabetSize":0,"avgResponseMs":0,"totalChars":0,
+            "effectiveAlphabetSize":0,"score":0,"kochLevel":3
+        }"#;
+        let result: SessionResult = serde_json::from_str(raw).unwrap();
+        assert_eq!(
+            result.tally.sent.get(&'K'),
+            Some(&crate::alignment::LetterAccuracy {
+                correct: 1,
+                total: 2
+            })
+        );
+        assert!(result.tally.inserted.is_empty());
+        assert_eq!(result.level, 3);
+        assert_eq!(result.digits_level, 1);
+        assert_eq!(result.char_set_mode, CharSetMode::Koch);
+        assert_eq!(result.char_wpm, 18.0);
+        assert_eq!(result.effective_wpm, 18.0);
+        assert!(result.alphabet_fingerprint.is_empty());
+
+        let json = serde_json::to_value(&result).unwrap();
+        for gone in [
+            "startedAt",
+            "finishedAt",
+            "alphabetSize",
+            "effectiveAlphabetSize",
+            "perCharMs",
+        ] {
+            assert!(json.get(gone).is_none(), "{gone} is still written");
+        }
     }
 
     #[test]
-    fn an_unplayed_session_records_the_settings_speed() {
-        let mut settings = TrainingSettings::default();
-        settings.playback.link_char_to_effective = false;
-        settings.playback.char_wpm_min = 22.0;
-        settings.playback.effective_wpm_min = 14.0;
-        let mut session = GroupSession::new(SessionId::new(1), 0, 1, settings.clone());
-        session.set_group(0, "KM".into());
-        session.begin_group(0, 0);
-        session.confirm(0, "KM".into(), 10);
-        let result = build_session_result(&session, &settings, 20, "2026-09-01".into());
-        assert_eq!(result.char_wpm, 22.0);
-        assert_eq!(result.effective_wpm, 14.0);
-        assert_eq!(result.level, settings.curriculum.level);
-    }
-
-    #[test]
-    fn a_digits_session_records_the_digits_level() {
-        let mut settings = TrainingSettings::default();
-        settings.curriculum.char_set_mode = CharSetMode::Digits;
-        settings.curriculum.digits_level = 4;
-        let mut session = GroupSession::new(SessionId::new(1), 0, 1, settings.clone());
-        session.set_group(0, "01".into());
-        session.begin_group(0, 0);
-        session.confirm(0, "01".into(), 10);
-        let result = build_session_result(&session, &settings, 20, "2026-09-01".into());
-        assert_eq!(result.level, 4);
-        assert_eq!(result.digits_level, 4);
-        assert_eq!(result.alphabet_fingerprint, "0123456789");
+    fn a_monotonic_moment_never_runs_backwards() {
+        assert_eq!(MonoMs(1_500).since(MonoMs(1_000)), 500);
+        assert_eq!(MonoMs(1_000).since(MonoMs(1_500)), 0);
+        assert_eq!(MonoMs(u64::MAX).plus(5), MonoMs(u64::MAX));
     }
 }

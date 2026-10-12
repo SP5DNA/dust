@@ -1,10 +1,9 @@
 //! Owns the session machine, audio, and effect execution. UI sends events only.
 
 use cw_core::{
-    CharSamplingState, FastrandRng, SessionEffect, SessionEvent, SessionMachine, SessionPhase,
-    StationVoice, TrainingSettings, Transmission, apply_auto_level, build_session_result,
-    evaluate_auto_level, generate_training_group, resolve_group_repeats, resolve_pileup,
-    resolve_station,
+    CharSamplingState, FastrandRng, MonoMs, Rng, Sampler, SessionEffect, SessionEvent,
+    SessionMachine, StationVoice, TrainingSettings, Transmission, apply_auto_level,
+    evaluate_auto_level, generate_training_group, resolve_pileup, resolve_station,
 };
 use dioxus::prelude::*;
 
@@ -13,7 +12,7 @@ use crate::persist::{
 };
 use crate::playback::{PlayError, play_text_now, sleep_cancelable};
 use crate::state::{AppState, Screen, SessionSignals};
-use crate::time::{local_date_string, now_ms};
+use crate::time::{local_date_string, mono_ms, now_ms};
 
 pub fn dispatch_event(
     app: &AppState,
@@ -31,22 +30,7 @@ pub fn dispatch_event(
     if machine.session().session_id().raw() != expected_gen {
         return Vec::new();
     }
-    let before = machine.session().confirmed_flags();
-    let effects = machine.apply(event, now_ms());
-    let after = machine.session().confirmed_flags();
-    for (index, (was, now)) in before.iter().zip(after.iter()).enumerate() {
-        if !was
-            && *now
-            && let Some(group) = machine.session().group(index)
-        {
-            let next = cw_core::update_sampling_state_from_answer(
-                &app.sampling.borrow(),
-                group.sent(),
-                group.input(),
-            );
-            *app.sampling.borrow_mut() = next;
-        }
-    }
+    let effects = machine.apply(event, MonoMs(mono_ms()));
     runtime.set(Some(machine.session().clone()));
     effects
 }
@@ -95,36 +79,15 @@ pub fn boot_machine_session(
     if app.session_gen.get() != generation {
         return None;
     }
-    let history_refs: Vec<_> = history
-        .iter()
-        .filter(|session| session.usable_for_sampling(&settings))
-        .map(|s| &s.tally.sent)
-        .collect();
-    *app.sampling.borrow_mut() = cw_core::create_initial_sampling_state(&history_refs);
-
-    let (first, first_repeats) = {
-        let mut sampling = app.sampling.borrow_mut();
-        let mut rng = app.rng.borrow_mut();
-        let (group, next_state) = generate_training_group(&settings, &sampling, &mut *rng);
-        *sampling = next_state;
-        let repeats = resolve_group_repeats(&settings, &mut *rng);
-        (group, repeats)
-    };
-
-    if app.session_gen.get() != generation {
-        return None;
-    }
-
+    // Each session draws from a sampler of its own, seeded afresh.
+    let seed = (app.rng.borrow_mut().f64() * u64::MAX as f64) as u64;
+    let sampler = Sampler::new(history, &settings, seed);
     let (machine, effects) = SessionMachine::start(
         cw_core::SessionId::new(generation),
-        now_ms(),
+        MonoMs(mono_ms()),
         settings,
-        first,
-        first_repeats,
+        sampler,
     );
-    if app.session_gen.get() != generation {
-        return None;
-    }
     runtime.set(Some(machine.session().clone()));
     screen.set(Screen::Training);
     *app.machine.borrow_mut() = Some(machine);
@@ -196,9 +159,9 @@ fn transmission_for(
         return Transmission::alone(text, voice);
     }
     let mut rng = group_rng(generation, index, 0x51ED_2701);
-    let elsewhere = CharSamplingState::default();
+    let mut elsewhere = CharSamplingState::default();
     let texts: Vec<String> = (0..most.saturating_sub(1))
-        .map(|_| generate_training_group(settings, &elsewhere, &mut rng).0)
+        .map(|_| generate_training_group(settings, &mut elsewhere, &mut rng))
         .collect();
     Transmission {
         others: resolve_pileup(settings, &voice, &text, &texts, &mut rng),
@@ -214,7 +177,7 @@ fn transmission_for(
 /// one, or the alphabet could shift under a session already being scored.
 /// Falls back to what the caller was handed when there is no machine yet.
 fn session_settings(
-    machine: Option<&SessionMachine>,
+    machine: Option<&SessionMachine<Sampler>>,
     fallback: &TrainingSettings,
 ) -> TrainingSettings {
     machine.map_or_else(|| fallback.clone(), |m| m.session().settings().clone())
@@ -234,50 +197,8 @@ async fn handle_effect(
         ..
     } = signals;
     match effect {
-        SessionEffect::Focus { index: _ } => {
-            // The machine already wrote the live group into the session
-            // snapshot that `dispatch_event` published. TrainingView focuses
-            // that box when it mounts. JS eval from here has no Document
-            // context and would be a no-op.
-            Vec::new()
-        }
         SessionEffect::StopAudio => {
             app.stop_sending();
-            Vec::new()
-        }
-        SessionEffect::NeedGroup { index } => {
-            // One look at the machine for all three answers, so they are three
-            // facts about the same moment rather than three separate peeks.
-            let (terminal, snapshot, empty) = {
-                let machine = app.machine.borrow();
-                let machine = machine.as_ref();
-                (
-                    machine.is_some_and(SessionMachine::is_terminal),
-                    session_settings(machine, settings),
-                    machine
-                        .and_then(|m| m.session().group(index).map(|g| g.sent().is_empty()))
-                        .unwrap_or(true),
-                )
-            };
-            if terminal || app.session_gen.get() != generation {
-                return Vec::new();
-            }
-            if empty {
-                let mut sampling = app.sampling.borrow_mut();
-                let mut rng = app.rng.borrow_mut();
-                let (group, next_state) = generate_training_group(&snapshot, &sampling, &mut *rng);
-                *sampling = next_state;
-                let repeats = resolve_group_repeats(&snapshot, &mut *rng);
-                drop(sampling);
-                drop(rng);
-                if let Some(machine) = app.machine.borrow_mut().as_mut()
-                    && !machine.is_terminal()
-                    && machine.session().session_id().raw() == generation
-                {
-                    machine.set_group_text(index, group, repeats);
-                    runtime.set(Some(machine.session().clone()));
-                }
-            }
             Vec::new()
         }
         SessionEffect::Play { index, text } => {
@@ -285,82 +206,31 @@ async fn handle_effect(
                 return Vec::new();
             }
             let snapshot = session_settings(app.machine.borrow().as_ref(), settings);
-            let outcome = if text.is_empty() {
-                Ok((0.0, 0.0, 0.0))
-            } else {
-                let transmission = transmission_for(&snapshot, generation, index, text.clone());
-                play_text_now(app, generation, &transmission, &snapshot).await
-            };
+            let transmission = transmission_for(&snapshot, generation, index, text);
+            let outcome = play_text_now(app, generation, &transmission, &snapshot).await;
             if app.session_gen.get() != generation {
                 return Vec::new();
             }
-            match outcome {
-                Ok((duration, char_wpm, effective_wpm)) => dispatch_event(
-                    app,
-                    runtime,
-                    SessionEvent::PlaybackEnded {
-                        index,
-                        duration_sec: duration,
-                        char_wpm,
-                        effective_wpm,
-                    },
-                    generation,
-                ),
-                Err(PlayError::Cancelled) => dispatch_event(
-                    app,
-                    runtime,
-                    SessionEvent::PlaybackCancelled { index },
-                    generation,
-                ),
+            let event = match outcome {
+                Ok((duration, char_wpm, effective_wpm)) => SessionEvent::PlaybackEnded {
+                    index,
+                    duration_sec: duration,
+                    char_wpm,
+                    effective_wpm,
+                },
+                Err(PlayError::Cancelled) => SessionEvent::PlaybackStopped { index },
                 Err(PlayError::Failed(message)) => {
                     toast.set(Some(message));
-                    dispatch_event(
-                        app,
-                        runtime,
-                        SessionEvent::PlaybackFailed { index },
-                        generation,
-                    )
+                    SessionEvent::PlaybackStopped { index }
                 }
-            }
+            };
+            dispatch_event(app, runtime, event, generation)
         }
-        SessionEffect::Sleep { id, ms } => {
+        SessionEffect::StartTimer { id, ms } => {
             if !sleep_cancelable(ms, generation, app.session_gen.clone()).await {
                 return Vec::new();
             }
-            let current = app
-                .machine
-                .borrow()
-                .as_ref()
-                .is_some_and(|m| m.sleep_is_current(id));
-            if !current {
-                return Vec::new();
-            }
-            let phase = app.machine.borrow().as_ref().map(|m| m.phase());
-            match phase {
-                Some(SessionPhase::InterGroupGap { .. }) | Some(SessionPhase::RepeatGap { .. }) => {
-                    dispatch_event(app, runtime, SessionEvent::GapElapsed, generation)
-                }
-                Some(SessionPhase::AwaitingAnswer { .. }) => {
-                    dispatch_event(app, runtime, SessionEvent::Timeout, generation)
-                }
-                _ => Vec::new(),
-            }
-        }
-        SessionEffect::AutoConfirm {
-            id,
-            index,
-            value,
-            ms,
-        } => {
-            if !sleep_cancelable(ms, generation, app.session_gen.clone()).await {
-                return Vec::new();
-            }
-            dispatch_event(
-                app,
-                runtime,
-                SessionEvent::AutoConfirmDue { id, index, value },
-                generation,
-            )
+            dispatch_event(app, runtime, SessionEvent::TimerFired { id }, generation)
         }
         SessionEffect::PersistAndShowResults => {
             *app.machine.borrow_mut() = None;
@@ -403,12 +273,8 @@ pub fn finish_session(app: AppState, signals: SessionSignals) {
         return;
     }
     let settings = session.settings().clone();
-    let built = build_session_result(&session, &settings, now_ms(), local_date_string());
-    if built.groups.is_empty() {
-        runtime.set(None);
-        screen.set(Screen::Home);
-        return;
-    }
+    // A confirmed group always has something in it, so this scores at least one.
+    let built = session.result(now_ms(), local_date_string());
 
     let mut counters = load_auto_counters(&settings);
     let mut next_settings = settings.clone();
@@ -480,7 +346,7 @@ mod tests {
                 h.run_until(4_000, |h| h.texts().len() == 2).await,
                 "the second group should have been sent"
             );
-            let confirmed = h.runtime.peek().as_ref().map(|s| s.confirmed_flags());
+            let confirmed = h.runtime.peek().as_ref().map(|s| s.view().confirmed);
             assert_eq!(confirmed, Some(vec![true, false]));
             assert_eq!(
                 h.runtime
@@ -528,14 +394,14 @@ mod tests {
                 h.runtime
                     .peek()
                     .as_ref()
-                    .is_some_and(|s| !s.confirmed_flags()[0])
+                    .is_some_and(|s| !s.view().confirmed[0])
             );
             assert!(
                 h.run_until(1_000, |h| h
                     .runtime
                     .peek()
                     .as_ref()
-                    .is_some_and(|s| s.confirmed_flags()[0]))
+                    .is_some_and(|s| s.view().confirmed[0]))
                     .await
             );
             // Typed in lower case, stored the way it was sent.
@@ -570,7 +436,7 @@ mod tests {
                 h.runtime
                     .peek()
                     .as_ref()
-                    .is_some_and(|s| !s.confirmed_flags()[0])
+                    .is_some_and(|s| !s.view().confirmed[0])
             );
             assert_eq!(h.awaiting_answer(), Some(0));
         });
@@ -588,7 +454,7 @@ mod tests {
                 h.runtime
                     .peek()
                     .as_ref()
-                    .is_some_and(|s| !s.confirmed_flags()[0])
+                    .is_some_and(|s| !s.view().confirmed[0])
             );
         });
     }
@@ -663,7 +529,7 @@ mod tests {
                     .runtime
                     .peek()
                     .as_ref()
-                    .is_some_and(|s| s.confirmed_flags()[0]))
+                    .is_some_and(|s| s.view().confirmed[0]))
                     .await
             );
             h.send(SessionEvent::FinishNow);
@@ -970,7 +836,7 @@ mod tests {
                     .runtime
                     .peek()
                     .as_ref()
-                    .is_some_and(|s| s.confirmed_flags()[0]))
+                    .is_some_and(|s| s.view().confirmed[0]))
                     .await
             );
         });
@@ -990,39 +856,13 @@ mod tests {
                     .runtime
                     .peek()
                     .as_ref()
-                    .is_some_and(|s| s.confirmed_flags()[0]))
+                    .is_some_and(|s| s.view().confirmed[0]))
                     .await
             );
             h.set_behaviour(Behaviour::RefuseToStart);
             assert!(h.run_until(30_000, |h| h.screen() == Screen::Results).await);
             let result = h.result.peek().clone().expect("a result");
             assert_eq!(result.groups.len(), 1);
-        });
-    }
-
-    #[test]
-    fn a_confirmed_group_teaches_the_sampler() {
-        run(|| async {
-            let mut h = Harness::new();
-            h.start_training();
-            assert!(h.run_until(4_000, |h| h.awaiting_answer() == Some(0)).await);
-            let sent = h.sent(0);
-            let before = h.app.sampling.borrow().beliefs.clone();
-            h.type_answer(0, &sent);
-            assert!(
-                h.run_until(1_000, |h| h
-                    .runtime
-                    .peek()
-                    .as_ref()
-                    .is_some_and(|s| s.confirmed_flags()[0]))
-                    .await
-            );
-            let after = h.app.sampling.borrow().beliefs.clone();
-            assert_ne!(before, after, "a correct copy should raise the belief");
-            for ch in sent.chars() {
-                let belief = after.get(&ch).copied().expect("belief for a sent letter");
-                assert!(belief.alpha > 1.0, "{ch} should have been credited");
-            }
         });
     }
 
@@ -1133,41 +973,6 @@ mod tests {
     }
 
     #[test]
-    fn a_group_with_no_text_is_not_sent_at_all() {
-        run(|| async {
-            let mut h = Harness::new();
-            h.start_training();
-            let app = h.app.clone();
-            let generation = app.session_gen.get();
-            h.recorder.clear();
-            // An empty group can only come of a pool that generated nothing;
-            // playing it must not stall the session waiting for silence.
-            h.in_app(|| {
-                if let Some(machine) = app.machine.borrow_mut().as_mut() {
-                    machine.set_group_text(0, String::new(), 1);
-                }
-            });
-            let signals = h.signals();
-            let settings_now = h.settings.peek().clone();
-            h.in_app(|| {
-                spawn_effects(
-                    vec![SessionEffect::Play {
-                        index: 0,
-                        text: String::new(),
-                    }],
-                    settings_now,
-                    app.clone(),
-                    generation,
-                    signals,
-                )
-            });
-            h.pump();
-            h.advance(200).await;
-            assert!(h.texts().is_empty(), "silence is not sent to the player");
-        });
-    }
-
-    #[test]
     fn a_stale_sleep_does_not_move_the_session_on() {
         run(|| async {
             let mut h = Harness::new();
@@ -1176,10 +981,10 @@ mod tests {
             let generation = app.session_gen.get();
             let settings_now = h.settings.peek().clone();
             let signals = h.signals();
-            // A sleep the machine has already forgotten about.
+            // A timer the machine never started.
             h.in_app(|| {
                 spawn_effects(
-                    vec![SessionEffect::Sleep { id: 999, ms: 20 }],
+                    vec![SessionEffect::StartTimer { id: 999, ms: 20 }],
                     settings_now,
                     app.clone(),
                     generation,
@@ -1205,13 +1010,10 @@ mod tests {
             h.recorder.clear();
             h.in_app(|| {
                 spawn_effects(
-                    vec![
-                        SessionEffect::NeedGroup { index: 1 },
-                        SessionEffect::Play {
-                            index: 1,
-                            text: "KM".into(),
-                        },
-                    ],
+                    vec![SessionEffect::Play {
+                        index: 1,
+                        text: "KM".into(),
+                    }],
                     settings_now,
                     app.clone(),
                     generation,
@@ -1226,7 +1028,7 @@ mod tests {
     }
 
     #[test]
-    fn asking_for_a_group_a_finished_session_no_longer_needs_does_nothing() {
+    fn a_timer_a_finished_session_no_longer_needs_does_nothing() {
         run(|| async {
             let mut settings = test_settings();
             settings.curriculum.num_groups = 1;
@@ -1241,7 +1043,7 @@ mod tests {
             let signals = h.signals();
             h.in_app(|| {
                 spawn_effects(
-                    vec![SessionEffect::NeedGroup { index: 0 }],
+                    vec![SessionEffect::StartTimer { id: 1, ms: 10 }],
                     settings_now,
                     app.clone(),
                     generation,
@@ -1294,31 +1096,6 @@ mod tests {
             h.in_app(|| finish_session(app, signals));
             h.pump();
             assert_eq!(h.screen(), Screen::Home);
-        });
-    }
-
-    #[test]
-    fn a_session_of_nothing_but_silence_is_not_stored() {
-        run(|| async {
-            let mut h = Harness::new();
-            h.start_training();
-            // A confirmed group with nothing in it scores nothing at all.
-            let app = h.app.clone();
-            h.in_app(|| {
-                if let Some(machine) = app.machine.borrow_mut().as_mut() {
-                    machine.set_group_text(0, String::new(), 1);
-                    machine.session_mut().confirm(0, String::new(), 10);
-                }
-            });
-            let session = h.app.machine.borrow().as_ref().map(|m| m.session().clone());
-            h.runtime.set(session);
-            h.pump();
-            let (app, signals) = (h.app.clone(), h.signals());
-            h.in_app(|| finish_session(app, signals));
-            h.pump();
-            assert_eq!(h.screen(), Screen::Home);
-            assert!(h.sessions.peek().is_empty());
-            assert!(h.runtime.peek().is_none());
         });
     }
 

@@ -1,6 +1,6 @@
 use cw_core::{
     CharacterDiagnostic, GROUP_START_BIGRAM_TOKEN, MasteryStatus, SessionResult, TrainingSettings,
-    bigram_heatmap, confusion_entries, sampling_rows, session_history,
+    mistake_stats, sampling_rows, session_history,
 };
 use dioxus::prelude::*;
 
@@ -40,8 +40,8 @@ pub fn LettersTab(letters: Vec<CharacterDiagnostic>) -> Element {
 
 #[component]
 pub fn MistakesTab(sessions: Vec<SessionResult>) -> Element {
-    let confusion = confusion_entries(&sessions, 12);
-    let heat = bigram_heatmap(&sessions);
+    let mistakes = mistake_stats(&sessions, 12);
+    let (confusion, heat) = (mistakes.confusions, mistakes.bigrams);
     let n = heat.letters.len();
     rsx! {
         div { class: "stack",

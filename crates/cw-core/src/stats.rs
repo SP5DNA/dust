@@ -2,12 +2,12 @@
 
 use std::collections::BTreeMap;
 
-use crate::alignment::{CopyTally, LetterAccuracy, align_group};
+use crate::alignment::align_group;
 use crate::morse::LCWO_SEQUENCE;
 use crate::pool::compute_char_pool;
 use crate::sampling::{
-    belief_for, beta_posterior_mean_error, compute_raw_sampling_weights, config_from_settings,
-    normalize_weights,
+    CharSamplingConfig, CharSamplingState, belief_for, beta_posterior_mean_error,
+    compute_raw_sampling_weights, config_from_settings, generate_callsign_group, normalize_weights,
 };
 use crate::session::SessionResult;
 use crate::settings::{CharSetMode, TrainingSettings};
@@ -41,14 +41,6 @@ pub struct AccuracyPoint {
     pub date: String,
     pub accuracy_pct: f64,
     pub timestamp: u64,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct UnigramStat {
-    pub letter: char,
-    pub total: u32,
-    pub wrong: u32,
-    pub rate: f64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -106,17 +98,6 @@ fn lcwo_index(ch: char) -> usize {
         .unwrap_or(usize::MAX)
 }
 
-fn session_letter_accuracy(session: &SessionResult) -> BTreeMap<char, LetterAccuracy> {
-    if !session.tally.sent.is_empty() {
-        return session.tally.sent.clone();
-    }
-    let mut tally = CopyTally::default();
-    for group in &session.groups {
-        tally.add(&group.sent, &group.received);
-    }
-    tally.sent
-}
-
 pub fn classify_mastery(accuracy01: f64, attempts: u32) -> MasteryStatus {
     if attempts < MASTERED_MIN_ATTEMPTS {
         MasteryStatus::Weak
@@ -145,8 +126,8 @@ pub fn character_diagnostics(sessions: &[SessionResult]) -> Vec<CharacterDiagnos
     let mut totals: BTreeMap<char, (u32, u32)> = BTreeMap::new();
     let mut timings: BTreeMap<char, Vec<f64>> = BTreeMap::new();
     for session in sessions {
-        for (letter, stats) in session_letter_accuracy(session) {
-            let entry = totals.entry(letter).or_insert((0, 0));
+        for (letter, stats) in session.letter_accuracy().iter() {
+            let entry = totals.entry(*letter).or_insert((0, 0));
             entry.0 += stats.correct;
             entry.1 += stats.total;
         }
@@ -205,65 +186,83 @@ pub fn character_diagnostics(sessions: &[SessionResult]) -> Vec<CharacterDiagnos
     out
 }
 
-pub fn unigram_stats(sessions: &[SessionResult]) -> Vec<UnigramStat> {
-    let mut counts: BTreeMap<char, (u32, u32)> = BTreeMap::new();
-    for session in sessions {
-        for group in &session.groups {
-            for pair in align_group(&group.sent, &group.received) {
-                let Some(ch) = pair.sent_char else {
-                    continue;
-                };
-                let entry = counts.entry(ch).or_insert((0, 0));
-                entry.1 += 1;
-                if !pair.matched {
-                    entry.0 += 1;
+/// What the mistakes screen shows: which characters are taken for which,
+/// and which pairs of characters are hard together.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MistakeStats {
+    /// The most common confusions, most common first.
+    pub confusions: Vec<ConfusionEntry>,
+    pub bigrams: BigramHeatmap,
+}
+
+/// Both mistake views from one alignment of every group, rather than one
+/// each: the history can be hundreds of sessions long.
+pub fn mistake_stats(sessions: &[SessionResult], confusion_limit: usize) -> MistakeStats {
+    let mut confused: BTreeMap<(char, Option<char>), u32> = BTreeMap::new();
+    let mut sent_totals: BTreeMap<char, u32> = BTreeMap::new();
+    let mut letters = Vec::new();
+    let mut pairs: BTreeMap<(char, char), (u32, u32)> = BTreeMap::new();
+    for group in sessions.iter().flat_map(|session| &session.groups) {
+        let mut previous = GROUP_START_BIGRAM_TOKEN;
+        for pair in align_group(&group.sent, &group.received) {
+            let Some(sent) = pair.sent_char else {
+                continue;
+            };
+            *sent_totals.entry(sent).or_insert(0) += 1;
+            if !pair.matched {
+                *confused.entry((sent, pair.received_char)).or_insert(0) += 1;
+            }
+            for ch in [previous, sent] {
+                if !letters.contains(&ch) {
+                    letters.push(ch);
                 }
             }
+            let entry = pairs.entry((previous, sent)).or_insert((0, 0));
+            entry.1 += 1;
+            if !pair.matched {
+                entry.0 += 1;
+            }
+            previous = sent;
         }
     }
-    let mut rows: Vec<UnigramStat> = counts
+    MistakeStats {
+        confusions: confusion_rows(confused, &sent_totals, confusion_limit),
+        bigrams: bigram_grid(letters, &pairs),
+    }
+}
+
+fn confusion_rows(
+    confused: BTreeMap<(char, Option<char>), u32>,
+    sent_totals: &BTreeMap<char, u32>,
+    limit: usize,
+) -> Vec<ConfusionEntry> {
+    let mut rows: Vec<ConfusionEntry> = confused
         .into_iter()
-        .map(|(letter, (wrong, total))| UnigramStat {
-            letter,
-            total,
-            wrong,
-            rate: if total == 0 {
-                0.0
-            } else {
-                f64::from(wrong) / f64::from(total)
-            },
+        .map(|((sent, typed), count)| {
+            let total = sent_totals.get(&sent).copied().unwrap_or(1);
+            ConfusionEntry {
+                sent,
+                typed,
+                count,
+                percentage: 100.0 * f64::from(count) / f64::from(total),
+            }
         })
         .collect();
-    rows.sort_by_key(|r| lcwo_index(r.letter));
+    rows.sort_by(|a, b| {
+        b.count.cmp(&a.count).then(
+            b.percentage
+                .partial_cmp(&a.percentage)
+                .unwrap_or(std::cmp::Ordering::Equal),
+        )
+    });
+    rows.truncate(limit);
     rows
 }
 
-pub fn bigram_heatmap(sessions: &[SessionResult]) -> BigramHeatmap {
-    let mut letters = Vec::new();
-    let mut counts: BTreeMap<(char, char), (u32, u32)> = BTreeMap::new();
-    for session in sessions {
-        for group in &session.groups {
-            let mut sent_prev = None::<char>;
-            for pair in align_group(&group.sent, &group.received) {
-                let Some(curr) = pair.sent_char else {
-                    continue;
-                };
-                let prev = sent_prev.unwrap_or(GROUP_START_BIGRAM_TOKEN);
-                if !letters.contains(&prev) {
-                    letters.push(prev);
-                }
-                if !letters.contains(&curr) {
-                    letters.push(curr);
-                }
-                let entry = counts.entry((prev, curr)).or_insert((0, 0));
-                entry.1 += 1;
-                if !pair.matched {
-                    entry.0 += 1;
-                }
-                sent_prev = Some(curr);
-            }
-        }
-    }
+fn bigram_grid(
+    mut letters: Vec<char>,
+    pairs: &BTreeMap<(char, char), (u32, u32)>,
+) -> BigramHeatmap {
     // The start-of-group token sorts first, so every real character is shifted
     // one rank up. `lcwo_index` saturates for characters outside the sequence,
     // which would otherwise overflow here and panic in a debug build.
@@ -275,10 +274,10 @@ pub fn bigram_heatmap(sessions: &[SessionResult]) -> BigramHeatmap {
         }
     });
     let mut max_rate: f64 = 0.0;
-    let mut cells = Vec::new();
+    let mut cells = Vec::with_capacity(letters.len() * letters.len());
     for &row in &letters {
         for &col in &letters {
-            let (wrong, total) = counts.get(&(row, col)).copied().unwrap_or((0, 0));
+            let (wrong, total) = pairs.get(&(row, col)).copied().unwrap_or((0, 0));
             let rate = if total == 0 {
                 0.0
             } else {
@@ -301,52 +300,13 @@ pub fn bigram_heatmap(sessions: &[SessionResult]) -> BigramHeatmap {
     }
 }
 
-pub fn confusion_entries(sessions: &[SessionResult], limit: usize) -> Vec<ConfusionEntry> {
-    let mut counts: BTreeMap<(char, Option<char>), u32> = BTreeMap::new();
-    let mut totals: BTreeMap<char, u32> = BTreeMap::new();
-    for session in sessions {
-        for group in &session.groups {
-            for pair in align_group(&group.sent, &group.received) {
-                let Some(sent) = pair.sent_char else {
-                    continue;
-                };
-                *totals.entry(sent).or_insert(0) += 1;
-                if !pair.matched {
-                    *counts.entry((sent, pair.received_char)).or_insert(0) += 1;
-                }
-            }
-        }
-    }
-    let mut rows: Vec<ConfusionEntry> = counts
-        .into_iter()
-        .map(|((sent, typed), count)| {
-            let total = totals.get(&sent).copied().unwrap_or(1);
-            ConfusionEntry {
-                sent,
-                typed,
-                count,
-                percentage: 100.0 * f64::from(count) / f64::from(total),
-            }
-        })
-        .collect();
-    rows.sort_by(|a, b| {
-        b.count.cmp(&a.count).then(
-            b.percentage
-                .partial_cmp(&a.percentage)
-                .unwrap_or(std::cmp::Ordering::Equal),
-        )
-    });
-    rows.truncate(limit);
-    rows
-}
-
 /// How often each character actually turns up, measured by running the real
 /// callsign generator rather than modelling it. Nothing else can answer this:
 /// the share of `Q` depends on the prefix tables and the tier, not on a weight.
 fn callsign_character_shares(
     settings: &TrainingSettings,
-    state: &crate::sampling::CharSamplingState,
-    config: &crate::sampling::CharSamplingConfig,
+    state: &CharSamplingState,
+    config: &CharSamplingConfig,
     pool: &[char],
     rng: &mut impl crate::rng::Rng,
 ) -> BTreeMap<char, f64> {
@@ -355,9 +315,7 @@ fn callsign_character_shares(
     let mut total = 0.0;
     let mut sampling = state.clone();
     for _ in 0..DRAWS {
-        let (call, next) =
-            crate::sampling::generate_callsign_group(settings, &sampling, config, rng);
-        sampling = next;
+        let call = generate_callsign_group(settings, &mut sampling, config, rng);
         for ch in call.chars() {
             if let Some(count) = counts.get_mut(&ch) {
                 *count += 1.0;
@@ -375,13 +333,7 @@ fn callsign_character_shares(
 }
 
 pub fn sampling_rows(settings: &TrainingSettings, sessions: &[SessionResult]) -> Vec<SamplingRow> {
-    let owned: Vec<BTreeMap<char, LetterAccuracy>> = sessions
-        .iter()
-        .filter(|session| session.usable_for_sampling(settings))
-        .map(session_letter_accuracy)
-        .collect();
-    let history: Vec<&BTreeMap<char, LetterAccuracy>> = owned.iter().collect();
-    let state = crate::sampling::create_initial_sampling_state(&history);
+    let state = CharSamplingState::from_history(sessions, settings);
     let pool = compute_char_pool(settings);
     let mut config = config_from_settings(settings);
     config.thompson_sampling = false;
@@ -429,15 +381,13 @@ pub fn session_history(sessions: &[SessionResult]) -> Vec<SessionHistoryRow> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::alignment::{CopyTally, LetterAccuracy};
     use crate::session::{GroupResult, SessionTiming};
     use crate::settings::CharSetMode;
 
     fn session() -> SessionResult {
         SessionResult {
-            date: "2026-09-01".into(),
             timestamp: 1,
-            started_at: 0,
-            finished_at: 1,
             groups: vec![GroupResult {
                 sent: "KM".into(),
                 received: "K?".into(),
@@ -445,22 +395,14 @@ mod tests {
             }],
             group_timings: vec![SessionTiming {
                 time_to_complete_ms: 400.0,
-                per_char_ms: 200.0,
                 char_wpm: None,
             }],
             accuracy: 0.5,
             tally: CopyTally::of("KM", "K?"),
-            alphabet_size: 2,
             avg_response_ms: 400.0,
             total_chars: 2,
-            effective_alphabet_size: 2.0,
             score: 1.0,
-            level: 1,
-            digits_level: 1,
-            char_set_mode: CharSetMode::Koch,
-            char_wpm: 18.0,
-            effective_wpm: 18.0,
-            alphabet_fingerprint: String::new(),
+            ..SessionResult::empty_for_test()
         }
     }
 
@@ -469,9 +411,7 @@ mod tests {
         let sessions = [session()];
         let diag = character_diagnostics(&sessions);
         assert_eq!(diag.len(), 2);
-        let conf = confusion_entries(&sessions, 8);
-        assert!(!conf.is_empty());
-        assert_eq!(unigram_stats(&sessions).len(), 2);
+        assert!(!mistake_stats(&sessions, 8).confusions.is_empty());
     }
 
     fn plain(date: &str, timestamp: u64, groups: &[(&str, &str)]) -> SessionResult {
@@ -491,7 +431,6 @@ mod tests {
             .iter()
             .map(|(sent, _)| SessionTiming {
                 time_to_complete_ms: 1000.0 * sent.chars().count() as f64,
-                per_char_ms: 1000.0,
                 char_wpm: Some(20.0),
             })
             .collect();
@@ -564,21 +503,6 @@ mod tests {
     }
 
     #[test]
-    fn unigrams_count_every_sent_character_in_sequence_order() {
-        let session = plain("2026-09-01", 1, &[("MK", "MX"), ("KM", "KM")]);
-        let rows = unigram_stats(&[session]);
-        // K comes before M in the LCWO sequence, whatever order they were sent in.
-        assert_eq!(
-            rows.iter().map(|r| r.letter).collect::<Vec<_>>(),
-            ['K', 'M']
-        );
-        let k = rows.iter().find(|r| r.letter == 'K').expect("K row");
-        assert_eq!((k.total, k.wrong), (2, 1));
-        assert_eq!(k.rate, 0.5);
-        assert!(unigram_stats(&[]).is_empty());
-    }
-
-    #[test]
     fn bigrams_rank_the_group_start_first_and_unknown_characters_last() {
         // `+` is a Morse character the LCWO sequence never teaches; it must not
         // overflow the sort key.
@@ -586,7 +510,7 @@ mod tests {
         settings.curriculum.char_set_mode = CharSetMode::Custom;
         settings.curriculum.custom_set = vec!['K', '+'];
         let session = plain("2026-09-01", 1, &[("K+", "KM")]);
-        let heat = bigram_heatmap(&[session]);
+        let heat = mistake_stats(&[session], 8).bigrams;
         assert_eq!(heat.letters.first(), Some(&GROUP_START_BIGRAM_TOKEN));
         assert_eq!(heat.letters.last(), Some(&'+'));
         assert_eq!(heat.cells.len(), heat.letters.len() * heat.letters.len());
@@ -600,7 +524,7 @@ mod tests {
         assert_eq!(cell.rate, 1.0);
         assert_eq!(heat.max_rate, 1.0);
         // An empty history draws no grid at all.
-        assert!(bigram_heatmap(&[]).letters.is_empty());
+        assert!(mistake_stats(&[], 8).bigrams.letters.is_empty());
     }
 
     #[test]
@@ -610,22 +534,22 @@ mod tests {
             1,
             &[("KMU", "XMU"), ("KMU", "XMU"), ("KMU", "KMR")],
         );
-        let rows = confusion_entries(&[session], 8);
+        let rows = mistake_stats(&[session], 8).confusions;
         assert_eq!(rows[0].sent, 'K');
         assert_eq!(rows[0].typed, Some('X'));
         assert_eq!(rows[0].count, 2);
         // Two of the three K sends were copied as X.
         assert!((rows[0].percentage - 200.0 / 3.0).abs() < 1e-9);
-        assert_eq!(confusion_entries(&[], 8).len(), 0);
+        assert!(mistake_stats(&[], 8).confusions.is_empty());
         // The limit is honoured.
         let long = plain("2026-09-02", 2, &[("KMURE", "XXXXX")]);
-        assert_eq!(confusion_entries(&[long], 2).len(), 2);
+        assert_eq!(mistake_stats(&[long], 2).confusions.len(), 2);
     }
 
     #[test]
     fn a_dropped_character_is_reported_as_no_answer() {
         let session = plain("2026-09-01", 1, &[("KM", "K")]);
-        let rows = confusion_entries(&[session], 8);
+        let rows = mistake_stats(&[session], 8).confusions;
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].sent, 'M');
         assert_eq!(rows[0].typed, None);
@@ -635,15 +559,11 @@ mod tests {
     fn characters_that_were_never_sent_are_left_out_of_every_table() {
         // An extra character was typed in the middle of the group.
         let session = plain("2026-09-01", 1, &[("KM", "KXM")]);
-        let rows = unigram_stats(std::slice::from_ref(&session));
-        assert_eq!(
-            rows.iter().map(|r| r.letter).collect::<Vec<_>>(),
-            ['K', 'M']
-        );
-        let heat = bigram_heatmap(std::slice::from_ref(&session));
-        assert!(!heat.letters.contains(&'X'));
-        let confusion = confusion_entries(&[session], 8);
-        assert!(confusion.iter().all(|c| c.sent != 'X'));
+        let diagnostics = character_diagnostics(std::slice::from_ref(&session));
+        assert!(diagnostics.iter().all(|d| d.letter != 'X'));
+        let mistakes = mistake_stats(&[session], 8);
+        assert!(!mistakes.bigrams.letters.contains(&'X'));
+        assert!(mistakes.confusions.iter().all(|c| c.sent != 'X'));
     }
 
     #[test]
@@ -733,7 +653,7 @@ mod tests {
         koch.tally = CopyTally::default();
         koch.tally.sent.insert(
             'K',
-            crate::alignment::LetterAccuracy {
+            LetterAccuracy {
                 correct: 10,
                 total: 10,
             },
@@ -742,7 +662,7 @@ mod tests {
         digits.char_set_mode = CharSetMode::Digits;
         digits.tally.sent.insert(
             'K',
-            crate::alignment::LetterAccuracy {
+            LetterAccuracy {
                 correct: 0,
                 total: 10,
             },

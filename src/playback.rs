@@ -229,18 +229,17 @@ fn next_stream_group(
     settings: &TrainingSettings,
     sampling: &mut CharSamplingState,
 ) -> String {
-    let (group, next) = match app.rng.try_borrow_mut() {
+    match app.rng.try_borrow_mut() {
         Ok(mut rng) => generate_training_group(settings, sampling, &mut *rng),
         Err(_) => generate_training_group(settings, sampling, &mut FastrandRng(seed_rng())),
-    };
-    *sampling = next;
-    group
+    }
 }
 
 /// Send groups from the current alphabet until the generation moves on.
 ///
-/// This is not a training session: sampling is copied so the stream cannot
-/// change what the next scored session draws, and nothing is stored.
+/// This is not a training session: it draws with a sampler of its own, so
+/// the stream cannot change what a scored session draws, and nothing is
+/// stored.
 pub async fn loop_stream_groups(
     app: AppState,
     generation: u64,
@@ -248,7 +247,7 @@ pub async fn loop_stream_groups(
     mut heard: Signal<Vec<String>>,
     mut toast: Signal<Option<String>>,
 ) {
-    let mut sampling = app.sampling.borrow().clone();
+    let mut sampling = CharSamplingState::default();
     let voice = app.station(&settings().clamp());
     loop {
         if app.session_gen.get() != generation {
@@ -265,9 +264,8 @@ pub async fn loop_stream_groups(
         // Across it, whoever else the settings have calling, sending groups
         // of their own as a session's callers do: from the same curriculum,
         // off a blank slate, so they never teach the sampler anything.
-        let elsewhere = CharSamplingState::default();
         let call = app.pileup_for(&settings_now, &group, voice, |rng| {
-            generate_training_group(&settings_now, &elsewhere, rng).0
+            generate_training_group(&settings_now, &mut CharSamplingState::default(), rng)
         });
         let played = play_text_now(&app, generation, &call, &settings_now).await;
         if app.session_gen.get() != generation {
@@ -659,7 +657,6 @@ mod tests {
         run(|| async {
             let mut h = Harness::new();
             let settings = test_settings();
-            let sampling_before = h.app.sampling.borrow().clone();
             let generation = h.app.takeover_audio(&settings).expect("player");
             let app = h.app.clone();
             let (settings_sig, toast) = (h.settings, h.toast);
@@ -687,11 +684,6 @@ mod tests {
             let played = h.texts().len();
             h.advance(5_000).await;
             assert_eq!(h.texts().len(), played, "the stream stopped");
-            assert_eq!(
-                *h.app.sampling.borrow(),
-                sampling_before,
-                "a listen stream must not change what training will draw"
-            );
         });
     }
 

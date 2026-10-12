@@ -2,11 +2,14 @@
 
 use std::collections::BTreeMap;
 
-use crate::alignment::align_group;
+use crate::alignment::CopyTally;
 use crate::callsign::generate_callsign;
+use crate::machine::GroupSource;
 use crate::pool::compute_char_pool;
-use crate::rng::{Rng, weighted_random_pick};
+use crate::rng::{FastrandRng, Rng, weighted_random_pick};
+use crate::session::SessionResult;
 use crate::settings::{CharSetMode, LevelAxis, TrainingSettings};
+use crate::timing::resolve_group_repeats;
 
 pub const CHAR_SAMPLING_PRIOR_ALPHA: f64 = 1.0;
 pub const CHAR_SAMPLING_PRIOR_BETA: f64 = 1.0;
@@ -32,6 +35,70 @@ pub struct CharSamplingState {
     pub session_sample_counts: BTreeMap<char, u32>,
 }
 
+impl CharSamplingState {
+    /// What the history says about each character, from the sessions that
+    /// trained what `settings` trains: every character copied right moves
+    /// its belief one way, every miss the other.
+    pub fn from_history(history: &[SessionResult], settings: &TrainingSettings) -> Self {
+        let mut state = Self::default();
+        for session in history.iter().filter(|s| s.usable_for_sampling(settings)) {
+            for (character, stats) in session.letter_accuracy().iter() {
+                let belief = state.beliefs.entry(*character).or_default();
+                belief.alpha += f64::from(stats.correct);
+                belief.beta += f64::from(stats.total.saturating_sub(stats.correct));
+            }
+        }
+        state
+    }
+
+    /// Learn from one answer: each character sent was copied or it was not.
+    pub fn learn(&mut self, copied: &CopyTally) {
+        for (character, stats) in &copied.sent {
+            let belief = self.beliefs.entry(*character).or_default();
+            belief.alpha += f64::from(stats.correct);
+            belief.beta += f64::from(stats.total.saturating_sub(stats.correct));
+        }
+    }
+
+    fn count_sent(&mut self, group: &str) {
+        for character in group.chars() {
+            *self.session_sample_counts.entry(character).or_insert(0) += 1;
+        }
+    }
+}
+
+/// The trainer's own group source: groups drawn for the curriculum, leaning
+/// on the characters the history says are hard and on those this session
+/// has not sent yet, and learning from every answer as it comes.
+#[derive(Clone, Debug)]
+pub struct Sampler {
+    state: CharSamplingState,
+    rng: FastrandRng,
+}
+
+impl Sampler {
+    /// A sampler for a session of `settings`, seeded with what the history
+    /// knows about the alphabet it trains. `seed` should differ from session
+    /// to session.
+    pub fn new(history: &[SessionResult], settings: &TrainingSettings, seed: u64) -> Self {
+        Self {
+            state: CharSamplingState::from_history(history, settings),
+            rng: FastrandRng(seed),
+        }
+    }
+}
+
+impl GroupSource for Sampler {
+    fn next_group(&mut self, settings: &TrainingSettings) -> (String, u32) {
+        let group = generate_training_group(settings, &mut self.state, &mut self.rng);
+        (group, resolve_group_repeats(settings, &mut self.rng))
+    }
+
+    fn learn(&mut self, copied: &CopyTally) {
+        self.state.learn(copied);
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct CharSamplingConfig {
     pub error_weight_strength: f64,
@@ -53,35 +120,6 @@ pub fn config_from_settings(settings: &TrainingSettings) -> CharSamplingConfig {
 
 pub fn belief_for(state: &CharSamplingState, character: char) -> CharBetaBelief {
     state.beliefs.get(&character).copied().unwrap_or_default()
-}
-
-pub fn aggregate_historical_beliefs(
-    letter_accuracy: &[&BTreeMap<char, crate::alignment::LetterAccuracy>],
-) -> BTreeMap<char, CharBetaBelief> {
-    let mut beliefs = BTreeMap::new();
-    for session in letter_accuracy {
-        for (character, stats) in *session {
-            let errors = stats.total.saturating_sub(stats.correct);
-            let existing: CharBetaBelief = beliefs.get(character).copied().unwrap_or_default();
-            beliefs.insert(
-                *character,
-                CharBetaBelief {
-                    alpha: existing.alpha + f64::from(stats.correct),
-                    beta: existing.beta + f64::from(errors),
-                },
-            );
-        }
-    }
-    beliefs
-}
-
-pub fn create_initial_sampling_state(
-    letter_accuracy: &[&BTreeMap<char, crate::alignment::LetterAccuracy>],
-) -> CharSamplingState {
-    CharSamplingState {
-        beliefs: aggregate_historical_beliefs(letter_accuracy),
-        session_sample_counts: BTreeMap::new(),
-    }
 }
 
 pub fn beta_posterior_mean_error(belief: CharBetaBelief) -> f64 {
@@ -248,10 +286,10 @@ fn pick_from_pool(
 pub fn sample_training_group(
     pool: &[char],
     group_size: usize,
-    state: &CharSamplingState,
+    state: &mut CharSamplingState,
     config: &CharSamplingConfig,
     rng: &mut impl Rng,
-) -> (String, CharSamplingState) {
+) -> String {
     let raw_weights = compute_raw_sampling_weights(pool, state, config, rng);
     // Mixed draws each character from the letters or the digits by the
     // share asked for — when the pool holds both to draw from.
@@ -269,53 +307,8 @@ pub fn sample_training_group(
         };
         group.extend(pick_from_pool(from, &raw_weights, rng));
     }
-
-    let mut session_sample_counts = state.session_sample_counts.clone();
-    for character in group.chars() {
-        *session_sample_counts.entry(character).or_insert(0) += 1;
-    }
-    (
-        group,
-        CharSamplingState {
-            beliefs: state.beliefs.clone(),
-            session_sample_counts,
-        },
-    )
-}
-
-pub fn update_sampling_state_from_answer(
-    state: &CharSamplingState,
-    sent: &str,
-    received: &str,
-) -> CharSamplingState {
-    let mut beliefs = state.beliefs.clone();
-    for pair in align_group(sent, received) {
-        let Some(character) = pair.sent_char else {
-            continue;
-        };
-        let belief = beliefs
-            .get(&character)
-            .copied()
-            .unwrap_or_else(|| belief_for(state, character));
-        beliefs.insert(
-            character,
-            if pair.matched {
-                CharBetaBelief {
-                    alpha: belief.alpha + 1.0,
-                    beta: belief.beta,
-                }
-            } else {
-                CharBetaBelief {
-                    alpha: belief.alpha,
-                    beta: belief.beta + 1.0,
-                }
-            },
-        );
-    }
-    CharSamplingState {
-        beliefs,
-        session_sample_counts: state.session_sample_counts.clone(),
-    }
+    state.count_sent(&group);
+    group
 }
 
 /// How many realistic callsigns are weighed against each other before one is
@@ -334,10 +327,10 @@ const CALLSIGN_CANDIDATES: usize = 6;
 /// the first candidate wins, and the draw is plainly random.
 pub(crate) fn generate_callsign_group(
     settings: &TrainingSettings,
-    state: &CharSamplingState,
+    state: &mut CharSamplingState,
     config: &CharSamplingConfig,
     rng: &mut impl Rng,
-) -> (String, CharSamplingState) {
+) -> String {
     let tier = settings.level(LevelAxis::Callsign);
     let pool = compute_char_pool(settings);
     let weights = compute_raw_sampling_weights(&pool, state, config, rng);
@@ -362,24 +355,16 @@ pub(crate) fn generate_callsign_group(
         }
     }
 
-    let mut session_sample_counts = state.session_sample_counts.clone();
-    for character in best.chars() {
-        *session_sample_counts.entry(character).or_insert(0) += 1;
-    }
-    (
-        best,
-        CharSamplingState {
-            beliefs: state.beliefs.clone(),
-            session_sample_counts,
-        },
-    )
+    state.count_sent(&best);
+    best
 }
 
+/// The next group for `settings`, drawn by the sampler and counted as sent.
 pub fn generate_training_group(
     settings: &TrainingSettings,
-    state: &CharSamplingState,
+    state: &mut CharSamplingState,
     rng: &mut impl Rng,
-) -> (String, CharSamplingState) {
+) -> String {
     // A callsign is a group like any other once it exists — it is only built
     // differently. This is the single place the two modes part company.
     let config = config_from_settings(settings);
@@ -440,7 +425,6 @@ mod tests {
     }
 
     use super::*;
-    use crate::rng::FastrandRng;
 
     #[test]
     fn group_length_respects_fixed_size() {
@@ -449,9 +433,9 @@ mod tests {
         settings.curriculum.level = 1;
         settings.curriculum.min_group_size = 3;
         settings.curriculum.max_group_size = 3;
-        let state = CharSamplingState::default();
+        let mut state = CharSamplingState::default();
         let mut rng = FastrandRng::default();
-        let (group, _) = generate_training_group(&settings, &state, &mut rng);
+        let group = generate_training_group(&settings, &mut state, &mut rng);
         assert_eq!(group.len(), 3);
         for ch in group.chars() {
             assert!(ch == 'K' || ch == 'M');
@@ -481,16 +465,16 @@ mod tests {
         settings.curriculum.level = 1;
         settings.curriculum.min_group_size = 1;
         settings.curriculum.max_group_size = 1;
-        let state = CharSamplingState::default();
+        let mut state = CharSamplingState::default();
         let mut rng = FastrandRng::default();
-        let (group, _) = generate_training_group(&settings, &state, &mut rng);
+        let group = generate_training_group(&settings, &mut state, &mut rng);
         assert!(!group.is_empty());
     }
 
     #[test]
     fn repeated_letters_update_belief_once_per_occurrence() {
-        let state = CharSamplingState::default();
-        let next = update_sampling_state_from_answer(&state, "KK", "KK");
+        let mut next = CharSamplingState::default();
+        next.learn(&CopyTally::of("KK", "KK"));
         let k = next.beliefs.get(&'K').copied().unwrap_or_default();
         assert!((k.alpha - (CHAR_SAMPLING_PRIOR_ALPHA + 2.0)).abs() < 1e-9);
         assert!((k.beta - CHAR_SAMPLING_PRIOR_BETA).abs() < 1e-9);
@@ -498,8 +482,8 @@ mod tests {
 
     #[test]
     fn mismatch_increments_beta() {
-        let state = CharSamplingState::default();
-        let next = update_sampling_state_from_answer(&state, "KM", "KX");
+        let mut next = CharSamplingState::default();
+        next.learn(&CopyTally::of("KM", "KX"));
         let m = next.beliefs.get(&'M').copied().unwrap_or_default();
         assert!((m.beta - (CHAR_SAMPLING_PRIOR_BETA + 1.0)).abs() < 1e-9);
     }
@@ -552,10 +536,9 @@ mod tests {
         let mut state = CharSamplingState::default();
         let mut rng = FastrandRng::default();
         for _ in 0..40 {
-            let (group, next) = generate_training_group(&settings, &state, &mut rng);
+            let group = generate_training_group(&settings, &mut state, &mut rng);
             assert!(!group.is_empty());
             assert!(group.chars().all(|c| !c.is_ascii_digit()), "{group}");
-            state = next;
         }
     }
 }
@@ -697,25 +680,25 @@ mod edge_tests {
 
     #[test]
     fn sampling_an_empty_pool_returns_an_empty_group() {
-        let state = CharSamplingState::default();
+        let mut state = CharSamplingState::default();
         let config = config(CharSetMode::Koch, 70);
         let mut rng = FastrandRng::default();
-        let (group, next) = sample_training_group(&[], 3, &state, &config, &mut rng);
+        let group = sample_training_group(&[], 3, &mut state, &config, &mut rng);
         assert!(group.is_empty());
-        assert_eq!(next, state);
-        let (group, _) = sample_training_group(&['K'], 0, &state, &config, &mut rng);
+        assert_eq!(state, CharSamplingState::default());
+        let group = sample_training_group(&['K'], 0, &mut state, &config, &mut rng);
         assert!(group.is_empty());
     }
 
     #[test]
     fn a_mixed_group_follows_the_letter_share() {
         let pool = ['K', 'M', '0', '1'];
-        let state = CharSamplingState::default();
+        let mut next = CharSamplingState::default();
         let config = config(CharSetMode::Mixed, 50);
         // Draws below 0.5 pick letters, above pick digits. Each character costs
         // two draws: one for the subset, one for the weighted pick.
         let mut rng = ScriptedRng::new(&[0.1, 0.0, 0.9, 0.0]);
-        let (group, next) = sample_training_group(&pool, 2, &state, &config, &mut rng);
+        let group = sample_training_group(&pool, 2, &mut next, &config, &mut rng);
         assert_eq!(group.chars().count(), 2);
         let mut chars = group.chars();
         assert!(!chars.next().unwrap().is_ascii_digit());
@@ -731,8 +714,7 @@ mod edge_tests {
         settings.curriculum.min_group_size = 0;
         settings.curriculum.max_group_size = 0;
         let mut rng = FastrandRng(5);
-        let (group, _) =
-            generate_training_group(&settings, &CharSamplingState::default(), &mut rng);
+        let group = generate_training_group(&settings, &mut CharSamplingState::default(), &mut rng);
         assert_eq!(group.chars().count(), 1);
     }
 
@@ -740,10 +722,10 @@ mod edge_tests {
     fn a_mixed_group_with_only_letters_unlocked_still_fills() {
         // No digits in the pool, so the digit half falls back to the whole pool.
         let pool = ['K', 'M'];
-        let state = CharSamplingState::default();
+        let mut state = CharSamplingState::default();
         let config = config(CharSetMode::Mixed, 50);
         let mut rng = ScriptedRng::new(&[0.9, 0.0]);
-        let (group, _) = sample_training_group(&pool, 2, &state, &config, &mut rng);
+        let group = sample_training_group(&pool, 2, &mut state, &config, &mut rng);
         assert_eq!(group.chars().count(), 2);
         assert!(group.chars().all(|c| c == 'K' || c == 'M'));
     }
@@ -751,19 +733,19 @@ mod edge_tests {
     #[test]
     fn sample_counts_accumulate_across_groups() {
         let pool = ['K'];
-        let state = CharSamplingState::default();
+        let mut state = CharSamplingState::default();
         let config = config(CharSetMode::Koch, 70);
         let mut rng = FastrandRng::default();
-        let (_, first) = sample_training_group(&pool, 2, &state, &config, &mut rng);
-        let (_, second) = sample_training_group(&pool, 2, &first, &config, &mut rng);
-        assert_eq!(second.session_sample_counts.get(&'K'), Some(&4));
+        sample_training_group(&pool, 2, &mut state, &config, &mut rng);
+        sample_training_group(&pool, 2, &mut state, &config, &mut rng);
+        assert_eq!(state.session_sample_counts.get(&'K'), Some(&4));
     }
 
     #[test]
     fn an_answer_moves_only_the_characters_that_were_sent() {
-        let state = CharSamplingState::default();
+        let mut next = CharSamplingState::default();
         // "KM" copied as "KX": K right, M wrong, X never sent.
-        let next = update_sampling_state_from_answer(&state, "KM", "KX");
+        next.learn(&CopyTally::of("KM", "KX"));
         assert_eq!(next.beliefs[&'K'].alpha, CHAR_SAMPLING_PRIOR_ALPHA + 1.0);
         assert_eq!(next.beliefs[&'K'].beta, CHAR_SAMPLING_PRIOR_BETA);
         assert_eq!(next.beliefs[&'M'].beta, CHAR_SAMPLING_PRIOR_BETA + 1.0);
@@ -772,27 +754,40 @@ mod edge_tests {
 
     #[test]
     fn history_from_earlier_sessions_seeds_the_beliefs() {
-        let mut first = BTreeMap::new();
-        first.insert(
-            'K',
-            crate::alignment::LetterAccuracy {
-                correct: 3,
-                total: 5,
-            },
-        );
-        let mut second = BTreeMap::new();
-        second.insert(
-            'K',
-            crate::alignment::LetterAccuracy {
-                correct: 1,
-                total: 1,
-            },
-        );
-        let state = create_initial_sampling_state(&[&first, &second]);
+        let mut settings = TrainingSettings::default();
+        settings.curriculum.char_set_mode = CharSetMode::Koch;
+        let session = |copies: &[(&str, &str)]| {
+            let mut result = SessionResult::empty_for_test();
+            for (sent, received) in copies {
+                result.tally.add(sent, received);
+            }
+            result
+        };
+        let first = session(&[("KKKKK", "KKKXX")]);
+        let second = session(&[("K", "K")]);
+        let mut digits = session(&[("K", "X")]);
+        digits.char_set_mode = CharSetMode::Digits;
+        let state = CharSamplingState::from_history(&[first, second, digits], &settings);
         let belief = state.beliefs[&'K'];
         assert_eq!(belief.alpha, CHAR_SAMPLING_PRIOR_ALPHA + 4.0);
         assert_eq!(belief.beta, CHAR_SAMPLING_PRIOR_BETA + 2.0);
         assert!(state.session_sample_counts.is_empty());
+    }
+
+    /// The sampler a session draws from learns as the session goes: a
+    /// character missed is drawn more after it.
+    #[test]
+    fn the_sampler_learns_from_each_answer() {
+        let mut settings = TrainingSettings::default();
+        settings.curriculum.char_set_mode = CharSetMode::Koch;
+        settings.curriculum.level = 1;
+        let mut sampler = Sampler::new(&[], &settings, 3);
+        let (group, repeats) = sampler.next_group(&settings);
+        assert!(!group.is_empty());
+        assert_eq!(repeats, 1);
+        sampler.learn(&CopyTally::of("MMMMM", "XXXXX"));
+        let missed = sampler.state.beliefs[&'M'];
+        assert_eq!(missed.beta, CHAR_SAMPLING_PRIOR_BETA + 5.0);
     }
 
     #[test]
@@ -802,10 +797,10 @@ mod edge_tests {
         settings.curriculum.level = 4;
         settings.curriculum.min_group_size = 2;
         settings.curriculum.max_group_size = 5;
-        let state = CharSamplingState::default();
+        let mut state = CharSamplingState::default();
         let mut rng = FastrandRng(99);
         for _ in 0..50 {
-            let (group, _) = generate_training_group(&settings, &state, &mut rng);
+            let group = generate_training_group(&settings, &mut state, &mut rng);
             let len = group.chars().count();
             assert!(
                 (2..=5).contains(&len),

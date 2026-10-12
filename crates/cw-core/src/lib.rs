@@ -43,21 +43,18 @@ pub use keyer::{
 };
 pub use level::{LEVEL_MIN, max_level_for_len, unlocked_count_for_level, unlocked_prefix};
 pub use machine::{
-    AUTO_CONFIRM_DELAY_MS, SessionEffect, SessionEvent, SessionMachine, SessionPhase,
+    AUTO_CONFIRM_DELAY_MS, GroupSource, SessionEffect, SessionEvent, SessionMachine,
 };
 pub use morse::{
     LCWO_SEQUENCE, MAX_DIGITS_LEVEL, decode_morse_pattern, is_morse_code_prefix, morse_for,
 };
 pub use pool::{compute_char_pool, current_practice_window, unlocked_practice_count};
 pub use rng::{FastrandRng, Rng, weighted_random_pick};
-pub use sampling::{
-    CharSamplingState, create_initial_sampling_state, generate_training_group,
-    update_sampling_state_from_answer,
-};
+pub use sampling::{CharSamplingState, Sampler, generate_training_group};
 pub use sequences::{PresetId, SEQUENCE_PRESETS, SequenceChoice, SequencePreset};
 pub use session::{
-    Group, GroupResult, GroupSession, RuntimeStatus, SessionId, SessionResult, SessionSummary,
-    SessionTiming, SessionView, answer_length_matches, build_session_result,
+    Group, GroupResult, GroupSession, MIN_RESPONSE_MS_PER_CHAR, MonoMs, SessionId, SessionPhase,
+    SessionResult, SessionTiming, SessionView, answer_length_matches,
 };
 pub use settings::{
     AutoLevelSettings, BandSettings, CharSetMode, CurriculumSettings, DEFAULT_FILTER_WIDTH_HZ,
@@ -68,8 +65,8 @@ pub use settings::{
 };
 pub use stats::{
     AccuracyPoint, BigramHeatmap, CharacterDiagnostic, ConfusionEntry, GROUP_START_BIGRAM_TOKEN,
-    MasteryStatus, SamplingRow, SessionHistoryRow, UnigramStat, accuracy_chart, bigram_heatmap,
-    character_diagnostics, confusion_entries, sampling_rows, session_history, unigram_stats,
+    MasteryStatus, MistakeStats, SamplingRow, SessionHistoryRow, accuracy_chart,
+    character_diagnostics, mistake_stats, sampling_rows, session_history,
 };
 pub use streak::{StreakState, StreakStatus, compute_streak_status};
 pub use timing::{

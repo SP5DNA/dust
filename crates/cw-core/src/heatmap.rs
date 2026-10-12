@@ -171,38 +171,19 @@ pub fn build_heatmap(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::{GroupResult, SessionResult, SessionTiming};
-    use crate::settings::CharSetMode;
+    use crate::session::{GroupResult, SessionResult};
 
     fn session(date: &str, chars: u32, accuracy: f64) -> SessionResult {
         SessionResult {
             date: date.into(),
-            timestamp: 0,
-            started_at: 0,
-            finished_at: 1,
             groups: vec![GroupResult {
                 sent: "A".repeat(chars as usize),
                 received: "A".repeat(chars as usize),
                 correct: true,
             }],
-            group_timings: vec![SessionTiming {
-                time_to_complete_ms: 1.0,
-                per_char_ms: 1.0,
-                char_wpm: None,
-            }],
             accuracy,
-            tally: Default::default(),
-            alphabet_size: 1,
-            avg_response_ms: 0.0,
             total_chars: chars,
-            effective_alphabet_size: 1.0,
-            score: 0.0,
-            level: 1,
-            digits_level: 1,
-            char_set_mode: CharSetMode::Koch,
-            char_wpm: 18.0,
-            effective_wpm: 18.0,
-            alphabet_fingerprint: String::new(),
+            ..SessionResult::empty_for_test()
         }
     }
 

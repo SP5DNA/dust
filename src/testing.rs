@@ -10,7 +10,10 @@
 use std::rc::Rc;
 use std::time::Duration;
 
-use cw_core::{GroupSession, SessionEvent, SessionResult, TrainingSettings};
+use cw_core::{
+    GroupSession, GroupSource, MonoMs, SessionEffect, SessionEvent, SessionId, SessionMachine,
+    SessionResult, TrainingSettings,
+};
 use dioxus::core::{ElementId, NoOpMutations};
 use dioxus::prelude::*;
 
@@ -40,16 +43,50 @@ pub struct Harness {
     pub toast: Signal<Option<String>>,
 }
 
-/// One finished session, the way the app stores it.
-pub fn stored_session(date: &str, sent: &[(&str, &str)]) -> SessionResult {
-    let settings = test_settings();
-    let mut session = GroupSession::new(1, 0, sent.len().max(1), settings.clone());
-    for (index, (text, answer)) in sent.iter().enumerate() {
-        session.set_group(index, (*text).to_string());
-        session.begin_group(index, 1_000 * index as u64);
-        session.confirm(index, (*answer).to_string(), 1_000 * index as u64 + 500);
+/// Hands a session the groups it is given, in order.
+struct Scripted(std::collections::VecDeque<String>);
+
+impl GroupSource for Scripted {
+    fn next_group(&mut self, _: &TrainingSettings) -> (String, u32) {
+        (self.0.pop_front().unwrap_or_else(|| "KM".into()), 1)
     }
-    cw_core::build_session_result(&session, &settings, 1_000, date.to_string())
+
+    fn learn(&mut self, _: &cw_core::CopyTally) {}
+}
+
+/// One finished session, the way the app stores it: each group sent, and
+/// answered half a second after its send.
+pub fn stored_session(date: &str, sent: &[(&str, &str)]) -> SessionResult {
+    let mut settings = test_settings();
+    settings.curriculum.num_groups = sent.len().max(1) as u32;
+    let texts = sent.iter().map(|(text, _)| (*text).to_string()).collect();
+    let (mut machine, _) =
+        SessionMachine::start(SessionId::new(1), MonoMs(0), settings, Scripted(texts));
+    let mut now = MonoMs(0);
+    for (index, (_, answer)) in sent.iter().enumerate() {
+        now = now.plus(500);
+        let _ = machine.apply(
+            SessionEvent::PlaybackEnded {
+                index,
+                duration_sec: 0.5,
+                char_wpm: 40.0,
+                effective_wpm: 40.0,
+            },
+            now,
+        );
+        now = now.plus(500);
+        let typed = SessionEvent::Input {
+            index,
+            text: (*answer).to_string(),
+        };
+        let _ = machine.apply(typed, now);
+        for effect in machine.apply(SessionEvent::Confirm, now) {
+            if let SessionEffect::StartTimer { id, .. } = effect {
+                let _ = machine.apply(SessionEvent::TimerFired { id }, now);
+            }
+        }
+    }
+    machine.session().result(1_000, date.to_string())
 }
 
 /// Settings that make a session short and predictable to test.

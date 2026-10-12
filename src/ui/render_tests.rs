@@ -92,9 +92,7 @@ fn render_props<P: Clone + 'static, M: 'static>(
 fn session(date: &str, accuracy: f64) -> SessionResult {
     SessionResult {
         date: date.to_string(),
-        timestamp: 1_757_000_000_000,
-        started_at: 1_757_000_000_000,
-        finished_at: 1_757_000_060_000,
+        timestamp: 1_757_000_060_000,
         groups: vec![
             GroupResult {
                 sent: "KM".into(),
@@ -109,15 +107,12 @@ fn session(date: &str, accuracy: f64) -> SessionResult {
         ],
         group_timings: vec![SessionTiming {
             time_to_complete_ms: 900.0,
-            per_char_ms: 450.0,
             char_wpm: Some(20.0),
         }],
         accuracy,
         tally: Default::default(),
-        alphabet_size: 4,
         avg_response_ms: 450.0,
         total_chars: 40,
-        effective_alphabet_size: 3.4,
         score: 820.0,
         level: 3,
         digits_level: 1,

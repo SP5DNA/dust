@@ -128,7 +128,7 @@ pub fn app_routes(
             let session = runtime();
             if let Some(session) = session {
                 let view = session.view();
-                let playing = view.status == cw_core::RuntimeStatus::PlayingGroup;
+                let playing = view.playing;
                 let app_change = app.clone();
                 let app_confirm = app.clone();
                 let app_focus = app.clone();

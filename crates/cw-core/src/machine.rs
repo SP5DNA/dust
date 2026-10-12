@@ -1,29 +1,26 @@
 //! Pure session state machine. The UI runtime applies [`SessionEffect`]s; this
 //! module never sleeps, plays audio, or touches Dioxus.
+//!
+//! The machine owns everything a session decides: which group comes next
+//! (through its [`GroupSource`]), what a timer running out means, and what
+//! the sampler learns from each answer. The runtime only plays, waits, and
+//! reports back.
 
-use crate::session::{GroupSession, SessionId, SessionView, answer_length_matches};
+use crate::alignment::CopyTally;
+use crate::session::{GroupSession, MonoMs, SessionId, SessionPhase, answer_length_matches};
 use crate::settings::TrainingSettings;
 use crate::timing::{compute_after_group_gap_ms, compute_group_gap_for_wpm};
 
 pub const AUTO_CONFIRM_DELAY_MS: u32 = 300;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SessionPhase {
-    Playing {
-        index: usize,
-    },
-    /// Word-space pause between two sends of the same group.
-    RepeatGap {
-        index: usize,
-    },
-    InterGroupGap {
-        next: usize,
-    },
-    AwaitingAnswer {
-        index: usize,
-    },
-    Finished,
-    Aborted,
+/// Where a session's groups come from, and where what was copied of them
+/// goes back to.
+pub trait GroupSource {
+    /// The next group to send, never empty, and how many times to send it
+    /// before the answer window opens.
+    fn next_group(&mut self, settings: &TrainingSettings) -> (String, u32);
+    /// What was copied of a group the user has just answered.
+    fn learn(&mut self, copied: &CopyTally);
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -34,10 +31,9 @@ pub enum SessionEvent {
         char_wpm: f64,
         effective_wpm: f64,
     },
-    PlaybackCancelled {
-        index: usize,
-    },
-    PlaybackFailed {
+    /// The send stopped before it finished — cancelled from outside, or the
+    /// audio failed. Either way the session ends with what it has scored.
+    PlaybackStopped {
         index: usize,
     },
     Input {
@@ -45,13 +41,11 @@ pub enum SessionEvent {
         text: String,
     },
     Confirm,
-    Timeout,
-    AutoConfirmDue {
+    /// A timer the machine started has run out. What it was for is the
+    /// machine's to remember; a timer it has since forgotten is ignored.
+    TimerFired {
         id: u64,
-        index: usize,
-        value: String,
     },
-    GapElapsed,
     FinishNow,
     Abort,
     Focus {
@@ -65,130 +59,129 @@ pub enum SessionEffect {
         index: usize,
         text: String,
     },
-    NeedGroup {
-        index: usize,
-    },
     StopAudio,
-    Sleep {
+    /// Send [`SessionEvent::TimerFired`] with this id once `ms` have passed.
+    StartTimer {
         id: u64,
         ms: u32,
-    },
-    AutoConfirm {
-        id: u64,
-        index: usize,
-        value: String,
-        ms: u32,
-    },
-    Focus {
-        index: usize,
     },
     PersistAndShowResults,
     AbortToHome,
 }
 
+/// What the phase's timer is waiting for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PhaseTimer {
+    /// The word space between two sends, or the pause before the next group.
+    Gap,
+    /// The answer window closing.
+    AnswerWindow,
+}
+
+/// An answer that reached its group's length, waiting a moment in case the
+/// user is still typing.
+#[derive(Clone, Debug, PartialEq)]
+struct PendingConfirm {
+    id: u64,
+    index: usize,
+    value: String,
+}
+
 #[derive(Clone, Debug)]
-pub struct SessionMachine {
+pub struct SessionMachine<S> {
     session: GroupSession,
-    phase: SessionPhase,
-    next_effect_id: u64,
-    pending_sleep: Option<u64>,
-    pending_auto_confirm: Option<u64>,
+    source: S,
+    next_timer_id: u64,
+    phase_timer: Option<(u64, PhaseTimer)>,
+    auto_confirm: Option<PendingConfirm>,
     /// Sends still owed for the group being played, including the one in flight.
     repeats_left: u32,
     /// Audio time already spent on this group: every send plus the gaps between them.
     group_elapsed_ms: u64,
 }
 
-impl SessionMachine {
+impl<S: GroupSource> SessionMachine<S> {
+    /// Start a session: draw its first group and send it.
     pub fn start(
         session_id: SessionId,
-        started_at: u64,
+        now: MonoMs,
         settings: TrainingSettings,
-        first_group: String,
-        first_repeats: u32,
+        mut source: S,
     ) -> (Self, Vec<SessionEffect>) {
-        let n = settings.curriculum.num_groups.max(1) as usize;
-        let mut session = GroupSession::new(session_id, started_at, n, settings);
-        session.set_group(0, first_group);
-        session.set_group_repeats(0, first_repeats);
-        session.begin_group(0, started_at);
-        let text = session
-            .group(0)
-            .map(|g| g.sent().to_string())
-            .unwrap_or_default();
-        let repeats_left = session.group_repeats(0);
+        let groups = settings.curriculum.num_groups.max(1) as usize;
+        let (text, repeats) = source.next_group(&settings);
+        let mut session = GroupSession::new(session_id, groups, settings);
+        session.set_group(0, text.clone(), repeats);
+        session.begin_group(0, now);
         let machine = Self {
+            repeats_left: session.group_repeats(0),
             session,
-            phase: SessionPhase::Playing { index: 0 },
-            next_effect_id: 1,
-            pending_sleep: None,
-            pending_auto_confirm: None,
-            repeats_left,
+            source,
+            next_timer_id: 1,
+            phase_timer: None,
+            auto_confirm: None,
             group_elapsed_ms: 0,
         };
-        (
-            machine,
-            vec![
-                SessionEffect::Focus { index: 0 },
-                SessionEffect::Play { index: 0, text },
-            ],
-        )
+        (machine, vec![SessionEffect::Play { index: 0, text }])
     }
 
     pub fn session(&self) -> &GroupSession {
         &self.session
     }
 
-    pub fn session_mut(&mut self) -> &mut GroupSession {
-        &mut self.session
-    }
-
     pub fn phase(&self) -> SessionPhase {
-        self.phase
-    }
-
-    pub fn view(&self) -> SessionView {
-        self.session.view()
+        self.session.phase()
     }
 
     pub fn is_terminal(&self) -> bool {
-        matches!(self.phase, SessionPhase::Finished | SessionPhase::Aborted)
+        matches!(self.phase(), SessionPhase::Finished | SessionPhase::Aborted)
     }
 
-    fn alloc_id(&mut self) -> u64 {
-        let id = self.next_effect_id;
-        self.next_effect_id += 1;
-        id
+    fn set_phase(&mut self, phase: SessionPhase) {
+        self.session.set_phase(phase);
+    }
+
+    fn start_timer(&mut self, ms: u32) -> (u64, SessionEffect) {
+        let id = self.next_timer_id;
+        self.next_timer_id += 1;
+        (id, SessionEffect::StartTimer { id, ms })
+    }
+
+    fn start_phase_timer(&mut self, timer: PhaseTimer, ms: u32) -> SessionEffect {
+        let (id, effect) = self.start_timer(ms);
+        self.phase_timer = Some((id, timer));
+        effect
     }
 
     fn cancel_timers(&mut self) {
-        self.pending_sleep = None;
-        self.pending_auto_confirm = None;
+        self.phase_timer = None;
+        self.auto_confirm = None;
     }
 
     #[must_use = "the effects are the session's instructions to the runtime"]
-    pub fn apply(&mut self, event: SessionEvent, now_ms: u64) -> Vec<SessionEffect> {
+    pub fn apply(&mut self, event: SessionEvent, now: MonoMs) -> Vec<SessionEffect> {
         if self.is_terminal() {
             return Vec::new();
         }
         match event {
-            SessionEvent::Abort => self.abort(),
-            SessionEvent::PlaybackCancelled { index } => self.playback_cancelled(index),
-            SessionEvent::PlaybackFailed { index } => self.playback_failed(index),
+            SessionEvent::Abort => self.end(false),
+            SessionEvent::PlaybackStopped { index } => {
+                if self.playing_index() != Some(index) {
+                    return Vec::new();
+                }
+                // Keep whatever was scored rather than dropping it.
+                self.end(self.session.any_confirmed())
+            }
             SessionEvent::PlaybackEnded {
                 index,
                 duration_sec,
                 char_wpm,
                 effective_wpm,
-            } => self.playback_ended(index, now_ms, duration_sec, char_wpm, effective_wpm),
-            SessionEvent::Input { index, text } => self.input(index, text, now_ms),
-            SessionEvent::Confirm => self.confirm_current(now_ms, None),
-            SessionEvent::Timeout => self.timeout(now_ms),
-            SessionEvent::AutoConfirmDue { id, index, value } => {
-                self.auto_confirm_due(id, index, value, now_ms)
-            }
-            SessionEvent::GapElapsed => self.gap_elapsed(now_ms),
-            SessionEvent::FinishNow => self.finish_now(now_ms),
+            } => self.playback_ended(index, now, duration_sec, char_wpm, effective_wpm),
+            SessionEvent::Input { index, text } => self.input(index, &text, now),
+            SessionEvent::Confirm => self.confirm_current(now),
+            SessionEvent::TimerFired { id } => self.timer_fired(id, now),
+            SessionEvent::FinishNow => self.finish_now(now),
             SessionEvent::Focus { index } => {
                 self.session.set_focused_group(index);
                 Vec::new()
@@ -196,52 +189,32 @@ impl SessionMachine {
         }
     }
 
-    fn abort(&mut self) -> Vec<SessionEffect> {
+    /// Stop, and either keep the session (`keep`) or throw it away.
+    fn end(&mut self, keep: bool) -> Vec<SessionEffect> {
         self.cancel_timers();
-        self.phase = SessionPhase::Aborted;
-        vec![SessionEffect::StopAudio, SessionEffect::AbortToHome]
-    }
-
-    fn playing_index(&self) -> Option<usize> {
-        match self.phase {
-            SessionPhase::Playing { index } => Some(index),
-            _ => None,
-        }
-    }
-
-    fn playback_cancelled(&mut self, index: usize) -> Vec<SessionEffect> {
-        if self.playing_index() != Some(index) {
-            return Vec::new();
-        }
-        // Same as a hard audio failure: keep scored groups instead of dropping them.
-        self.fail_audio()
-    }
-
-    fn playback_failed(&mut self, index: usize) -> Vec<SessionEffect> {
-        if self.playing_index() != Some(index) {
-            return Vec::new();
-        }
-        self.fail_audio()
-    }
-
-    fn fail_audio(&mut self) -> Vec<SessionEffect> {
-        self.cancel_timers();
-        if self.session.any_confirmed() {
-            self.phase = SessionPhase::Finished;
+        if keep {
+            self.set_phase(SessionPhase::Finished);
             vec![
                 SessionEffect::StopAudio,
                 SessionEffect::PersistAndShowResults,
             ]
         } else {
-            self.phase = SessionPhase::Aborted;
+            self.set_phase(SessionPhase::Aborted);
             vec![SessionEffect::StopAudio, SessionEffect::AbortToHome]
+        }
+    }
+
+    fn playing_index(&self) -> Option<usize> {
+        match self.phase() {
+            SessionPhase::Playing { index } => Some(index),
+            _ => None,
         }
     }
 
     fn playback_ended(
         &mut self,
         index: usize,
-        now_ms: u64,
+        now: MonoMs,
         duration_sec: f64,
         char_wpm: f64,
         effective_wpm: f64,
@@ -250,9 +223,12 @@ impl SessionMachine {
             return Vec::new();
         }
         self.session.note_play_finished(index);
-        self.group_elapsed_ms = self
-            .group_elapsed_ms
-            .saturating_add((duration_sec * 1000.0).round() as u64);
+        let played_ms = if duration_sec.is_finite() {
+            (duration_sec.max(0.0) * 1000.0).round() as u64
+        } else {
+            0
+        };
+        self.group_elapsed_ms = self.group_elapsed_ms.saturating_add(played_ms);
         if self.repeats_left > 1 {
             self.repeats_left -= 1;
             let gap = compute_group_gap_for_wpm(
@@ -261,28 +237,27 @@ impl SessionMachine {
                 self.session.settings().playback.extra_word_space_multiplier,
             );
             self.group_elapsed_ms = self.group_elapsed_ms.saturating_add(u64::from(gap));
-            self.phase = SessionPhase::RepeatGap { index };
-            let id = self.alloc_id();
-            self.pending_sleep = Some(id);
-            return vec![SessionEffect::Sleep { id, ms: gap }];
+            self.set_phase(SessionPhase::RepeatGap { index });
+            return vec![self.start_phase_timer(PhaseTimer::Gap, gap)];
         }
-        let ended = now_ms
-            .max(self.session.group_start_ms(index).unwrap_or(now_ms) + self.group_elapsed_ms);
+        // The send cannot have ended before its audio did, whatever the
+        // runtime's clock made of a send that stalled and caught up.
+        let earliest = self
+            .session
+            .group_start(index)
+            .map_or(now, |start| start.plus(self.group_elapsed_ms));
         self.session
-            .end_playback(index, ended, char_wpm, effective_wpm);
-        self.phase = SessionPhase::AwaitingAnswer { index };
-        let mut effects = vec![SessionEffect::Focus { index }];
+            .end_playback(index, now.max(earliest), char_wpm, effective_wpm);
+        self.set_phase(SessionPhase::AwaitingAnswer { index });
         let timeout_ms = (self.session.settings().playback.group_timeout * 1000.0).round() as u32;
-        if timeout_ms > 0 {
-            let id = self.alloc_id();
-            self.pending_sleep = Some(id);
-            effects.push(SessionEffect::Sleep { id, ms: timeout_ms });
+        if timeout_ms == 0 {
+            return Vec::new();
         }
-        effects
+        vec![self.start_phase_timer(PhaseTimer::AnswerWindow, timeout_ms)]
     }
 
-    fn input(&mut self, index: usize, text: String, now_ms: u64) -> Vec<SessionEffect> {
-        let current = match self.phase {
+    fn input(&mut self, index: usize, text: &str, now: MonoMs) -> Vec<SessionEffect> {
+        let current = match self.phase() {
             SessionPhase::Playing { index }
             | SessionPhase::RepeatGap { index }
             | SessionPhase::AwaitingAnswer { index } => index,
@@ -291,228 +266,193 @@ impl SessionMachine {
         if index != current || self.session.input_locked(index) {
             return Vec::new();
         }
-        let sent = self
-            .session
-            .group(index)
-            .map(|g| g.sent().to_string())
-            .unwrap_or_default();
-        let previous = self
-            .session
-            .group(index)
-            .map(|g| g.input().to_string())
-            .unwrap_or_default();
-        self.session.set_input(index, text.clone());
-        if answer_length_matches(&sent, &text) {
-            self.session.record_answer_time_if_empty(index, now_ms);
-            // The renderer can re-fire Input with the same text on every
-            // paint. Restarting the timer then would mean the group never
-            // confirms and the next send never starts.
-            if self.pending_auto_confirm.is_some() && previous == text {
-                return Vec::new();
-            }
-            let id = self.alloc_id();
-            self.pending_auto_confirm = Some(id);
-            vec![SessionEffect::AutoConfirm {
-                id,
-                index,
-                value: text,
-                ms: AUTO_CONFIRM_DELAY_MS,
-            }]
-        } else {
-            self.session.clear_answer_time(index);
-            self.pending_auto_confirm = None;
-            Vec::new()
-        }
-    }
-
-    fn auto_confirm_due(
-        &mut self,
-        id: u64,
-        index: usize,
-        value: String,
-        now_ms: u64,
-    ) -> Vec<SessionEffect> {
-        if self.pending_auto_confirm != Some(id) {
-            return Vec::new();
-        }
-        self.pending_auto_confirm = None;
-        if self.session.current_group() != index {
-            return Vec::new();
-        }
-        if self.session.group(index).map(|g| g.input()) != Some(value.as_str()) {
-            return Vec::new();
-        }
-        self.confirm_current(now_ms, Some(value))
-    }
-
-    fn timeout(&mut self, now_ms: u64) -> Vec<SessionEffect> {
-        let SessionPhase::AwaitingAnswer { .. } = self.phase else {
+        let Some(group) = self.session.group(index) else {
             return Vec::new();
         };
-        self.confirm_current(now_ms, None)
-    }
-
-    fn confirm_current(
-        &mut self,
-        now_ms: u64,
-        override_value: Option<String>,
-    ) -> Vec<SessionEffect> {
-        let index = self.session.current_group();
-        if self.session.input_locked(index) {
+        let previous = group.input().to_string();
+        self.session.set_input(index, text);
+        let Some(group) = self.session.group(index) else {
+            return Vec::new();
+        };
+        let (sent, value) = (group.sent(), group.input().to_string());
+        let complete = answer_length_matches(sent, &value);
+        self.session.mark_answer_complete(index, complete, now);
+        if !complete {
+            self.auto_confirm = None;
             return Vec::new();
         }
-        let value = override_value
-            .unwrap_or_else(|| {
-                self.session
-                    .group(index)
-                    .map(|g| g.input().to_string())
-                    .unwrap_or_default()
-            })
-            .trim()
-            .to_ascii_uppercase();
-        if !self.session.confirm(index, value, now_ms) {
+        // The renderer can re-fire Input with the same text on every paint.
+        // Restarting the timer then would mean the group never confirms and
+        // the next send never starts.
+        if self.auto_confirm.is_some() && previous == value {
             return Vec::new();
         }
-        self.after_confirm()
+        let (id, effect) = self.start_timer(AUTO_CONFIRM_DELAY_MS);
+        self.auto_confirm = Some(PendingConfirm { id, index, value });
+        vec![effect]
     }
 
-    fn finish_now(&mut self, now_ms: u64) -> Vec<SessionEffect> {
-        let index = self.session.current_group();
-        if !self.session.input_locked(index) {
-            let typed = self
-                .session
-                .group(index)
-                .is_some_and(|g| !g.input().trim().is_empty() && !g.confirmed());
-            if typed {
-                let _ = self.confirm_current(now_ms, None);
+    fn timer_fired(&mut self, id: u64, now: MonoMs) -> Vec<SessionEffect> {
+        if let Some(pending) = self.auto_confirm.take_if(|pending| pending.id == id) {
+            // Only if the answer is still the one that started it, in the
+            // group that is still current.
+            let unchanged = self.session.current_group() == pending.index
+                && self.session.group(pending.index).map(|g| g.input()) == Some(&pending.value);
+            return if unchanged {
+                self.confirm_current(now)
+            } else {
+                Vec::new()
+            };
+        }
+        let Some((_, timer)) = self.phase_timer.take_if(|(pending, _)| *pending == id) else {
+            return Vec::new();
+        };
+        match (timer, self.phase()) {
+            (PhaseTimer::Gap, SessionPhase::InterGroupGap { next }) => self.begin_group(next, now),
+            (PhaseTimer::Gap, SessionPhase::RepeatGap { index }) => {
+                self.set_phase(SessionPhase::Playing { index });
+                vec![self.play(index)]
             }
-        }
-        self.cancel_timers();
-        if self.session.any_confirmed() {
-            self.phase = SessionPhase::Finished;
-            vec![
-                SessionEffect::StopAudio,
-                SessionEffect::PersistAndShowResults,
-            ]
-        } else {
-            self.phase = SessionPhase::Aborted;
-            vec![SessionEffect::StopAudio, SessionEffect::AbortToHome]
-        }
-    }
-
-    fn after_confirm(&mut self) -> Vec<SessionEffect> {
-        self.cancel_timers();
-        let next = self.session.current_group() + 1;
-        if next >= self.session.group_count() || self.session.all_groups_confirmed() {
-            self.phase = SessionPhase::Finished;
-            return vec![
-                SessionEffect::StopAudio,
-                SessionEffect::Focus {
-                    index: self.session.focused_group(),
-                },
-                SessionEffect::PersistAndShowResults,
-            ];
-        }
-        self.phase = SessionPhase::InterGroupGap { next };
-        let gap_ms = self.group_gap_ms(next);
-        let id = self.alloc_id();
-        self.pending_sleep = Some(id);
-        vec![
-            SessionEffect::StopAudio,
-            SessionEffect::NeedGroup { index: next },
-            SessionEffect::Focus {
-                index: self.session.focused_group(),
-            },
-            SessionEffect::Sleep { id, ms: gap_ms },
-        ]
-    }
-
-    fn group_gap_ms(&self, next: usize) -> u32 {
-        let pause = self.session.settings().playback.group_pause_sec;
-        let extra = self.session.settings().playback.extra_word_space_multiplier;
-        match self.session.played_wpm(next.saturating_sub(1)) {
-            Some((char_wpm, effective_wpm)) => {
-                compute_after_group_gap_ms(char_wpm, effective_wpm, extra, pause)
-            }
-            None => compute_after_group_gap_ms(
-                self.session.settings().playback.char_wpm_min,
-                self.session.settings().playback.effective_wpm_min,
-                extra,
-                pause,
-            ),
-        }
-    }
-
-    fn gap_elapsed(&mut self, now_ms: u64) -> Vec<SessionEffect> {
-        match self.phase {
-            SessionPhase::InterGroupGap { next } => {
-                self.pending_sleep = None;
-                self.begin_next(next, now_ms)
-            }
-            SessionPhase::RepeatGap { index } => {
-                self.pending_sleep = None;
-                self.phase = SessionPhase::Playing { index };
-                let text = self
-                    .session
-                    .group(index)
-                    .map(|g| g.sent().to_string())
-                    .unwrap_or_default();
-                vec![SessionEffect::Play { index, text }]
+            (PhaseTimer::AnswerWindow, SessionPhase::AwaitingAnswer { .. }) => {
+                self.confirm_current(now)
             }
             _ => Vec::new(),
         }
     }
 
-    fn begin_next(&mut self, index: usize, now_ms: u64) -> Vec<SessionEffect> {
-        self.session.begin_group(index, now_ms);
-        self.phase = SessionPhase::Playing { index };
-        self.repeats_left = self.session.group_repeats(index);
-        self.group_elapsed_ms = 0;
+    fn play(&self, index: usize) -> SessionEffect {
         let text = self
             .session
             .group(index)
             .map(|g| g.sent().to_string())
             .unwrap_or_default();
+        SessionEffect::Play { index, text }
+    }
+
+    /// Answer the current group and teach the source what was copied.
+    /// Whether it was answered just now.
+    fn record_answer(&mut self, now: MonoMs) -> bool {
+        let index = self.session.current_group();
+        if self.session.input_locked(index) {
+            return false;
+        }
+        match self.session.confirm(index, now) {
+            Some(copied) => {
+                self.source.learn(copied);
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn confirm_current(&mut self, now: MonoMs) -> Vec<SessionEffect> {
+        if !self.record_answer(now) {
+            return Vec::new();
+        }
+        self.cancel_timers();
+        let next = self.session.current_group() + 1;
+        if next >= self.session.group_count() {
+            self.set_phase(SessionPhase::Finished);
+            return vec![
+                SessionEffect::StopAudio,
+                SessionEffect::PersistAndShowResults,
+            ];
+        }
+        let (text, repeats) = self.source.next_group(self.session.settings());
+        self.session.set_group(next, text, repeats);
+        self.set_phase(SessionPhase::InterGroupGap { next });
+        let gap_ms = self.group_gap_ms(next);
         vec![
-            SessionEffect::Focus { index },
-            SessionEffect::Play { index, text },
+            SessionEffect::StopAudio,
+            self.start_phase_timer(PhaseTimer::Gap, gap_ms),
         ]
     }
 
-    pub fn set_group_text(&mut self, index: usize, text: String, repeats: u32) {
-        self.session.set_group(index, text);
-        self.session.set_group_repeats(index, repeats);
+    fn finish_now(&mut self, now: MonoMs) -> Vec<SessionEffect> {
+        // Something typed but not yet confirmed is kept.
+        let typed = self
+            .session
+            .group(self.session.current_group())
+            .is_some_and(|g| !g.input().is_empty() && !g.confirmed());
+        if typed {
+            self.record_answer(now);
+        }
+        self.end(self.session.any_confirmed())
     }
 
-    pub fn sleep_is_current(&self, id: u64) -> bool {
-        self.pending_sleep == Some(id)
+    fn group_gap_ms(&self, next: usize) -> u32 {
+        let playback = &self.session.settings().playback;
+        let (char_wpm, effective_wpm) = self
+            .session
+            .played_wpm(next.saturating_sub(1))
+            .unwrap_or((playback.char_wpm_min, playback.effective_wpm_min));
+        compute_after_group_gap_ms(
+            char_wpm,
+            effective_wpm,
+            playback.extra_word_space_multiplier,
+            playback.group_pause_sec,
+        )
+    }
+
+    fn begin_group(&mut self, index: usize, now: MonoMs) -> Vec<SessionEffect> {
+        self.session.begin_group(index, now);
+        self.set_phase(SessionPhase::Playing { index });
+        self.repeats_left = self.session.group_repeats(index);
+        self.group_elapsed_ms = 0;
+        vec![self.play(index)]
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::settings::TrainingSettings;
+    use std::collections::VecDeque;
 
-    fn machine() -> SessionMachine {
-        let mut settings = TrainingSettings::default();
-        settings.curriculum.num_groups = 2;
-        settings.playback.group_timeout = 10.0;
-        settings.playback.lock_input_during_group_playback = true;
-        let (m, _) = SessionMachine::start(SessionId::new(1), 0, settings, "KM".into(), 1);
-        m
+    use super::*;
+
+    /// Hands out the groups it is given, then "KM" for ever, and remembers
+    /// what it was taught.
+    #[derive(Clone, Debug, Default)]
+    struct Script {
+        texts: VecDeque<String>,
+        repeats: u32,
+        learned: Vec<CopyTally>,
     }
 
-    fn machine_with_repeats(repeats: u32) -> SessionMachine {
-        let mut settings = TrainingSettings::default();
-        settings.curriculum.num_groups = 2;
-        settings.playback.group_timeout = 10.0;
-        settings.playback.lock_input_during_group_playback = true;
-        settings.playback.link_group_repeat = false;
-        settings.playback.group_repeat_min = repeats;
-        settings.playback.group_repeat_max = repeats;
-        let (m, _) = SessionMachine::start(SessionId::new(1), 0, settings, "KM".into(), repeats);
-        m
+    impl GroupSource for Script {
+        fn next_group(&mut self, _: &TrainingSettings) -> (String, u32) {
+            let text = self.texts.pop_front().unwrap_or_else(|| "KM".into());
+            (text, self.repeats.max(1))
+        }
+
+        fn learn(&mut self, copied: &CopyTally) {
+            self.learned.push(copied.clone());
+        }
+    }
+
+    fn script(texts: &[&str], repeats: u32) -> Script {
+        Script {
+            texts: texts.iter().map(|t| (*t).to_string()).collect(),
+            repeats,
+            learned: Vec::new(),
+        }
+    }
+
+    fn settings(groups: u32, lock: bool, timeout: f64) -> TrainingSettings {
+        let mut s = TrainingSettings::default();
+        s.curriculum.num_groups = groups;
+        s.playback.group_timeout = timeout;
+        s.playback.lock_input_during_group_playback = lock;
+        s
+    }
+
+    fn start_with(settings: TrainingSettings, source: Script) -> SessionMachine<Script> {
+        SessionMachine::start(SessionId::new(7), MonoMs(0), settings, source).0
+    }
+
+    /// Two groups, KM then UK, the box locked while sending, a ten-second
+    /// answer window.
+    fn machine() -> SessionMachine<Script> {
+        start_with(settings(2, true, 10.0), script(&["KM", "UK"], 1))
     }
 
     fn ended(index: usize) -> SessionEvent {
@@ -524,26 +464,71 @@ mod tests {
         }
     }
 
+    fn typed(index: usize, text: &str) -> SessionEvent {
+        SessionEvent::Input {
+            index,
+            text: text.into(),
+        }
+    }
+
+    /// The one timer among `effects`, and how long it runs.
+    fn timer(effects: &[SessionEffect]) -> (u64, u32) {
+        let timers: Vec<(u64, u32)> = effects
+            .iter()
+            .filter_map(|effect| match effect {
+                SessionEffect::StartTimer { id, ms } => Some((*id, *ms)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(timers.len(), 1, "expected one timer in {effects:?}");
+        timers[0]
+    }
+
+    fn fire(
+        m: &mut SessionMachine<Script>,
+        effects: &[SessionEffect],
+        at: u64,
+    ) -> Vec<SessionEffect> {
+        let (id, _) = timer(effects);
+        m.apply(SessionEvent::TimerFired { id }, MonoMs(at))
+    }
+
+    #[test]
+    fn a_session_starts_by_sending_its_first_group() {
+        let (m, effects) = SessionMachine::start(
+            SessionId::new(7),
+            MonoMs(0),
+            settings(2, true, 10.0),
+            script(&["KM"], 1),
+        );
+        assert_eq!(
+            effects,
+            vec![SessionEffect::Play {
+                index: 0,
+                text: "KM".into()
+            }]
+        );
+        assert_eq!(m.phase(), SessionPhase::Playing { index: 0 });
+        assert_eq!(m.session().session_id().raw(), 7);
+        assert!(m.session().input_locked(0));
+    }
+
     #[test]
     fn a_repeated_group_is_sent_again_after_a_word_space() {
-        let mut m = machine_with_repeats(3);
-        let effects = m.apply(ended(0), 500);
+        let mut m = start_with(settings(2, true, 10.0), script(&["KM"], 3));
+        let effects = m.apply(ended(0), MonoMs(500));
         assert!(matches!(m.phase(), SessionPhase::RepeatGap { index: 0 }));
-        assert_eq!(m.view().repeat_total, 3);
-        assert_eq!(m.view().repeat_done, 1);
+        assert_eq!(m.session().view().repeat_total, 3);
+        assert_eq!(m.session().view().repeat_done, 1);
         // Still "playing" for the UI, so typing stays locked between sends.
         assert!(m.session().input_locked(0));
-        let Some(SessionEffect::Sleep { id, ms }) = effects.first().cloned() else {
-            panic!("expected a repeat gap sleep, got {effects:?}");
-        };
         assert_eq!(
-            ms,
+            timer(&effects).1,
             compute_group_gap_for_wpm(20.0, 18.0, 1.0),
             "a repeat is a word space, not the reading pause"
         );
-        assert!(m.sleep_is_current(id));
 
-        let effects = m.apply(SessionEvent::GapElapsed, 900);
+        let effects = fire(&mut m, &effects, 900);
         assert!(matches!(m.phase(), SessionPhase::Playing { index: 0 }));
         assert_eq!(
             effects,
@@ -553,744 +538,379 @@ mod tests {
             }]
         );
 
-        let _ = m.apply(ended(0), 1400);
-        assert!(matches!(m.phase(), SessionPhase::RepeatGap { index: 0 }));
-        let _ = m.apply(SessionEvent::GapElapsed, 1800);
-        let effects = m.apply(ended(0), 2300);
+        let effects = m.apply(ended(0), MonoMs(1_400));
+        let _ = fire(&mut m, &effects, 1_800);
+        let effects = m.apply(ended(0), MonoMs(2_300));
         assert!(matches!(
             m.phase(),
             SessionPhase::AwaitingAnswer { index: 0 }
         ));
-        assert_eq!(m.view().repeat_done, 3);
+        assert_eq!(m.session().view().repeat_done, 3);
         assert!(!m.session().input_locked(0));
-        assert!(effects.contains(&SessionEffect::Focus { index: 0 }));
+        assert_eq!(timer(&effects).1, 10_000, "the answer window opens");
     }
 
     #[test]
-    fn repeat_count_resets_for_each_group() {
-        let mut m = machine_with_repeats(2);
-        let _ = m.apply(ended(0), 500);
-        let _ = m.apply(SessionEvent::GapElapsed, 900);
-        let _ = m.apply(ended(0), 1400);
-        m.set_group_text(1, "UK".into(), 1);
-        let _ = m.apply(SessionEvent::Confirm, 1500);
+    fn the_repeat_count_starts_again_for_each_group() {
+        let mut m = start_with(settings(2, true, 10.0), script(&["KM", "UK"], 2));
+        let effects = m.apply(ended(0), MonoMs(500));
+        let _ = fire(&mut m, &effects, 900);
+        let _ = m.apply(ended(0), MonoMs(1_400));
+        let effects = m.apply(SessionEvent::Confirm, MonoMs(1_500));
         assert!(matches!(m.phase(), SessionPhase::InterGroupGap { next: 1 }));
-        let _ = m.apply(SessionEvent::GapElapsed, 2000);
+        let _ = fire(&mut m, &effects, 2_000);
         assert!(matches!(m.phase(), SessionPhase::Playing { index: 1 }));
-        assert_eq!(m.view().repeat_total, 1);
-        let _ = m.apply(ended(1), 2500);
-        assert!(matches!(
-            m.phase(),
-            SessionPhase::AwaitingAnswer { index: 1 }
-        ));
+        assert_eq!(m.session().view().repeat_done, 0);
+        let effects = m.apply(ended(1), MonoMs(2_500));
+        assert!(matches!(m.phase(), SessionPhase::RepeatGap { index: 1 }));
+        assert_eq!(effects.len(), 1);
     }
 
     #[test]
-    fn abort_during_play_goes_home() {
+    fn a_confirm_learns_from_the_answer_then_draws_and_waits_for_the_next_group() {
         let mut m = machine();
-        let effects = m.apply(SessionEvent::Abort, 10);
-        assert_eq!(m.phase(), SessionPhase::Aborted);
-        assert!(effects.contains(&SessionEffect::AbortToHome));
-        assert!(effects.contains(&SessionEffect::StopAudio));
-    }
-
-    #[test]
-    fn audio_fail_with_no_answers_aborts() {
-        let mut m = machine();
-        let effects = m.apply(SessionEvent::PlaybackFailed { index: 0 }, 10);
-        assert_eq!(m.phase(), SessionPhase::Aborted);
-        assert!(effects.contains(&SessionEffect::AbortToHome));
-    }
-
-    #[test]
-    fn playback_then_timeout_confirms_empty() {
-        let mut m = machine();
-        let effects = m.apply(
-            SessionEvent::PlaybackEnded {
-                index: 0,
-                duration_sec: 0.5,
-                char_wpm: 20.0,
-                effective_wpm: 18.0,
-            },
-            500,
-        );
-        assert!(matches!(
-            m.phase(),
-            SessionPhase::AwaitingAnswer { index: 0 }
-        ));
+        let _ = m.apply(ended(0), MonoMs(500));
+        let _ = m.apply(typed(0, "kx"), MonoMs(600));
+        let effects = m.apply(SessionEvent::Confirm, MonoMs(700));
+        assert_eq!(effects[0], SessionEffect::StopAudio);
         assert!(
-            effects
+            !effects
                 .iter()
-                .any(|e| matches!(e, SessionEffect::Sleep { .. }))
+                .any(|e| matches!(e, SessionEffect::Play { .. }))
         );
-        let after = m.apply(SessionEvent::Timeout, 10_500);
-        assert!(m.session().group(0).unwrap().confirmed());
-        assert!(
-            after
-                .iter()
-                .any(|e| matches!(e, SessionEffect::Sleep { .. }))
-                || after.contains(&SessionEffect::PersistAndShowResults)
+        assert!(matches!(m.phase(), SessionPhase::InterGroupGap { next: 1 }));
+        // The next group is drawn now, so it is known before it is sent.
+        assert_eq!(m.session().group(1).map(|g| g.sent()), Some("UK"));
+        assert_eq!(m.source.learned, vec![CopyTally::of("KM", "KX")]);
+
+        let effects = fire(&mut m, &effects, 3_000);
+        assert_eq!(
+            effects,
+            vec![SessionEffect::Play {
+                index: 1,
+                text: "UK".into()
+            }]
         );
+        assert_eq!(m.session().current_group(), 1);
+    }
+
+    #[test]
+    fn the_answer_window_closing_confirms_what_was_typed() {
+        let mut m = machine();
+        let effects = m.apply(ended(0), MonoMs(500));
+        let after = fire(&mut m, &effects, 10_500);
+        assert!(m.session().group(0).is_some_and(|g| g.confirmed()));
+        assert!(matches!(m.phase(), SessionPhase::InterGroupGap { next: 1 }));
+        assert_eq!(timer(&after).1, m.group_gap_ms(1));
+    }
+
+    #[test]
+    fn a_zero_timeout_leaves_the_answer_window_open() {
+        let mut m = start_with(settings(2, true, 0.0), script(&["KM"], 1));
+        assert!(m.apply(ended(0), MonoMs(500)).is_empty());
+        assert_eq!(m.phase(), SessionPhase::AwaitingAnswer { index: 0 });
     }
 
     #[test]
     fn auto_confirm_advances_after_length_match() {
-        let mut settings = TrainingSettings::default();
-        settings.curriculum.num_groups = 1;
-        settings.playback.group_timeout = 0.0;
-        settings.playback.lock_input_during_group_playback = false;
-        let (mut m, _) = SessionMachine::start(SessionId::new(1), 0, settings, "KM".into(), 1);
-        let _ = m.apply(
-            SessionEvent::PlaybackEnded {
-                index: 0,
-                duration_sec: 0.2,
-                char_wpm: 18.0,
-                effective_wpm: 18.0,
-            },
-            200,
-        );
-        let effects = m.apply(
-            SessionEvent::Input {
-                index: 0,
-                text: "KM".into(),
-            },
-            300,
-        );
-        let Some(SessionEffect::AutoConfirm { id, value, .. }) = effects
-            .into_iter()
-            .find(|e| matches!(e, SessionEffect::AutoConfirm { .. }))
-        else {
-            panic!("expected auto-confirm");
-        };
-        let done = m.apply(
-            SessionEvent::AutoConfirmDue {
-                id,
-                index: 0,
-                value,
-            },
-            600,
-        );
+        let mut m = start_with(settings(1, false, 0.0), script(&["KM"], 1));
+        let _ = m.apply(ended(0), MonoMs(200));
+        let effects = m.apply(typed(0, "KM"), MonoMs(300));
+        assert_eq!(timer(&effects).1, AUTO_CONFIRM_DELAY_MS);
+        let done = fire(&mut m, &effects, 600);
         assert_eq!(m.phase(), SessionPhase::Finished);
         assert!(done.contains(&SessionEffect::PersistAndShowResults));
     }
 
     #[test]
-    fn stale_auto_confirm_is_ignored() {
-        let mut settings = TrainingSettings::default();
-        settings.curriculum.num_groups = 1;
-        settings.playback.lock_input_during_group_playback = false;
-        let (mut m, _) = SessionMachine::start(SessionId::new(1), 0, settings, "KM".into(), 1);
-        let _ = m.apply(
-            SessionEvent::PlaybackEnded {
-                index: 0,
-                duration_sec: 0.2,
-                char_wpm: 18.0,
-                effective_wpm: 18.0,
-            },
-            200,
-        );
-        let first = m.apply(
-            SessionEvent::Input {
-                index: 0,
-                text: "KM".into(),
-            },
-            300,
-        );
-        let id = match first
-            .into_iter()
-            .find(|e| matches!(e, SessionEffect::AutoConfirm { .. }))
-        {
-            Some(SessionEffect::AutoConfirm { id, .. }) => id,
-            _ => panic!("auto-confirm"),
-        };
-        let _ = m.apply(
-            SessionEvent::Input {
-                index: 0,
-                text: "K".into(),
-            },
-            320,
-        );
-        let effects = m.apply(
-            SessionEvent::AutoConfirmDue {
-                id,
-                index: 0,
-                value: "KM".into(),
-            },
-            600,
-        );
-        assert!(effects.is_empty());
-        assert!(!m.session().group(0).unwrap().confirmed());
+    fn typing_and_then_correcting_cancels_the_pending_auto_confirm() {
+        let mut m = machine();
+        let _ = m.apply(ended(0), MonoMs(1_000));
+        let effects = m.apply(typed(0, "KM"), MonoMs(1_100));
+        // A backspace makes the length wrong again and withdraws the confirm.
+        assert!(m.apply(typed(0, "K"), MonoMs(1_200)).is_empty());
+        assert!(fire(&mut m, &effects, 1_300).is_empty());
+        assert!(!m.session().any_confirmed());
     }
 
     #[test]
-    fn finish_now_mid_session_persists_if_any_confirmed() {
+    fn repeating_the_same_full_answer_does_not_restart_auto_confirm() {
         let mut m = machine();
-        let _ = m.apply(
-            SessionEvent::PlaybackEnded {
-                index: 0,
-                duration_sec: 0.5,
-                char_wpm: 20.0,
-                effective_wpm: 18.0,
-            },
-            500,
-        );
-        let _ = m.apply(
-            SessionEvent::Input {
-                index: 0,
-                text: "KM".into(),
-            },
-            600,
-        );
-        let effects = m.apply(SessionEvent::FinishNow, 700);
-        assert_eq!(m.phase(), SessionPhase::Finished);
-        assert!(effects.contains(&SessionEffect::PersistAndShowResults));
+        let _ = m.apply(ended(0), MonoMs(1_000));
+        let first = m.apply(typed(0, "KM"), MonoMs(1_100));
+        assert!(m.apply(typed(0, "KM"), MonoMs(1_150)).is_empty());
+        let done = fire(&mut m, &first, 1_400);
+        assert!(m.session().any_confirmed());
+        assert!(matches!(m.phase(), SessionPhase::InterGroupGap { next: 1 }));
+        assert_eq!(timer(&done).1, m.group_gap_ms(1));
+    }
+
+    #[test]
+    fn an_auto_confirm_whose_text_changed_does_not_fire() {
+        let mut m = machine();
+        let _ = m.apply(ended(0), MonoMs(1_000));
+        let effects = m.apply(typed(0, "KM"), MonoMs(1_100));
+        // Same length, different text: the pending confirm is stale.
+        let newer = m.apply(typed(0, "MK"), MonoMs(1_150));
+        assert!(fire(&mut m, &effects, 1_200).is_empty());
+        assert!(!m.session().any_confirmed());
+        // The newer one still does.
+        let _ = fire(&mut m, &newer, 1_500);
         assert!(m.session().any_confirmed());
     }
 
     #[test]
-    fn confirm_emits_need_group_before_next_play() {
+    fn an_auto_confirm_for_a_group_that_has_moved_on_does_not_fire() {
         let mut m = machine();
-        let _ = m.apply(
-            SessionEvent::PlaybackEnded {
-                index: 0,
-                duration_sec: 0.2,
-                char_wpm: 18.0,
-                effective_wpm: 18.0,
-            },
-            200,
-        );
-        let effects = m.apply(SessionEvent::Confirm, 300);
-        let need = effects
-            .iter()
-            .position(|e| matches!(e, SessionEffect::NeedGroup { index: 1 }));
-        let play = effects
-            .iter()
-            .position(|e| matches!(e, SessionEffect::Play { .. }));
-        assert!(need.is_some());
-        assert!(play.is_none(), "play must wait until NeedGroup is applied");
-        assert!(effects.contains(&SessionEffect::StopAudio));
+        let _ = m.apply(ended(0), MonoMs(1_000));
+        let pending = m.apply(typed(0, "KM"), MonoMs(1_100));
+        // The answer is confirmed by hand first, so group 0 is no longer current.
+        let gap = m.apply(SessionEvent::Confirm, MonoMs(1_150));
+        let _ = fire(&mut m, &gap, 1_200);
+        assert_eq!(m.session().current_group(), 1);
+        assert!(fire(&mut m, &pending, 1_300).is_empty());
+        assert_eq!(m.phase(), SessionPhase::Playing { index: 1 });
+    }
+
+    /// A timer is the machine's to interpret. One it has forgotten — a gap
+    /// cut short by a confirm, a window closed by an answer — does nothing,
+    /// whatever phase the session is in by the time it fires.
+    #[test]
+    fn a_timer_the_machine_has_forgotten_does_nothing() {
+        let mut m = machine();
+        let window = m.apply(ended(0), MonoMs(500));
+        let gap = m.apply(SessionEvent::Confirm, MonoMs(600));
         assert!(
-            effects
-                .iter()
-                .any(|e| matches!(e, SessionEffect::Sleep { .. }))
+            fire(&mut m, &window, 700).is_empty(),
+            "the window was closed"
+        );
+        assert!(matches!(m.phase(), SessionPhase::InterGroupGap { next: 1 }));
+        let _ = fire(&mut m, &gap, 800);
+        assert!(fire(&mut m, &gap, 900).is_empty(), "a timer fires once");
+        assert!(
+            m.apply(SessionEvent::TimerFired { id: 999 }, MonoMs(1_000))
+                .is_empty()
+        );
+        assert_eq!(m.phase(), SessionPhase::Playing { index: 1 });
+    }
+
+    #[test]
+    fn typing_is_ignored_while_locked_out_of_turn_or_between_groups() {
+        let mut m = machine();
+        assert!(m.apply(typed(0, "KM"), MonoMs(5)).is_empty(), "locked");
+        assert_eq!(m.session().group(0).map(|g| g.input()), Some(""));
+
+        let mut m = start_with(settings(2, false, 10.0), script(&["KM"], 1));
+        assert!(
+            m.apply(typed(1, "XX"), MonoMs(5)).is_empty(),
+            "not its turn"
+        );
+        assert_eq!(m.session().group(1).map(|g| g.input()), Some(""));
+
+        let _ = m.apply(ended(0), MonoMs(1_000));
+        let _ = m.apply(SessionEvent::Confirm, MonoMs(1_100));
+        assert!(
+            m.apply(typed(1, "X"), MonoMs(1_200)).is_empty(),
+            "in the gap"
         );
     }
 
     #[test]
-    fn cancelled_play_for_another_group_does_not_abort() {
+    fn confirming_while_the_group_is_still_sending_is_ignored_when_locked() {
         let mut m = machine();
-        let _ = m.apply(
-            SessionEvent::PlaybackEnded {
-                index: 0,
-                duration_sec: 0.2,
-                char_wpm: 18.0,
-                effective_wpm: 18.0,
-            },
-            200,
-        );
-        let _ = m.apply(SessionEvent::Confirm, 300);
-        assert!(matches!(m.phase(), SessionPhase::InterGroupGap { next: 1 }));
-        let effects = m.apply(SessionEvent::PlaybackCancelled { index: 0 }, 310);
-        assert!(effects.is_empty());
-        assert!(matches!(m.phase(), SessionPhase::InterGroupGap { next: 1 }));
+        assert!(m.apply(SessionEvent::Confirm, MonoMs(100)).is_empty());
+        assert!(!m.session().any_confirmed());
     }
 
     #[test]
-    fn cancelled_play_for_current_group_aborts() {
+    fn confirming_during_the_send_when_unlocked_stops_the_audio() {
+        let mut m = start_with(settings(2, false, 10.0), script(&["KM"], 1));
+        let _ = m.apply(typed(0, "KM"), MonoMs(40));
+        let effects = m.apply(SessionEvent::Confirm, MonoMs(50));
+        assert!(effects.contains(&SessionEffect::StopAudio));
+        assert!(matches!(m.phase(), SessionPhase::InterGroupGap { next: 1 }));
+        assert!(!m.session().view().playing);
+        // The send stopping late is the confirm's doing, not a failure.
+        assert!(
+            m.apply(SessionEvent::PlaybackStopped { index: 0 }, MonoMs(80))
+                .is_empty()
+        );
+        let result = m.session().result(100, "2026-09-01".into());
+        assert_eq!(
+            result.group_timings[0].time_to_complete_ms,
+            2.0 * crate::session::MIN_RESPONSE_MS_PER_CHAR
+        );
+    }
+
+    #[test]
+    fn a_second_confirm_for_the_same_group_does_nothing() {
         let mut m = machine();
-        let effects = m.apply(SessionEvent::PlaybackCancelled { index: 0 }, 10);
+        let _ = m.apply(ended(0), MonoMs(1_000));
+        assert!(!m.apply(SessionEvent::Confirm, MonoMs(1_100)).is_empty());
+        assert!(m.apply(SessionEvent::Confirm, MonoMs(1_200)).is_empty());
+        assert_eq!(m.source.learned.len(), 1);
+    }
+
+    #[test]
+    fn a_stale_playback_report_is_ignored() {
+        let mut m = machine();
+        let _ = m.apply(ended(0), MonoMs(200));
+        assert!(m.apply(ended(0), MonoMs(400)).is_empty());
+        assert!(matches!(
+            m.phase(),
+            SessionPhase::AwaitingAnswer { index: 0 }
+        ));
+        assert!(
+            m.apply(SessionEvent::PlaybackStopped { index: 1 }, MonoMs(500))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_send_stopping_ends_the_session_keeping_what_was_scored() {
+        // Nothing answered yet: nothing to keep.
+        let mut m = machine();
+        let effects = m.apply(SessionEvent::PlaybackStopped { index: 0 }, MonoMs(10));
+        assert_eq!(m.phase(), SessionPhase::Aborted);
+        assert_eq!(
+            effects,
+            vec![SessionEffect::StopAudio, SessionEffect::AbortToHome]
+        );
+
+        // One group answered: the session is kept.
+        let mut m = machine();
+        let _ = m.apply(ended(0), MonoMs(200));
+        let gap = m.apply(SessionEvent::Confirm, MonoMs(300));
+        let _ = fire(&mut m, &gap, 800);
+        assert!(matches!(m.phase(), SessionPhase::Playing { index: 1 }));
+        let effects = m.apply(SessionEvent::PlaybackStopped { index: 1 }, MonoMs(900));
+        assert_eq!(m.phase(), SessionPhase::Finished);
+        assert!(effects.contains(&SessionEffect::PersistAndShowResults));
+    }
+
+    #[test]
+    fn ending_a_session_keeps_an_answer_typed_but_not_confirmed() {
+        let mut m = machine();
+        let _ = m.apply(ended(0), MonoMs(1_000));
+        let _ = m.apply(typed(0, " km "), MonoMs(1_100));
+        let effects = m.apply(SessionEvent::FinishNow, MonoMs(1_200));
+        assert_eq!(m.phase(), SessionPhase::Finished);
+        assert!(effects.contains(&SessionEffect::PersistAndShowResults));
+        assert!(m.session().any_confirmed());
+        // Tidied on the way in.
+        assert_eq!(m.session().group(0).map(|g| g.input()), Some("KM"));
+        // And it is the last group drawn: ending does not reach for another.
+        assert_eq!(m.session().group(1).map(|g| g.sent()), Some(""));
+    }
+
+    #[test]
+    fn ending_a_session_with_nothing_typed_goes_home() {
+        let mut m = machine();
+        let _ = m.apply(ended(0), MonoMs(1_000));
+        let _ = m.apply(typed(0, "   "), MonoMs(1_100));
+        let effects = m.apply(SessionEvent::FinishNow, MonoMs(1_200));
         assert_eq!(m.phase(), SessionPhase::Aborted);
         assert!(effects.contains(&SessionEffect::AbortToHome));
     }
 
     #[test]
-    fn cancelled_play_after_confirmed_group_persists() {
+    fn abort_during_play_goes_home() {
         let mut m = machine();
-        let _ = m.apply(
-            SessionEvent::PlaybackEnded {
-                index: 0,
-                duration_sec: 0.2,
-                char_wpm: 18.0,
-                effective_wpm: 18.0,
-            },
-            200,
-        );
-        let _ = m.apply(SessionEvent::Confirm, 300);
-        m.set_group_text(1, "UK".into(), 1);
-        let _ = m.apply(SessionEvent::GapElapsed, 800);
-        assert!(matches!(m.phase(), SessionPhase::Playing { index: 1 }));
-        let effects = m.apply(SessionEvent::PlaybackCancelled { index: 1 }, 900);
-        assert_eq!(m.phase(), SessionPhase::Finished);
-        assert!(effects.contains(&SessionEffect::PersistAndShowResults));
-        assert!(m.session().group(0).unwrap().confirmed());
-    }
-
-    #[test]
-    fn playback_ended_for_stale_index_is_ignored() {
-        let mut m = machine();
-        let _ = m.apply(
-            SessionEvent::PlaybackEnded {
-                index: 0,
-                duration_sec: 0.2,
-                char_wpm: 18.0,
-                effective_wpm: 18.0,
-            },
-            200,
-        );
-        let effects = m.apply(
-            SessionEvent::PlaybackEnded {
-                index: 0,
-                duration_sec: 0.2,
-                char_wpm: 18.0,
-                effective_wpm: 18.0,
-            },
-            400,
-        );
-        assert!(effects.is_empty());
-        assert!(matches!(
-            m.phase(),
-            SessionPhase::AwaitingAnswer { index: 0 }
-        ));
-    }
-
-    #[test]
-    fn confirm_during_play_stops_audio() {
-        let mut settings = TrainingSettings::default();
-        settings.curriculum.num_groups = 2;
-        settings.playback.lock_input_during_group_playback = false;
-        let (mut m, _) = SessionMachine::start(SessionId::new(1), 0, settings, "KM".into(), 1);
-        let effects = m.apply(SessionEvent::Confirm, 50);
+        let effects = m.apply(SessionEvent::Abort, MonoMs(10));
+        assert_eq!(m.phase(), SessionPhase::Aborted);
+        assert!(effects.contains(&SessionEffect::AbortToHome));
         assert!(effects.contains(&SessionEffect::StopAudio));
-        assert!(matches!(m.phase(), SessionPhase::InterGroupGap { next: 1 }));
-        let late = m.apply(SessionEvent::PlaybackCancelled { index: 0 }, 80);
-        assert!(late.is_empty());
-        assert!(matches!(m.phase(), SessionPhase::InterGroupGap { next: 1 }));
-        assert_eq!(
-            m.session().view().status,
-            crate::RuntimeStatus::WaitingForAnswer
-        );
-        let timings = m.session().build_timings(10_000.0);
-        assert!((timings[0].time_to_complete_ms - 1.0).abs() < 1e-9);
-    }
-
-    #[test]
-    fn start_emits_play_even_for_empty_text() {
-        let mut settings = TrainingSettings::default();
-        settings.curriculum.num_groups = 1;
-        let (_, effects) = SessionMachine::start(SessionId::new(1), 0, settings, String::new(), 1);
-        assert!(effects.iter().any(|e| matches!(
-            e,
-            SessionEffect::Play {
-                index: 0,
-                text
-            } if text.is_empty()
-        )));
-    }
-}
-
-#[cfg(test)]
-mod guard_tests {
-    use super::*;
-    use crate::settings::TrainingSettings;
-
-    fn settings(lock: bool, timeout: f64) -> TrainingSettings {
-        let mut s = TrainingSettings::default();
-        s.curriculum.num_groups = 2;
-        s.playback.group_timeout = timeout;
-        s.playback.lock_input_during_group_playback = lock;
-        s
-    }
-
-    fn started(lock: bool, timeout: f64) -> SessionMachine {
-        let (machine, _) = SessionMachine::start(
-            SessionId::new(7),
-            0,
-            settings(lock, timeout),
-            "KM".into(),
-            1,
-        );
-        machine
-    }
-
-    fn finished_play(machine: &mut SessionMachine, index: usize) -> Vec<SessionEffect> {
-        machine.apply(
-            SessionEvent::PlaybackEnded {
-                index,
-                duration_sec: 1.0,
-                char_wpm: 20.0,
-                effective_wpm: 20.0,
-            },
-            1_000,
-        )
-    }
-
-    #[test]
-    fn a_failure_reported_for_another_group_is_ignored() {
-        let mut machine = started(true, 10.0);
-        assert!(
-            machine
-                .apply(SessionEvent::PlaybackFailed { index: 1 }, 0)
-                .is_empty()
-        );
-        assert_eq!(machine.phase(), SessionPhase::Playing { index: 0 });
-    }
-
-    #[test]
-    fn typing_is_ignored_while_the_group_is_being_sent() {
-        let mut machine = started(true, 10.0);
-        assert!(
-            machine
-                .apply(
-                    SessionEvent::Input {
-                        index: 0,
-                        text: "KM".into()
-                    },
-                    5
-                )
-                .is_empty()
-        );
-        assert_eq!(machine.session().group(0).map(|g| g.input()), Some(""));
-    }
-
-    #[test]
-    fn typing_into_another_group_is_ignored() {
-        let mut machine = started(false, 10.0);
-        assert!(
-            machine
-                .apply(
-                    SessionEvent::Input {
-                        index: 1,
-                        text: "XX".into()
-                    },
-                    5
-                )
-                .is_empty()
-        );
-        assert_eq!(machine.session().group(1).map(|g| g.input()), Some(""));
-    }
-
-    #[test]
-    fn typing_during_the_gap_between_groups_is_ignored() {
-        let mut machine = started(false, 10.0);
-        finished_play(&mut machine, 0);
-        let _ = machine.apply(SessionEvent::Confirm, 1_100);
-        assert!(matches!(
-            machine.phase(),
-            SessionPhase::InterGroupGap { .. }
-        ));
-        assert!(
-            machine
-                .apply(
-                    SessionEvent::Input {
-                        index: 1,
-                        text: "X".into()
-                    },
-                    1_200
-                )
-                .is_empty()
-        );
-    }
-
-    #[test]
-    fn typing_and_then_correcting_cancels_the_pending_auto_confirm() {
-        let mut machine = started(true, 10.0);
-        finished_play(&mut machine, 0);
-        let effects = machine.apply(
-            SessionEvent::Input {
-                index: 0,
-                text: "KM".into(),
-            },
-            1_100,
-        );
-        let SessionEffect::AutoConfirm { id, .. } = effects[0].clone() else {
-            panic!("expected an auto-confirm, got {effects:?}");
-        };
-        // A backspace makes the length wrong again and withdraws the confirm.
-        assert!(
-            machine
-                .apply(
-                    SessionEvent::Input {
-                        index: 0,
-                        text: "K".into()
-                    },
-                    1_200
-                )
-                .is_empty()
-        );
-        assert!(
-            machine
-                .apply(
-                    SessionEvent::AutoConfirmDue {
-                        id,
-                        index: 0,
-                        value: "KM".into()
-                    },
-                    1_300
-                )
-                .is_empty()
-        );
-        assert!(!machine.session().confirmed_flags()[0]);
-    }
-
-    #[test]
-    fn repeating_the_same_full_answer_does_not_restart_auto_confirm() {
-        let mut machine = started(true, 10.0);
-        finished_play(&mut machine, 0);
-        let first = machine.apply(
-            SessionEvent::Input {
-                index: 0,
-                text: "KM".into(),
-            },
-            1_100,
-        );
-        let SessionEffect::AutoConfirm { id, .. } = first[0].clone() else {
-            panic!("expected an auto-confirm, got {first:?}");
-        };
-        assert!(
-            machine
-                .apply(
-                    SessionEvent::Input {
-                        index: 0,
-                        text: "KM".into(),
-                    },
-                    1_150,
-                )
-                .is_empty()
-        );
-        let done = machine.apply(
-            SessionEvent::AutoConfirmDue {
-                id,
-                index: 0,
-                value: "KM".into(),
-            },
-            1_400,
-        );
-        assert!(machine.session().confirmed_flags()[0]);
-        assert!(
-            done.iter()
-                .any(|e| matches!(e, SessionEffect::NeedGroup { index: 1 }))
-        );
-    }
-
-    #[test]
-    fn an_auto_confirm_whose_text_changed_does_not_fire() {
-        let mut machine = started(true, 10.0);
-        finished_play(&mut machine, 0);
-        let effects = machine.apply(
-            SessionEvent::Input {
-                index: 0,
-                text: "KM".into(),
-            },
-            1_100,
-        );
-        let SessionEffect::AutoConfirm { id, .. } = effects[0].clone() else {
-            panic!("expected an auto-confirm");
-        };
-        // Same length, different text: the stamped value is stale.
-        let _ = machine.apply(
-            SessionEvent::Input {
-                index: 0,
-                text: "MK".into(),
-            },
-            1_150,
-        );
-        assert!(
-            machine
-                .apply(
-                    SessionEvent::AutoConfirmDue {
-                        id,
-                        index: 0,
-                        value: "KM".into()
-                    },
-                    1_200
-                )
-                .is_empty()
-        );
-        assert!(!machine.session().confirmed_flags()[0]);
-    }
-
-    #[test]
-    fn an_auto_confirm_for_a_group_that_has_moved_on_does_not_fire() {
-        let mut machine = started(true, 10.0);
-        finished_play(&mut machine, 0);
-        let effects = machine.apply(
-            SessionEvent::Input {
-                index: 0,
-                text: "KM".into(),
-            },
-            1_100,
-        );
-        let SessionEffect::AutoConfirm { id, .. } = effects[0].clone() else {
-            panic!("expected an auto-confirm");
-        };
-        // The answer is confirmed by hand first, so group 0 is no longer current.
-        let _ = machine.apply(SessionEvent::Confirm, 1_150);
-        let _ = machine.apply(SessionEvent::GapElapsed, 1_200);
-        assert_eq!(machine.session().current_group(), 1);
-        assert!(
-            machine
-                .apply(
-                    SessionEvent::AutoConfirmDue {
-                        id,
-                        index: 0,
-                        value: "KM".into()
-                    },
-                    1_300
-                )
-                .is_empty()
-        );
-    }
-
-    #[test]
-    fn a_timeout_outside_the_answer_window_is_ignored() {
-        let mut machine = started(true, 10.0);
-        assert!(machine.apply(SessionEvent::Timeout, 500).is_empty());
-        assert_eq!(machine.phase(), SessionPhase::Playing { index: 0 });
-    }
-
-    #[test]
-    fn a_gap_that_elapses_outside_a_gap_is_ignored() {
-        let mut machine = started(true, 10.0);
-        assert!(machine.apply(SessionEvent::GapElapsed, 500).is_empty());
-        assert_eq!(machine.phase(), SessionPhase::Playing { index: 0 });
-    }
-
-    #[test]
-    fn confirming_while_the_group_is_still_sending_is_ignored() {
-        let mut machine = started(true, 10.0);
-        assert!(machine.apply(SessionEvent::Confirm, 100).is_empty());
-        assert!(!machine.session().confirmed_flags()[0]);
-    }
-
-    #[test]
-    fn a_second_confirm_for_the_same_group_does_nothing() {
-        let mut machine = started(true, 10.0);
-        finished_play(&mut machine, 0);
-        assert!(!machine.apply(SessionEvent::Confirm, 1_100).is_empty());
-        assert!(machine.apply(SessionEvent::Confirm, 1_200).is_empty());
     }
 
     #[test]
     fn nothing_at_all_happens_once_the_session_is_over() {
-        let mut machine = started(true, 10.0);
-        let _ = machine.apply(SessionEvent::Abort, 10);
-        assert_eq!(machine.phase(), SessionPhase::Aborted);
-        assert!(machine.is_terminal());
+        let mut m = machine();
+        let _ = m.apply(SessionEvent::Abort, MonoMs(10));
+        assert!(m.is_terminal());
         for event in [
             SessionEvent::Confirm,
-            SessionEvent::Timeout,
-            SessionEvent::GapElapsed,
+            SessionEvent::TimerFired { id: 1 },
             SessionEvent::FinishNow,
             SessionEvent::Abort,
             SessionEvent::Focus { index: 0 },
-            SessionEvent::PlaybackFailed { index: 0 },
+            SessionEvent::PlaybackStopped { index: 0 },
+            ended(0),
         ] {
-            assert!(machine.apply(event.clone(), 20).is_empty(), "{event:?}");
+            assert!(m.apply(event.clone(), MonoMs(20)).is_empty(), "{event:?}");
         }
     }
 
     #[test]
-    fn ending_a_session_with_something_typed_but_unconfirmed_keeps_it() {
-        let mut machine = started(true, 10.0);
-        finished_play(&mut machine, 0);
-        let _ = machine.apply(
-            SessionEvent::Input {
-                index: 0,
-                text: " km ".into(),
-            },
-            1_100,
+    fn the_last_answer_finishes_the_session() {
+        let mut m = start_with(settings(1, true, 10.0), script(&["KM"], 1));
+        let _ = m.apply(ended(0), MonoMs(500));
+        let effects = m.apply(SessionEvent::Confirm, MonoMs(600));
+        assert_eq!(
+            effects,
+            vec![
+                SessionEffect::StopAudio,
+                SessionEffect::PersistAndShowResults
+            ]
         );
-        let effects = machine.apply(SessionEvent::FinishNow, 1_200);
-        assert_eq!(machine.phase(), SessionPhase::Finished);
-        assert!(effects.contains(&SessionEffect::PersistAndShowResults));
-        assert!(machine.session().confirmed_flags()[0]);
-        // Trimmed and upper-cased on the way in.
-        assert_eq!(machine.session().group(0).map(|g| g.input()), Some("KM"));
-    }
-
-    #[test]
-    fn ending_a_session_with_nothing_typed_goes_home() {
-        let mut machine = started(true, 10.0);
-        finished_play(&mut machine, 0);
-        let _ = machine.apply(
-            SessionEvent::Input {
-                index: 0,
-                text: "   ".into(),
-            },
-            1_100,
-        );
-        let effects = machine.apply(SessionEvent::FinishNow, 1_200);
-        assert_eq!(machine.phase(), SessionPhase::Aborted);
-        assert!(effects.contains(&SessionEffect::AbortToHome));
+        assert_eq!(m.phase(), SessionPhase::Finished);
     }
 
     #[test]
     fn the_focus_event_only_moves_onto_the_current_group() {
-        let mut machine = started(true, 10.0);
+        let mut m = machine();
         assert!(
-            machine
-                .apply(SessionEvent::Focus { index: 1 }, 10)
+            m.apply(SessionEvent::Focus { index: 1 }, MonoMs(10))
                 .is_empty()
         );
-        assert_eq!(machine.session().focused_group(), 0);
-        let _ = machine.apply(SessionEvent::Focus { index: 0 }, 10);
-        assert_eq!(machine.session().focused_group(), 0);
+        assert_eq!(m.session().focused_group(), 0);
+        let _ = m.apply(SessionEvent::Focus { index: 0 }, MonoMs(10));
+        assert_eq!(m.session().focused_group(), 0);
     }
 
     #[test]
     fn the_gap_after_a_silent_group_falls_back_to_the_settings_speed() {
         // A group whose playback never reported a speed leaves no measured WPM,
         // so the gap is computed from the settings instead.
-        let mut machine = started(true, 10.0);
-        let effects = machine.apply(
+        let mut m = machine();
+        let _ = m.apply(
             SessionEvent::PlaybackEnded {
                 index: 0,
                 duration_sec: 0.0,
                 char_wpm: 0.0,
                 effective_wpm: 0.0,
             },
-            10,
+            MonoMs(10),
         );
-        assert!(effects.contains(&SessionEffect::Focus { index: 0 }));
-        let effects = machine.apply(SessionEvent::Confirm, 20);
-        let Some(SessionEffect::Sleep { ms, .. }) = effects
-            .iter()
-            .find(|e| matches!(e, SessionEffect::Sleep { .. }))
-            .cloned()
-        else {
-            panic!("expected a gap sleep");
-        };
+        let effects = m.apply(SessionEvent::Confirm, MonoMs(20));
+        let playback = &m.session().settings().playback;
         assert_eq!(
-            ms,
-            crate::timing::compute_after_group_gap_ms(
-                machine.session().settings().playback.char_wpm_min,
-                machine.session().settings().playback.effective_wpm_min,
-                machine
-                    .session()
-                    .settings()
-                    .playback
-                    .extra_word_space_multiplier,
-                machine.session().settings().playback.group_pause_sec,
+            timer(&effects).1,
+            compute_after_group_gap_ms(
+                playback.char_wpm_min,
+                playback.effective_wpm_min,
+                playback.extra_word_space_multiplier,
+                playback.group_pause_sec,
             )
         );
     }
 
+    /// A send that stalls and catches up can report its end before its audio
+    /// could have finished. The answer is timed from where the audio ends.
     #[test]
-    fn a_zero_timeout_leaves_the_answer_window_open() {
-        let mut machine = started(true, 0.0);
-        let effects = finished_play(&mut machine, 0);
-        assert_eq!(effects, vec![SessionEffect::Focus { index: 0 }]);
-        assert!(!machine.sleep_is_current(1));
-    }
-
-    #[test]
-    fn the_session_can_be_edited_through_the_machine() {
-        let mut machine = started(true, 10.0);
-        machine.session_mut().set_group(1, "UR".into());
-        assert_eq!(machine.session().group(1).map(|g| g.sent()), Some("UR"));
-        assert_eq!(
-            machine.view().sent,
-            vec!["KM".to_string(), "UR".to_string()]
+    fn a_send_never_ends_before_its_audio_does() {
+        let mut m = start_with(settings(2, true, 10.0), script(&["KMURE"], 1));
+        let _ = m.apply(
+            SessionEvent::PlaybackEnded {
+                index: 0,
+                duration_sec: 2.0,
+                char_wpm: 20.0,
+                effective_wpm: 20.0,
+            },
+            MonoMs(500),
         );
+        let _ = m.apply(typed(0, "KMURE"), MonoMs(4_000));
+        let _ = m.apply(SessionEvent::Confirm, MonoMs(4_000));
+        let result = m.session().result(5_000, "2026-09-01".into());
+        assert_eq!(result.group_timings[0].time_to_complete_ms, 2_000.0);
     }
 }

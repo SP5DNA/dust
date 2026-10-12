@@ -7,15 +7,14 @@
 
 #![cfg(test)]
 
-use crate::machine::{SessionEffect, SessionEvent, SessionMachine, SessionPhase};
+use crate::machine::{SessionEffect, SessionEvent, SessionMachine};
 use crate::{
-    AutoLevelCounters, CALLSIGN_TIER_MAX, CALLSIGN_TIER_MIN, CharSetMode, CopyTally,
-    FILTER_WIDTH_MAX, FILTER_WIDTH_MIN, FastrandRng, LEVEL_MIN, PILEUP_LEVEL_MAX_DB,
-    PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN, Rng, STATIONS_MAX, STATIONS_MIN,
-    SessionId, TrainingSettings, Transmission, align_group, apply_auto_level, build_session_result,
-    compute_char_pool, create_initial_sampling_state, evaluate_auto_level, generate_training_group,
-    parse_callsign, plan_morse_playback, plan_transmission, resolve_group_repeats, resolve_pileup,
-    resolve_station,
+    AutoLevelCounters, CALLSIGN_TIER_MAX, CALLSIGN_TIER_MIN, CharSamplingState, CharSetMode,
+    CopyTally, FILTER_WIDTH_MAX, FILTER_WIDTH_MIN, FastrandRng, LEVEL_MIN, MonoMs,
+    PILEUP_LEVEL_MAX_DB, PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN, Rng,
+    STATIONS_MAX, STATIONS_MIN, Sampler, SessionId, SessionPhase, TrainingSettings, Transmission,
+    align_group, apply_auto_level, compute_char_pool, evaluate_auto_level, generate_training_group,
+    parse_callsign, plan_morse_playback, plan_transmission, resolve_pileup, resolve_station,
 };
 
 /// Enough seeds to be worth running on every commit, and cheap enough to.
@@ -184,8 +183,7 @@ fn any_settings_clamp_into_something_the_trainer_can_start_from() {
 
         // And the clamped settings really do produce a sendable group.
         let settings = settings.clamp();
-        let state = create_initial_sampling_state(&[]);
-        let (group, _) = generate_training_group(&settings, &state, &mut rng);
+        let group = generate_training_group(&settings, &mut CharSamplingState::default(), &mut rng);
         assert!(
             !group.is_empty(),
             "an empty group is never sendable (seed {seed})"
@@ -255,7 +253,7 @@ fn any_settings_clamp_into_something_the_trainer_can_start_from() {
 
 /// One of everything the runtime can send, including events for the wrong
 /// group and timers that are already stale.
-fn random_event(rng: &mut FastrandRng, machine: &SessionMachine, groups: usize) -> SessionEvent {
+fn random_event(rng: &mut FastrandRng, groups: usize, timers: &[u64]) -> SessionEvent {
     let index = rng.usize_in(0, groups.saturating_sub(1).max(1));
     // Whatever a keyboard or a paste can produce, not just tidy call signs.
     const KEYS: [char; 12] = [
@@ -264,30 +262,28 @@ fn random_event(rng: &mut FastrandRng, machine: &SessionMachine, groups: usize) 
     let text: String = (0..rng.usize_in(0, 12))
         .map(|_| KEYS[rng.usize_in(0, KEYS.len() - 1)])
         .collect();
-    match rng.usize_in(0, 10) {
+    match rng.usize_in(0, 8) {
         0 => SessionEvent::PlaybackEnded {
             index,
             duration_sec: rng.pick_in_range(0.0, 5.0),
             char_wpm: rng.pick_in_range(1.0, 60.0),
             effective_wpm: rng.pick_in_range(1.0, 60.0),
         },
-        1 => SessionEvent::PlaybackCancelled { index },
-        2 => SessionEvent::PlaybackFailed { index },
-        3 => SessionEvent::Input { index, text },
-        4 => SessionEvent::Confirm,
-        5 => SessionEvent::Timeout,
-        6 => SessionEvent::GapElapsed,
-        7 => SessionEvent::Focus { index },
-        8 => SessionEvent::AutoConfirmDue {
-            id: rng.usize_in(0, 40) as u64,
-            index,
-            value: machine
-                .session()
-                .group(index)
-                .map(|g| g.input().to_string())
-                .unwrap_or_default(),
+        1 => SessionEvent::PlaybackStopped { index },
+        2 => SessionEvent::Input { index, text },
+        3 => SessionEvent::Confirm,
+        // A timer the machine started, or one it never did.
+        4 => SessionEvent::TimerFired {
+            id: timers
+                .get(rng.usize_in(0, timers.len()))
+                .copied()
+                .unwrap_or(rng.usize_in(0, 40) as u64),
         },
-        9 => SessionEvent::FinishNow,
+        5 => SessionEvent::Focus { index },
+        6 => SessionEvent::FinishNow,
+        7 => SessionEvent::TimerFired {
+            id: timers.last().copied().unwrap_or(0),
+        },
         _ => SessionEvent::Abort,
     }
 }
@@ -297,36 +293,26 @@ fn no_run_of_events_can_put_a_session_somewhere_impossible() {
     for seed in 0..SEEDS {
         let mut rng = FastrandRng(seed.wrapping_mul(0x2545_F491).wrapping_add(7));
         let settings = wild_settings(&mut rng).clamp();
-        let state = create_initial_sampling_state(&[]);
-        let (first, _) = generate_training_group(&settings, &state, &mut rng);
-        let repeats = resolve_group_repeats(&settings, &mut rng);
         let groups = settings.curriculum.num_groups.max(1) as usize;
+        let sampler = Sampler::new(&[], &settings, seed);
         let (mut machine, mut effects) =
-            SessionMachine::start(SessionId::new(seed), 0, settings.clone(), first, repeats);
+            SessionMachine::start(SessionId::new(seed), MonoMs(0), settings.clone(), sampler);
 
         let mut now = 0u64;
+        let mut timers: Vec<u64> = Vec::new();
         for step in 0..200 {
-            check_effects(&effects, &machine, groups, seed, step);
-            // Fill in any group the machine asked for, the way the runtime does.
-            let wanted: Vec<usize> = effects
-                .iter()
-                .filter_map(|effect| match effect {
-                    SessionEffect::NeedGroup { index } => Some(*index),
-                    _ => None,
-                })
-                .collect();
-            for index in wanted {
-                let (text, _) = generate_training_group(&settings, &state, &mut rng);
-                let repeats = resolve_group_repeats(&settings, &mut rng);
-                machine.set_group_text(index, text, repeats);
-            }
+            check_effects(&effects, groups, seed, step);
+            timers.extend(effects.iter().filter_map(|effect| match effect {
+                SessionEffect::StartTimer { id, .. } => Some(*id),
+                _ => None,
+            }));
             now += rng.usize_in(0, 4_000) as u64;
             // A session that has already finished or aborted is done: whatever
             // arrives late — a send that was in flight, a timer, a keystroke —
             // must be dropped, not turned into more work.
             let was_terminal = machine.is_terminal();
-            let event = random_event(&mut rng, &machine, groups);
-            effects = machine.apply(event.clone(), now);
+            let event = random_event(&mut rng, groups, &timers);
+            effects = machine.apply(event.clone(), MonoMs(now));
             if was_terminal {
                 assert!(
                     effects.is_empty(),
@@ -334,7 +320,7 @@ fn no_run_of_events_can_put_a_session_somewhere_impossible() {
                 );
             }
 
-            let view = machine.view();
+            let view = machine.session().view();
             assert!(
                 view.repeat_done <= view.repeat_total,
                 "seed {seed} step {step}: {view:?} after {event:?}"
@@ -350,14 +336,21 @@ fn no_run_of_events_can_put_a_session_somewhere_impossible() {
             }
             if let SessionPhase::InterGroupGap { next } = machine.phase() {
                 assert!(
-                    next <= groups,
+                    next < groups,
                     "seed {seed} step {step}: gap points past the end"
+                );
+                assert!(
+                    machine
+                        .session()
+                        .group(next)
+                        .is_some_and(|g| !g.sent().is_empty()),
+                    "seed {seed} step {step}: waiting on a group that has nothing to send"
                 );
             }
         }
 
         // Whatever happened, the session can still be scored and stored.
-        let result = build_session_result(machine.session(), &settings, now, "2026-01-01".into());
+        let result = machine.session().result(now, "2026-01-01".into());
         assert!(
             (0.0..=1.0).contains(&result.accuracy),
             "seed {seed}: accuracy {} is not a fraction",
@@ -368,17 +361,18 @@ fn no_run_of_events_can_put_a_session_somewhere_impossible() {
             "seed {seed}"
         );
         assert!(result.groups.len() <= groups, "seed {seed}");
+        assert!(
+            result
+                .group_timings
+                .iter()
+                .all(|t| t.time_to_complete_ms >= crate::MIN_RESPONSE_MS_PER_CHAR),
+            "seed {seed}: an answer quicker than anyone types"
+        );
     }
 }
 
 /// Every effect a machine hands back has to be one the runtime can act on.
-fn check_effects(
-    effects: &[SessionEffect],
-    machine: &SessionMachine,
-    groups: usize,
-    seed: u64,
-    step: usize,
-) {
+fn check_effects(effects: &[SessionEffect], groups: usize, seed: u64, step: usize) {
     for effect in effects {
         match effect {
             SessionEffect::Play { index, text } => {
@@ -388,28 +382,8 @@ fn check_effects(
                 );
                 assert!(!text.is_empty(), "seed {seed} step {step}: an empty send");
             }
-            SessionEffect::NeedGroup { index } | SessionEffect::Focus { index } => {
-                assert!(
-                    *index < groups,
-                    "seed {seed} step {step}: {effect:?} past the end"
-                );
-            }
-            SessionEffect::Sleep { id, ms } => {
-                assert!(*ms > 0, "seed {seed} step {step}: a zero-length sleep");
-                assert!(
-                    machine.sleep_is_current(*id),
-                    "seed {seed} step {step}: a sleep nobody is waiting for"
-                );
-            }
-            SessionEffect::AutoConfirm { index, ms, .. } => {
-                assert!(
-                    *index < groups,
-                    "seed {seed} step {step}: auto-confirm past the end"
-                );
-                assert!(
-                    *ms > 0,
-                    "seed {seed} step {step}: a zero-length auto-confirm"
-                );
+            SessionEffect::StartTimer { ms, .. } => {
+                assert!(*ms > 0, "seed {seed} step {step}: a zero-length timer");
             }
             SessionEffect::StopAudio
             | SessionEffect::PersistAndShowResults
@@ -418,8 +392,6 @@ fn check_effects(
     }
 }
 
-/// Scoring has to survive whatever a listener types, including nothing at all
-/// and things no Morse alphabet contains.
 #[test]
 fn scoring_holds_for_anything_a_listener_can_type() {
     const KEYS: [char; 14] = [
@@ -592,9 +564,9 @@ fn every_callsign_the_trainer_can_send_is_a_real_one() {
             rng.usize_in(CALLSIGN_TIER_MIN as usize, CALLSIGN_TIER_MAX as usize) as u32;
         let tier = settings.curriculum.callsign_level;
         let pool = compute_char_pool(&settings);
-        let state = create_initial_sampling_state(&[]);
+        let mut next = CharSamplingState::default();
 
-        let (call, next) = generate_training_group(&settings, &state, &mut rng);
+        let call = generate_training_group(&settings, &mut next, &mut rng);
         assert!(
             parse_callsign(&call).is_some(),
             "seed {seed} tier {tier}: {call:?} is not a callsign"
@@ -679,11 +651,11 @@ fn a_pile_up_is_always_something_you_could_copy() {
     for seed in 0..SEEDS / 4 {
         let mut rng = FastrandRng(seed.wrapping_mul(0x85EB_CA6B).wrapping_add(29));
         let settings = wild_settings(&mut rng).clamp();
-        let state = create_initial_sampling_state(&[]);
-        let (wanted_text, _) = generate_training_group(&settings, &state, &mut rng);
+        let mut state = CharSamplingState::default();
+        let wanted_text = generate_training_group(&settings, &mut state, &mut rng);
         let voice = resolve_station(&settings, &mut rng);
         let texts: Vec<String> = (0..settings.band.stations_max)
-            .map(|_| generate_training_group(&settings, &state, &mut rng).0)
+            .map(|_| generate_training_group(&settings, &mut state, &mut rng))
             .collect();
         let others = resolve_pileup(&settings, &voice, &wanted_text, &texts, &mut rng);
 
