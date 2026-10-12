@@ -18,7 +18,9 @@ use dioxus::core::{ElementId, NoOpMutations};
 use dioxus::prelude::*;
 
 use crate::audio::fake::{Behaviour, Call, Recorder};
-use crate::session_runtime::{boot_machine_session, send_command, spawn_effects};
+use crate::playback::Preview;
+use crate::player::Lease;
+use crate::session_runtime::{send_event, start_session};
 use crate::state::{AppState, Screen, SessionSignals};
 use crate::time::POLL_MS;
 use crate::ui::widgets::DISCLOSURE;
@@ -41,6 +43,7 @@ pub struct Harness {
     pub result: Signal<Option<SessionResult>>,
     pub auto_message: Signal<Option<String>>,
     pub toast: Signal<Option<String>>,
+    pub preview: Signal<Preview>,
 }
 
 /// Hands a session the groups it is given, in order.
@@ -123,8 +126,8 @@ impl Harness {
         let dom = VirtualDom::new(|| rsx! {});
         let recorder = Recorder::new();
         let app = AppState::with_backend(recorder.factory());
-        let (settings, sessions, screen, runtime, result, auto_message, toast) =
-            dom.in_scope(ScopeId::ROOT, || {
+        let (settings, sessions, screen, runtime, result, auto_message, toast, preview) = dom
+            .in_scope(ScopeId::ROOT, || {
                 (
                     Signal::new(settings),
                     Signal::new(Vec::new()),
@@ -133,6 +136,7 @@ impl Harness {
                     Signal::new(None),
                     Signal::new(None),
                     Signal::new(None),
+                    Signal::new(Preview::Idle),
                 )
             });
         Self {
@@ -146,6 +150,7 @@ impl Harness {
             result,
             auto_message,
             toast,
+            preview,
         }
     }
 
@@ -159,6 +164,7 @@ impl Harness {
             sessions: self.sessions,
             settings: self.settings,
             toast: self.toast,
+            preview: self.preview,
         }
     }
 
@@ -184,25 +190,28 @@ impl Harness {
         }
     }
 
-    /// Start a session the way the Practice screen's button does.
+    /// Start a session the way the Practice screen's button does: through
+    /// the same call.
     pub fn start_training(&mut self) {
-        let settings_now = self.settings.peek().clone().clamp();
-        let history = self.sessions.peek().clone();
         let (app, signals) = (self.app.clone(), self.signals());
-        let generation = self
-            .in_app(|| app.takeover_audio(&settings_now))
-            .expect("the fake player always opens");
-        let effects = self
-            .in_app(|| boot_machine_session(settings_now, &history, &app, generation, signals))
-            .expect("a fresh session always boots");
-        self.in_app(|| spawn_effects(effects, app.clone(), generation, signals));
+        self.in_app(|| start_session(&app, signals));
         self.pump();
+    }
+
+    /// The running session's hold on the audio.
+    pub fn lease(&self) -> Lease {
+        self.app
+            .session
+            .borrow()
+            .as_ref()
+            .map(|live| live.lease().clone())
+            .expect("a session is running")
     }
 
     /// Send one event the way a component callback does.
     pub fn send(&mut self, event: SessionEvent) {
         let (app, signals) = (self.app.clone(), self.signals());
-        self.in_app(|| send_command(app, signals, event));
+        self.in_app(|| send_event(&app, signals, event));
         self.pump();
     }
 
@@ -223,11 +232,7 @@ impl Harness {
     }
 
     pub fn phase(&self) -> Option<cw_core::SessionPhase> {
-        self.app
-            .session
-            .borrow()
-            .as_ref()
-            .map(|live| live.machine().phase())
+        self.runtime.peek().as_ref().map(|session| session.phase())
     }
 
     pub fn screen(&self) -> Screen {

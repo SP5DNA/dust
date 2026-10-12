@@ -17,6 +17,7 @@ mod app;
 mod audio;
 mod persist;
 mod playback;
+mod player;
 mod routes;
 mod session_runtime;
 mod state;

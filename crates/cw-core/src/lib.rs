@@ -70,5 +70,5 @@ pub use streak::{StreakState, StreakStatus, compute_streak_status};
 pub use timing::{
     EnvelopePoint, EnvelopeShape, Interferer, PlannedTransmission, PlaybackPlan, StationVoice,
     ToneEvent, Transmission, compute_after_group_gap_ms, envelope_shape, plan_morse_playback_for,
-    plan_transmission, resolve_pileup, resolve_station,
+    plan_transmission, resolve_station,
 };

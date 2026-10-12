@@ -4,7 +4,7 @@ use cw_core::{Paddle, SessionEvent, compute_char_pool, dit_ms_for_wpm};
 use dioxus::prelude::*;
 
 use crate::persist::current_auto_progress;
-use crate::session_runtime::send_command;
+use crate::session_runtime::send_event;
 use crate::state::{AppState, Screen, SessionSignals};
 use crate::time::local_date_string;
 use crate::ui::home::Home;
@@ -55,6 +55,7 @@ pub fn app_routes(
         sessions,
         settings,
         toast: _,
+        preview: _,
     } = signals;
     let ViewState {
         previewing,
@@ -166,19 +167,19 @@ pub fn app_routes(
                                 app_tone.set_live_tone(on, &tone_settings);
                             },
                             on_change: move |(idx, value): (usize, String)| {
-                                send_command((*app_change).clone(), signals, SessionEvent::Input { index: idx, text: value });
+                                send_event(&app_change, signals, SessionEvent::Input { index: idx, text: value });
                             },
                             on_confirm: move |_idx| {
-                                send_command((*app_confirm).clone(), signals, SessionEvent::Confirm);
+                                send_event(&app_confirm, signals, SessionEvent::Confirm);
                             },
                             on_focus: move |idx| {
-                                send_command((*app_focus).clone(), signals, SessionEvent::Focus { index: idx });
+                                send_event(&app_focus, signals, SessionEvent::Focus { index: idx });
                             },
                             on_submit: move |_| {
-                                send_command((*app_submit).clone(), signals, SessionEvent::FinishNow);
+                                send_event(&app_submit, signals, SessionEvent::FinishNow);
                             },
                             on_stop: move |_| {
-                                send_command((*app_stop).clone(), signals, SessionEvent::Abort);
+                                send_event(&app_stop, signals, SessionEvent::Abort);
                             },
                         }
                     }
@@ -222,6 +223,7 @@ mod tests {
             sessions: use_signal(Vec::new),
             settings: use_signal(test_settings),
             toast: use_signal(|| None),
+            preview: use_signal(Default::default),
         };
         let app = use_hook(|| Rc::new(AppState::new()));
         let noop = EventHandler::new(move |_| {});

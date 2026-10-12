@@ -11,13 +11,14 @@ use crate::callsign::{CALLSIGN_TIER_MIN, parse_callsign};
 use crate::level::LEVEL_MIN;
 use crate::machine::{SessionEffect, SessionEvent, SessionMachine};
 use crate::session::MIN_RESPONSE_MS_PER_CHAR;
+use crate::timing::resolve_pileup;
 use crate::{
     AutoLevelCounters, CALLSIGN_TIER_MAX, CharSamplingState, CharSetMode, CopyTally,
     FILTER_WIDTH_MAX, FILTER_WIDTH_MIN, FastrandRng, MonoMs, PILEUP_LEVEL_MAX_DB,
     PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN, Rng, STATIONS_MAX, STATIONS_MIN,
     Sampler, SessionId, SessionPhase, TrainingSettings, Transmission, align_group,
     apply_auto_level, compute_char_pool, evaluate_auto_level, generate_training_group,
-    plan_morse_playback_for, plan_transmission, resolve_pileup, resolve_station,
+    plan_morse_playback_for, plan_transmission, resolve_station,
 };
 
 /// Enough seeds to be worth running on every commit, and cheap enough to.

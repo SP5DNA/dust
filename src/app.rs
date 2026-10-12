@@ -1,15 +1,15 @@
 use std::rc::Rc;
 
-use cw_core::{GroupSession, SessionEvent};
+use cw_core::{GroupSession, Sampler, SessionEvent};
 use dioxus::prelude::*;
 
 use crate::persist::{load_sessions, load_settings, load_theme, save_settings, save_theme};
-use crate::playback::{loop_preview_text, loop_stream_groups, play_chars, play_sample_text};
+use crate::playback::{self, Preview, start_preview};
 use crate::routes::{AppCallbacks, ViewState, app_routes};
-use crate::session_runtime::{boot_machine_session, send_command, spawn_effects};
+use crate::session_runtime::{send_event, session_running, start_session};
 use crate::state::{AppState, Screen, SessionSignals};
 use crate::theme::Theme;
-use crate::time::sleep_ms;
+use crate::time::{seed_rng, sleep_ms};
 use crate::ui::paddle::use_paddle_keys;
 use crate::ui::widgets::{Icon, control_id};
 
@@ -18,56 +18,6 @@ use crate::ui::widgets::{Icon, control_id};
 // twice. Mobile has neither, so it injects this string from AppHead.
 #[cfg(not(feature = "web"))]
 pub(crate) const STYLESHEET: &str = include_str!("../assets/styles.css");
-
-/// What the app is playing when no session is running.
-///
-/// These are the four things that can be true of the audio outside training,
-/// and exactly one of them is: the band preview, the letter player and an
-/// envelope sample all want the same hardware, so a second one starting means
-/// the first has stopped.
-///
-/// They used to be three signals — a `bool`, a `bool` and an `Option<String>`
-/// — which said none of that. "Nothing is playing" was three writes in a row,
-/// spelled out eight times across the callbacks and already not spelled the
-/// same way twice; "two previews at once" was a state the types allowed and
-/// only care kept from happening. One value cannot be in two of these at once,
-/// so neither can the app.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub enum Preview {
-    /// Nothing is playing, or a session has the audio.
-    #[default]
-    Idle,
-    /// The band-conditions preview, looping until stopped.
-    Band,
-    /// The Listen screen playing a character or the whole pool.
-    Letters,
-    /// Groups looping with no answers and no score — copy while you do something else.
-    Stream,
-    /// One short envelope sample, named so the chip that sent it can show it.
-    Sample(String),
-}
-
-impl Preview {
-    pub fn is_band(&self) -> bool {
-        matches!(self, Self::Band)
-    }
-
-    pub fn is_letters(&self) -> bool {
-        matches!(self, Self::Letters)
-    }
-
-    pub fn is_stream(&self) -> bool {
-        matches!(self, Self::Stream)
-    }
-
-    /// The sample now sounding, for the chip that is waiting to light up.
-    pub fn sample(&self) -> Option<String> {
-        match self {
-            Self::Sample(text) => Some(text.clone()),
-            _ => None,
-        }
-    }
-}
 
 // The web stylesheet, written into the page's `<head>` by `dx bundle`.
 //
@@ -142,10 +92,10 @@ pub fn App() -> Element {
     let mut settings = use_signal(load_settings);
     let sessions = use_signal(load_sessions);
     let mut screen = use_signal(|| Screen::Home);
-    let mut runtime = use_signal(|| None::<GroupSession>);
+    let runtime = use_signal(|| None::<GroupSession>);
     let result = use_signal(|| None::<cw_core::SessionResult>);
     let auto_message = use_signal(|| None::<String>);
-    let mut toast = use_signal(|| None::<String>);
+    let toast = use_signal(|| None::<String>);
     let mut preview = use_signal(Preview::default);
     let mut stream_heard = use_signal(Vec::<String>::new);
     let mut theme = use_signal(|| Theme::from_key(&load_theme()));
@@ -162,6 +112,7 @@ pub fn App() -> Element {
         sessions,
         settings,
         toast,
+        preview,
     };
 
     use_effect(move || {
@@ -197,113 +148,45 @@ pub fn App() -> Element {
         }
     });
 
-    let go_home = use_callback({
+    // Leaving for another screen is the same move wherever you are going:
+    // a session in progress holds you, and otherwise whatever was sounding
+    // stops before the screen changes.
+    let go_to = use_callback({
         let app = app.clone();
-        move |(): ()| {
-            app.bump_session();
-            app.silence_audio();
+        move |to: Screen| {
+            if session_running(signals) {
+                return;
+            }
+            app.player.release();
             preview.set(Preview::Idle);
             stream_heard.set(Vec::new());
-            runtime.set(None);
-            screen.set(Screen::Home);
+            screen.set(to);
         }
     });
-
-    // Claiming the audio is the same move for everything that is not a
-    // session: hold if one is running, settle the settings, take the device
-    // over. It hands back the generation the caller has to stamp its work
-    // with, so a send that outlives its epoch can tell and stand down.
-    // Spelling it out at each call site was three chances to drop the guard,
-    // the clamp or the toast.
-    let claim_audio = use_callback({
-        let app = app.clone();
-        move |(): ()| -> Option<(u64, cw_core::TrainingSettings)> {
-            if session_running(screen, runtime) {
-                return None;
-            }
-            let settings_now = settings().clamp();
-            match app.takeover_audio(&settings_now) {
-                Ok(generation) => Some((generation, settings_now)),
-                Err(err) => {
-                    toast.set(Some(err));
-                    None
-                }
-            }
-        }
-    });
+    let go_home = use_callback(move |()| go_to.call(Screen::Home));
 
     let start_training = use_callback({
         let app = app.clone();
-        move |(): ()| {
-            // Held before anything is written, not just before the audio is
-            // taken: a session already running must leave the stored settings
-            // exactly as they are.
-            if session_running(screen, runtime) {
-                return;
-            }
-            // Starting a session first settles the alphabet, and stores the
-            // result, so the session and the screen agree on what is being
-            // practised before anything sounds.
-            let fitted = settings().clamp();
-            if settings.peek().clone() != fitted {
-                settings.set(fitted);
-            }
-            preview.set(Preview::Idle);
-            let Some((generation, settings_now)) = claim_audio.call(()) else {
-                return;
-            };
-            let history = sessions();
-            let Some(effects) =
-                boot_machine_session(settings_now, &history, &app, generation, signals)
-            else {
-                return;
-            };
-            spawn_effects(effects, (*app).clone(), generation, signals);
-        }
+        move |()| start_session(&app, signals)
     });
 
     let start_listen = use_callback({
         let app = app.clone();
         move |chars: String| {
-            let Some((generation, settings_now)) = claim_audio.call(()) else {
-                return;
-            };
-            preview.set(Preview::Letters);
-            let app_loop = (*app).clone();
-            spawn(async move {
-                play_chars(
-                    app_loop.clone(),
-                    generation,
-                    settings_now,
-                    chars,
-                    420,
-                    toast,
-                )
-                .await;
-                if app_loop.session_gen.get() == generation {
-                    preview.set(Preview::Idle);
-                    app_loop.silence_audio();
-                }
+            start_preview(&app.player, signals, Preview::Letters, |lease, settings| {
+                playback::play_chars(lease, settings, chars, 420)
             });
         }
     });
 
     let start_stream = use_callback({
         let app = app.clone();
-        move |(): ()| {
-            let Some((generation, _settings_now)) = claim_audio.call(()) else {
-                return;
-            };
-            stream_heard.set(Vec::new());
-            preview.set(Preview::Stream);
-            let app_loop = (*app).clone();
-            spawn(async move {
-                loop_stream_groups(app_loop.clone(), generation, settings, stream_heard, toast)
-                    .await;
-                if app_loop.session_gen.get() == generation {
-                    preview.set(Preview::Idle);
-                    app_loop.silence_audio();
-                }
+        move |()| {
+            start_preview(&app.player, signals, Preview::Stream, |lease, first| {
+                stream_heard.set(Vec::new());
+                // Leaning on the same weak characters a session would.
+                let sampler = Sampler::new(&sessions.peek(), &first, seed_rng());
+                playback::loop_stream(lease, settings, sampler, stream_heard)
             });
         }
     });
@@ -312,46 +195,31 @@ pub fn App() -> Element {
     let play_sample = use_callback({
         let app = app.clone();
         move |text: String| {
-            let Some((generation, settings_now)) = claim_audio.call(()) else {
-                return;
-            };
-            preview.set(Preview::Sample(text.clone()));
-            let app_loop = (*app).clone();
-            spawn(async move {
-                play_sample_text(app_loop.clone(), generation, settings_now, text, toast).await;
-                if app_loop.session_gen.get() == generation {
-                    preview.set(Preview::Idle);
-                    app_loop.silence_audio();
-                }
-            });
+            start_preview(
+                &app.player,
+                signals,
+                Preview::Sample(text.clone()),
+                |lease, settings| playback::play_sample(lease, settings, text),
+            );
         }
     });
 
     let start_band_preview = use_callback({
         let app = app.clone();
-        move |(): ()| {
-            let Some((generation, _settings_now)) = claim_audio.call(()) else {
-                return;
-            };
-            preview.set(Preview::Band);
-            let app_loop = (*app).clone();
-            spawn(async move {
-                loop_preview_text(app_loop.clone(), generation, settings, "CQ", 280, toast).await;
-                if app_loop.session_gen.get() == generation {
-                    preview.set(Preview::Idle);
-                }
+        move |()| {
+            start_preview(&app.player, signals, Preview::Band, |lease, _| {
+                playback::loop_band_preview(lease, settings, "CQ", 280)
             });
         }
     });
 
     let stop_preview = use_callback({
         let app = app.clone();
-        move |(): ()| {
-            if session_running(screen, runtime) {
+        move |()| {
+            if session_running(signals) {
                 return;
             }
-            app.bump_session();
-            app.silence_audio();
+            app.player.release();
             preview.set(Preview::Idle);
         }
     });
@@ -363,40 +231,15 @@ pub fn App() -> Element {
                 return;
             }
             let settings_now = settings().clamp();
-            app.apply_band_live(&settings_now);
+            app.player.follow_band(&settings_now);
         }
     });
 
-    // Leaving for another screen is the same move wherever you are going:
-    // a session in progress holds you, and otherwise whatever was sounding
-    // stops before the screen changes. Three copies of it was three chances
-    // to forget a line.
-    let go_to = use_callback({
-        let app = app.clone();
-        move |to: Screen| {
-            if session_running(screen, runtime) {
-                return;
-            }
-            app.bump_session();
-            app.silence_audio();
-            preview.set(Preview::Idle);
-            stream_heard.set(Vec::new());
-            screen.set(to);
-        }
-    });
+    // Exit is End session from the header: the session decides what is
+    // worth keeping, the same way whichever button asked.
     let exit_training = use_callback({
         let app = app.clone();
-        move |(): ()| {
-            let event = match runtime.peek().as_ref() {
-                Some(session) if session.any_confirmed() => SessionEvent::FinishNow,
-                Some(_) => SessionEvent::Abort,
-                None => {
-                    go_home.call(());
-                    return;
-                }
-            };
-            send_command((*app).clone(), signals, event);
-        }
+        move |()| send_event(&app, signals, SessionEvent::FinishNow)
     });
     let show_nav = !matches!(screen(), Screen::Training);
     let shell_class = if show_nav { "shell has-nav" } else { "shell" };
@@ -520,10 +363,6 @@ fn screen_key(screen: Screen) -> &'static str {
         Screen::Stats => "stats",
         Screen::Listen => "listen",
     }
-}
-
-fn session_running(screen: Signal<Screen>, runtime: Signal<Option<GroupSession>>) -> bool {
-    matches!(screen(), Screen::Training) || runtime.peek().is_some()
 }
 
 fn toggle_fullscreen() {
@@ -771,6 +610,29 @@ mod ui_tests {
             assert!(ui.run_until(2_000, |ui| ui.screen() == "results").await);
             assert_eq!(crate::persist::load_sessions().len(), 1);
             assert!(ui.has("Group by group"));
+        });
+    }
+
+    /// Exit and End session leave a session the same way. Exit used to
+    /// decide for itself, from whether anything was confirmed yet, and threw
+    /// away an answer End session would have kept.
+    #[test]
+    fn exit_keeps_a_typed_answer_just_as_end_session_does() {
+        run(|| async {
+            for button in ["btn-exit", "btn-end-session"] {
+                let mut settings = test_settings();
+                settings.curriculum.num_groups = 3;
+                let (mut ui, recorder) = awaiting_answer(settings).await;
+                let sent = recorder.texts().first().cloned().expect("a group was sent");
+                ui.type_into("group-input-0", &sent[..1]);
+                ui.advance(200).await;
+                ui.click(button);
+                assert!(
+                    ui.run_until(2_000, |ui| ui.screen() == "results").await,
+                    "{button} threw the answer away"
+                );
+                assert_eq!(crate::persist::load_sessions().len(), 1, "{button}");
+            }
         });
     }
 
@@ -1251,6 +1113,62 @@ mod ui_tests {
             recorder.set(crate::audio::fake::Behaviour::RefuseToStart);
             assert!(ui.run_until(30_000, |ui| ui.has("class=\"toast\"")).await);
             assert!(ui.run_until(5_000, |ui| ui.has("Live preview")).await);
+        });
+    }
+
+    /// A band preview that gives up on a failing device has to take the
+    /// receiver down with it. Its retries rebuild the player, which brings
+    /// the band back up on the new one; stopping only the loop left that
+    /// hissing with the Stop button already gone.
+    #[test]
+    fn a_preview_that_gives_up_silences_the_receiver() {
+        run(|| async {
+            let (mut ui, recorder) = Ui::app_with_settings(with_receiver());
+            ui.click("nav-settings");
+            ui.click("btn-band-preview");
+            assert!(ui.run_until(20_000, |_| !recorder.texts().is_empty()).await);
+            recorder.set(crate::audio::fake::Behaviour::RefuseToStart);
+            assert!(ui.run_until(30_000, |ui| ui.has("class=\"toast\"")).await);
+            assert!(ui.run_until(5_000, |ui| ui.has("Live preview")).await);
+            assert!(
+                !recorder.band_running.get(),
+                "the receiver was left running with nothing to stop it"
+            );
+        });
+    }
+
+    /// Taking the audio stops whatever had it, whether or not the new owner
+    /// then gets a player. A claim that failed used to leave the screen
+    /// showing a band preview whose loop it had already stopped.
+    #[test]
+    fn a_claim_that_fails_leaves_no_preview_showing() {
+        run(|| async {
+            let (mut ui, recorder) = Ui::app_with_settings(test_settings());
+            ui.click("nav-settings");
+            ui.click("btn-band-preview");
+            assert!(ui.run_until(20_000, |_| !recorder.texts().is_empty()).await);
+
+            // The device goes away mid-send, and with it any new player.
+            recorder.build_error.set(true);
+            recorder.fail_next(1);
+            let mut waited = 0;
+            while !recorder
+                .calls()
+                .contains(&crate::audio::fake::Call::Shutdown)
+            {
+                assert!(waited < 5_000, "the send was never retried");
+                ui.advance(4).await;
+                waited += 4;
+            }
+            // The retry has no player left; a sample asks for the audio now.
+            ui.click("chip-dit");
+            ui.advance(50).await;
+            assert!(ui.has("No audio output device found"));
+            assert!(
+                ui.has("Live preview"),
+                "the band preview still shows as running: {}",
+                ui.html()
+            );
         });
     }
 
