@@ -82,6 +82,13 @@ Console create the app, let Google generate the app signing key, and upload that
 AAB. Back up `~/.android/dust-play-upload.jks` and the env file beside it. The
 public upload certificate is `dist/dust-upload-certificate.pem`.
 
+The store listing privacy-policy URL is
+[https://mashu.github.io/dust/privacy/](https://mashu.github.io/dust/privacy/).
+That page is [`docs/privacy.html`](privacy.html), copied into the Pages site
+on every deploy. Settings in the app links to the same URL. The page has to
+be live on `main` before Play review: a listing that points at it before the
+Pages workflow has published it will fail the check.
+
 ## iOS
 
 Same story as Android — `mobile` is the wry/tao webview stack and cpal reaches

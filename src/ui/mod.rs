@@ -7,6 +7,7 @@ pub mod heatmap;
 pub mod home;
 pub mod listen;
 pub mod paddle;
+pub mod privacy;
 pub mod results;
 pub mod settings;
 pub mod settings_charset;

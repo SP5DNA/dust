@@ -499,6 +499,8 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value {
 .card-icon .icon { width: 1.05rem; height: 1.05rem; }
 .card-title { margin: 0; font-size: 0.98rem; font-weight: 700; letter-spacing: -0.01em; }
 .card-note { margin: 0.1rem 0 0; font-size: 0.78rem; color: var(--ink-dim); }
+.legal .muted { margin: 0; }
+.privacy-link { color: var(--copper-deep); font-weight: 600; }
 .card-tools { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; }
 
 /* KPI tiles */

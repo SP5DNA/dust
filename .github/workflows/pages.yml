@@ -94,12 +94,15 @@ jobs:
           mkdir -p site
           cp -a "$src"/. site/
           cp site/index.html site/404.html
+          mkdir -p site/privacy
+          cp docs/privacy.html site/privacy/index.html
           touch site/.nojekyll
           if ! find site -name '*.css' | grep -q .; then
             echo "Bundled site has no stylesheet"
             find site -maxdepth 3 -type f
             exit 1
           fi
+          test -f site/privacy/index.html
           ls -lh site site/assets
 
       - name: Upload Pages artifact
