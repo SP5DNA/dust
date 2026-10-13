@@ -1016,6 +1016,91 @@ mod ui_tests {
         });
     }
 
+    /// Every band the player has been asked to bring up, oldest first.
+    fn bands(recorder: &crate::audio::fake::Recorder) -> Vec<cw_core::band::BandKey> {
+        recorder
+            .calls()
+            .into_iter()
+            .filter_map(|call| match call {
+                crate::audio::fake::Call::Band(key) => Some(key),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Start the band preview on the settings screen, and wait for its first
+    /// call. The call takes most of a second, so for a while after this only
+    /// a follow brings the band up.
+    async fn previewing_the_band() -> (Ui, std::rc::Rc<crate::audio::fake::Recorder>) {
+        let (mut ui, recorder) = Ui::app_with_settings(with_receiver());
+        ui.click("nav-settings");
+        ui.click("btn-band-preview");
+        assert!(ui.run_until(20_000, |_| !recorder.texts().is_empty()).await);
+        (ui, recorder)
+    }
+
+    /// A follow measures the band's AGC before it takes the settings, so a
+    /// stop can land in between. The band must not come back up behind it.
+    #[test]
+    fn a_preview_stopped_while_its_band_follows_stays_silent() {
+        run(|| async {
+            let (mut ui, recorder) = previewing_the_band().await;
+            let before = bands(&recorder).len();
+            ui.type_into("slider-filter-width", "400");
+            // The step that wakes the follow is the last one: it measures
+            // the knee then, and lets the page have its turn before it takes
+            // the settings, which is where this leaves it.
+            ui.advance(u64::from(crate::routes::BAND_FOLLOW_MS)).await;
+            assert_eq!(
+                bands(&recorder).len(),
+                before,
+                "the follow should still be measuring"
+            );
+
+            ui.click("btn-band-stop");
+            ui.advance(200).await;
+            assert_eq!(
+                bands(&recorder).len(),
+                before,
+                "the band followed a stopped preview"
+            );
+            assert!(
+                !recorder.band_running.get(),
+                "the stopped preview's receiver came back"
+            );
+        });
+    }
+
+    /// A move made while a follow measures the band's AGC joins the settings
+    /// that follow is about to take: it is neither left behind nor sent
+    /// after them in a second rebuild, and the band ends where the slider
+    /// was left.
+    #[test]
+    fn a_move_made_while_the_band_follows_still_lands() {
+        run(|| async {
+            let (mut ui, recorder) = previewing_the_band().await;
+            let before = bands(&recorder).len();
+            ui.type_into("slider-filter-width", "400");
+            ui.advance(u64::from(crate::routes::BAND_FOLLOW_MS)).await;
+            assert_eq!(
+                bands(&recorder).len(),
+                before,
+                "the follow should still be measuring"
+            );
+
+            ui.type_into("slider-filter-width", "600");
+            ui.advance(200).await;
+            let mut expected = with_receiver();
+            expected.band.filter_width_hz = 600.0;
+            assert_eq!(
+                bands(&recorder)[before..],
+                [cw_core::band::BandKey::of(&expected.clamp().band)],
+                "the band should have followed the newest move, once"
+            );
+            assert!(recorder.band_running.get());
+        });
+    }
+
     #[test]
     fn the_band_preview_can_be_stopped_where_it_was_started() {
         run(|| async {

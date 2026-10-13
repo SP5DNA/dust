@@ -7,6 +7,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use cw_core::band::{FilterDesign, agc_knee};
 use cw_core::{SessionEvent, TrainingSettings, compute_char_pool};
 use dioxus::prelude::*;
 
@@ -25,7 +26,7 @@ use crate::ui::training::{TrainingProgress, TrainingView};
 /// How often the band follows the settings while it is being previewed:
 /// often enough to sound live, seldom enough that a slider dragged across
 /// the noise does not rebuild the band, and measure its AGC, every frame.
-const BAND_FOLLOW_MS: u32 = 80;
+pub(crate) const BAND_FOLLOW_MS: u32 = 80;
 
 /// The screen `screen` names.
 #[component]
@@ -85,6 +86,13 @@ fn SettingsRoute() -> Element {
 
 /// While the band preview runs, the band follows the settings: the latest
 /// of them, at most every [`BAND_FOLLOW_MS`].
+///
+/// Before a follow takes them, it measures the AGC's knee for the settings
+/// waiting ([`warm_agc_knee`]), so building the band finds it remembered
+/// rather than measuring it under the slider being dragged. The settings
+/// stay waiting meanwhile: a move made while the knee is measured joins
+/// them instead of starting a second follow, so there is only ever one on
+/// its way and the newest settings are still the last to land.
 fn use_band_follow(ctx: AppCtx) {
     let latest = use_hook(|| Rc::new(RefCell::new(None::<TrainingSettings>)));
     use_effect(move || {
@@ -99,6 +107,12 @@ fn use_band_follow(ctx: AppCtx) {
         let latest = latest.clone();
         spawn(async move {
             sleep_ms(BAND_FOLLOW_MS).await;
+            // Copied out in a statement of its own: a borrow still held over
+            // the await below is the one the next slider move would panic on.
+            let waiting = latest.borrow().clone();
+            if let Some(waiting) = waiting {
+                warm_agc_knee(&waiting).await;
+            }
             let settings = latest.borrow_mut().take();
             // A preview stopped meanwhile stays silent.
             if let Some(settings) = settings
@@ -108,6 +122,42 @@ fn use_band_follow(ctx: AppCtx) {
             }
         });
     });
+}
+
+/// Measure the AGC knee a band built for `settings` would set, so that
+/// building it finds the answer remembered ([`agc_knee`]) instead of
+/// spending three seconds of band on it there and then.
+///
+/// It is the question both players ask of the settings a follow hands them:
+/// the band they describe, through the receiver they describe. The native
+/// player clamps them once more first, which moves nothing the knee is
+/// remembered by. It is asked only of a band there will be. The receiver is
+/// worked out here, on the thread that draws the band card: the card has
+/// just asked for the same one, and asking for it anywhere else would have
+/// the two keep forgetting each other's. Should the settings move before
+/// the follow takes them, the band measures its own knee, as it always did.
+async fn warm_agc_knee(settings: &TrainingSettings) {
+    if !settings.band.has_background() {
+        return;
+    }
+    let receiver = FilterDesign::from_settings(settings);
+    // A worker measures it, and the slider is not held up at all. A worker
+    // that panicked has measured nothing, which leaves it to the band.
+    #[cfg(all(not(target_arch = "wasm32"), not(test)))]
+    {
+        let band = settings.band.clone();
+        let _ = tokio::task::spawn_blocking(move || agc_knee(&band, &receiver)).await;
+    }
+    // The browser has the one thread. It measures here, then lets the page
+    // draw and take input before the band is built: two short tasks rather
+    // than one long one. Tests measure the same way: their clock is stepped
+    // by hand, and keeps stepping while a worker runs, so a worker's knee
+    // would land a different number of steps later every run.
+    #[cfg(any(target_arch = "wasm32", test))]
+    {
+        agc_knee(&settings.band, &receiver);
+        sleep_ms(1).await;
+    }
 }
 
 #[component]
