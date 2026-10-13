@@ -1,6 +1,5 @@
 use cw_core::{KeyerMode, answer_length_matches};
 use dioxus::core::Runtime;
-use dioxus::html::{ScrollBehavior, ScrollLogicalPosition, ScrollToOptions};
 use dioxus::prelude::*;
 
 use crate::session_runtime::AnswerOutbox;
@@ -47,10 +46,21 @@ pub fn TrainingProgress(
 /// handed it when its length matches the group, or once it has sat still for
 /// the debounce — or, by the runtime, the moment anything else happens to the
 /// session first: Enter, End session, Exit, the answer window closing.
+///
+/// A key redraws nothing. The box is a controlled input, and drawing it writes
+/// its `value` again whether or not it changed; on the desktop and mobile
+/// builds that write reaches the page a frame later, over whatever was typed
+/// in the meantime, and the key typed in between is lost for good. What is
+/// typed is in the box already, so the box is drawn only for what it has not
+/// seen: a letter the paddles keyed, or a group that is over.
 #[derive(Clone, Copy, PartialEq)]
 struct AnswerDraft {
-    /// The text in the box. Only that box reads it, so a key redraws one card.
-    text: Signal<String>,
+    /// The text in the box. Not reactive: a key is in the box before it is
+    /// here, and drawing the box for it would only write it back.
+    text: CopyValue<String>,
+    /// Moved on when `text` changes in a way the box has not seen, which
+    /// draws the box again. Only that box reads it, so it redraws one card.
+    repaint: Signal<u64>,
     /// The group `text` is the answer to.
     at: CopyValue<Option<usize>>,
     outbox: AnswerOutbox,
@@ -64,33 +74,43 @@ struct AnswerDraft {
 }
 
 impl AnswerDraft {
-    fn use_new(outbox: AnswerOutbox, on_change: EventHandler<(usize, String)>) -> Self {
-        use_hook(|| Self {
-            text: Signal::new(String::new()),
-            at: CopyValue::new(None),
-            outbox,
-            epoch: CopyValue::new(0),
-            owner: dioxus::core::current_scope_id(),
-            on_change,
+    /// A draft that starts out as `held`: the group and answer the box opens
+    /// on, if it opens on anything.
+    fn use_new(
+        outbox: AnswerOutbox,
+        on_change: EventHandler<(usize, String)>,
+        held: impl FnOnce() -> Option<(usize, String)>,
+    ) -> Self {
+        use_hook(|| {
+            let (at, text) = held().map_or((None, String::new()), |(idx, text)| (Some(idx), text));
+            Self {
+                text: CopyValue::new(text),
+                repaint: Signal::new(0),
+                at: CopyValue::new(at),
+                outbox,
+                epoch: CopyValue::new(0),
+                owner: dioxus::core::current_scope_id(),
+                on_change,
+            }
         })
     }
 
     /// What the box for `idx` shows while the draft is its own. Reading it
-    /// subscribes the caller to every key — before the first one too, which
-    /// is what makes the draft this box's.
+    /// subscribes the caller to the draft's rewrites — before the first one
+    /// too, since a paddle letter is what can make the draft this box's.
     fn read_for(self, idx: usize) -> Option<String> {
-        let text = self.text.read();
-        (*self.at.peek() == Some(idx)).then(|| text.clone())
+        let _ = self.repaint.read();
+        self.peek_for(idx)
     }
 
     fn peek_for(self, idx: usize) -> Option<String> {
         (*self.at.peek() == Some(idx)).then(|| self.text.peek().clone())
     }
 
-    /// The box for `idx` now holds `text`. The session is handed it at once
-    /// when its length matches the group's — auto-confirm starts from there
-    /// — and otherwise once typing has paused, or sooner if anything happens
-    /// to the session first.
+    /// The box for `idx` now holds `text`, so nothing is drawn for it. The
+    /// session is handed it at once when its length matches the group's —
+    /// auto-confirm starts from there — and otherwise once typing has paused,
+    /// or sooner if anything happens to the session first.
     fn edit(mut self, idx: usize, text: String, sent: &str) {
         let full = answer_length_matches(sent, &text);
         self.at.set(Some(idx));
@@ -115,11 +135,13 @@ impl AnswerDraft {
         });
     }
 
-    /// A paddle keyed `letter` into the box for `idx`.
+    /// A paddle keyed `letter` into the box for `idx`. The page has not seen
+    /// it, so the box is drawn again to show it.
     fn push(self, idx: usize, letter: char, sent: &str) {
         let mut text = self.peek_for(idx).unwrap_or_default();
         text.push(letter);
         self.edit(idx, text, sent);
+        self.redraw();
     }
 
     /// Hand the session whatever is waiting. A debounce still waiting has
@@ -140,7 +162,13 @@ impl AnswerDraft {
         if finished {
             self.at.set(None);
             self.text.set(String::new());
+            self.redraw();
         }
+    }
+
+    /// Draw the box showing the draft again, for a change it has not seen.
+    fn redraw(mut self) {
+        *self.repaint.write() += 1;
     }
 
     fn cancel_pending(mut self) -> u64 {
@@ -163,13 +191,14 @@ impl AnswerDraft {
 /// prop on every render, and redraws them all.
 ///
 /// The active card may read the draft. The others must not: a read would
-/// subscribe every card to every keystroke and quietly undo the split.
+/// subscribe every card to every paddle letter and quietly undo the split.
 #[component]
 #[allow(clippy::too_many_arguments)]
 fn GroupCard(
     idx: usize,
     sent: String,
-    /// What the session holds for this group.
+    /// What the session holds for this group. Blank for the active card,
+    /// whose box shows the draft instead.
     value: String,
     disabled: bool,
     input_locked: bool,
@@ -196,7 +225,7 @@ fn GroupCard(
     let live = is_active && !input_locked;
     let closed = disabled || input_locked;
     let shown = if is_active {
-        draft.read_for(idx).unwrap_or_else(|| value.clone())
+        draft.read_for(idx).unwrap_or_default()
     } else {
         value.clone()
     };
@@ -237,29 +266,6 @@ fn GroupCard(
                 enterkeyhint: "done",
                 inputmode: "text",
                 lang: "zxx",
-                // The card is keyed on whether its box is live, so a box that
-                // opens is a new element, and mounting is when it takes the
-                // focus — the one place that does.
-                onmounted: move |evt| {
-                    if live {
-                        spawn(async move {
-                            let element = evt.data();
-                            // Centred, and at once: a smooth scroll is an
-                            // animation running for a few hundred
-                            // milliseconds just as the group opens and you
-                            // start typing, and the browser spends it laying
-                            // out rather than echoing your keys.
-                            let _ = element
-                                .scroll_to_with_options(ScrollToOptions {
-                                    behavior: ScrollBehavior::Instant,
-                                    vertical: ScrollLogicalPosition::Center,
-                                    horizontal: ScrollLogicalPosition::Nearest,
-                                })
-                                .await;
-                            let _ = element.set_focus(true).await;
-                        });
-                    }
-                },
                 oninput: move |e| {
                     if !closed {
                         draft.edit(idx, e.value(), &sent_for_input);
@@ -278,6 +284,22 @@ fn GroupCard(
                     }
                 },
             }
+            // The card is keyed on whether its box is live, so a box that
+            // opens is a new card, and this mounts with it: mounting is when
+            // the box takes the focus — the one place that does. Only a live
+            // card carries it, so the others cost no mount event.
+            if live {
+                span {
+                    hidden: true,
+                    onmounted: move |_| {
+                        // Tests have no page to run it on.
+                        #[cfg(not(test))]
+                        spawn(async move {
+                            let _ = document::eval(&focus_script(idx)).await;
+                        });
+                    },
+                }
+            }
             if is_confirmed {
                 div { style: "margin-top: 0.5rem;",
                     CharacterComparison {
@@ -288,6 +310,38 @@ fn GroupCard(
             }
         }
     }
+}
+
+/// The script that brings the box for `idx` into view and gives it the focus,
+/// in one trip to the page.
+///
+/// Centred, so the group just answered stays in sight above it, and at once:
+/// a smooth scroll is an animation running for a few hundred milliseconds just
+/// as the group opens and you start typing, and the browser spends it laying
+/// out rather than echoing your keys. The focus then must not scroll again.
+/// The mounted element's own `scroll_to_with_options` will not do: the desktop
+/// and mobile builds hand its alignment to `scrollIntoView` under names it
+/// does not know, and the box ends up at the top edge of the list.
+///
+/// Every build runs what it is given to eval as the body of a function, so the
+/// script may return early.
+fn focus_script(idx: usize) -> String {
+    format!(
+        r#"const card = document.getElementById("group-card-{idx}");
+const input = document.getElementById("group-input-{idx}");
+// A box that has closed again since it opened is left where it is.
+if (!card || !input || input.disabled || input.readOnly) {{
+    return;
+}}
+// An engine that does not know an instant scroll refuses the options whole;
+// it can still centre, and the focus must come either way.
+try {{
+    card.scrollIntoView({{ block: "center", inline: "nearest", behavior: "instant" }});
+}} catch (_) {{
+    card.scrollIntoView({{ block: "center", inline: "nearest" }});
+}}
+input.focus({{ preventScroll: true }});"#
+    )
 }
 
 /// The group list and the way out of the session.
@@ -314,8 +368,14 @@ pub fn TrainingView(
     #[props(default)] keyer_mode: KeyerMode,
 ) -> Element {
     let send_index = (repeat_done + 1).min(repeat_total.max(1));
-    let draft = AnswerDraft::use_new(answer, on_change);
     let current_done = confirmed.get(current).copied().unwrap_or(false);
+    // The open box is never drawn from the session, so a view drawn afresh
+    // on a session under way — after a hot reload, say — starts its draft
+    // from whatever the session holds of the open answer.
+    let draft = AnswerDraft::use_new(answer, on_change, || {
+        let held = inputs.get(current).filter(|_| !current_done)?;
+        (!held.is_empty()).then(|| (current, held.clone()))
+    });
     let can_paddle = !playing && !locked && !current_done;
     let sent_now = groups.get(current).cloned().unwrap_or_default();
     // The paddles key into the box that is open, and only while it is.
@@ -377,7 +437,16 @@ pub fn TrainingView(
                                     key: "{idx}-{live}",
                                     idx,
                                     sent: sent.clone(),
-                                    value: inputs.get(idx).cloned().unwrap_or_default(),
+                                    // The open box shows the draft. What the
+                                    // session has heard of it changes nothing
+                                    // on screen, and passing it would draw the
+                                    // box each time the session hears — and
+                                    // write it back over the typing.
+                                    value: if is_active {
+                                        String::new()
+                                    } else {
+                                        inputs.get(idx).cloned().unwrap_or_default()
+                                    },
                                     disabled,
                                     input_locked,
                                     is_focused,
@@ -411,5 +480,40 @@ pub fn TrainingView(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::focus_script;
+
+    /// The harness never mounts anything on a page, so the script is the one
+    /// part of the box taking the focus a test can see.
+    #[test]
+    fn the_opened_box_is_centred_and_focused_in_one_script() {
+        let script = focus_script(7);
+        assert!(
+            script.contains(r#"getElementById("group-card-7")"#),
+            "{script}"
+        );
+        assert!(
+            script.contains(r#"getElementById("group-input-7")"#),
+            "{script}"
+        );
+        // `block`, not the `vertical` the desktop builds send for a mounted
+        // element's scroll: `scrollIntoView` ignores that, and top-aligns.
+        assert!(script.contains(r#"block: "center""#), "{script}");
+        assert!(!script.contains("vertical"), "{script}");
+        assert!(script.contains(r#"behavior: "instant""#), "{script}");
+        let scroll = script.find("scrollIntoView").expect("the card is scrolled");
+        let focus = script
+            .find("input.focus({ preventScroll: true })")
+            .expect("the box takes the focus without scrolling again");
+        assert!(scroll < focus, "centred first, then focused: {script}");
+        // A box closed again by the time the script runs keeps its place.
+        let guard = script
+            .find("input.disabled || input.readOnly")
+            .expect("a closed box is left alone");
+        assert!(guard < scroll, "{script}");
     }
 }
