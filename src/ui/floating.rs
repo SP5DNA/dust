@@ -27,6 +27,7 @@
 use std::cell::RefCell;
 use std::rc::{Rc, Weak};
 
+use dioxus::core::spawn_forever;
 use dioxus::desktop::{Config, DesktopService, LogicalSize, WindowBuilder, window};
 use dioxus::html::input_data::MouseButton;
 use dioxus::prelude::*;
@@ -115,6 +116,18 @@ fn settle<W>(opened: Option<W>, asked: u64, current: u64, open: bool) -> Settled
 }
 
 impl FloatingWindow {
+    /// Closed, with nothing to show yet. Its signals belong to the scope it
+    /// is made in, which has to outlive every screen that opens it.
+    fn new() -> Self {
+        Self {
+            feed: CopyValue::new(Rc::new(Feed::default())),
+            window: CopyValue::new(None),
+            open: Signal::new(false),
+            locked: Signal::new(false),
+            generation: CopyValue::new(0),
+        }
+    }
+
     pub fn is_open(self) -> bool {
         (self.open)()
     }
@@ -162,10 +175,22 @@ impl FloatingWindow {
         let feed = FeedRef(Rc::downgrade(&self.feed.peek()));
         let dom = VirtualDom::new_with_props(Floating, FloatingProps { feed });
         let pending = window().new_window(dom, floating_config());
+        self.open_as(async move { pending.try_resolve().await.ok() });
+    }
+
+    /// Mark it open, and settle what the open comes to once `opening` has
+    /// given the window asked for, or nothing.
+    fn open_as(mut self, opening: impl Future<Output = Option<Rc<DesktopService>>> + 'static) {
         let asked = self.supersede();
         self.open.set(true);
-        spawn(async move {
-            let opened = pending.try_resolve().await.ok();
+        // In the root scope, not the caller's. The button that opens it is on
+        // Listen, and a task of that screen's is dropped when it is left:
+        // leave Listen before the window has opened, and it would open all
+        // the same, with nothing here to close or lock it. What this touches
+        // is the handle's own, made by the app's root component, which
+        // outlives every screen.
+        spawn_forever(async move {
+            let opened = opening.await;
             // Each read in a statement of its own: a guard left alive in the
             // match below would still be held when an arm writes `open`.
             let current = *self.generation.peek();
@@ -184,13 +209,7 @@ impl FloatingWindow {
 /// The floating window's handle, kept up to date with what the stream sends.
 /// Called once, from the app's root.
 pub fn use_floating_window(ctx: AppCtx) -> FloatingWindow {
-    let floating = use_context_provider(|| FloatingWindow {
-        feed: CopyValue::new(Rc::new(Feed::default())),
-        window: CopyValue::new(None),
-        open: Signal::new(false),
-        locked: Signal::new(false),
-        generation: CopyValue::new(0),
-    });
+    let floating = use_context_provider(FloatingWindow::new);
     use_effect(move || {
         let view = FeedView {
             heard: ctx.stream_heard.read().clone(),
@@ -387,6 +406,9 @@ fn Floating(feed: FeedRef) -> Element {
 mod tests {
     use super::*;
 
+    use crate::testing::{Ui, run};
+    use crate::ui::widgets::control_id;
+
     fn group(text: &str) -> HeardGroup {
         HeardGroup {
             text: text.into(),
@@ -514,6 +536,67 @@ mod tests {
         assert_eq!(settle(None::<&str>, 1, 3, true), Settled::Stale);
         // Closed since, and not asked again: it is closed either way.
         assert_eq!(settle(None::<&str>, 1, 2, false), Settled::Stale);
+    }
+
+    /// How long the window [`Listening`] asks for takes to come to nothing.
+    const OPENING_MS: u32 = 200;
+
+    /// The app's root, holding the handle, over a screen that opens the
+    /// window the way Listen does and can be left.
+    #[component]
+    fn LeavesListen() -> Element {
+        let floating = use_hook(FloatingWindow::new);
+        let mut listening = use_signal(|| true);
+        rsx! {
+            if listening() {
+                Listening { floating }
+            }
+            button {
+                id: control_id("btn", "leave"),
+                onclick: move |_| listening.set(false),
+                "leave"
+            }
+            p { "open: {floating.is_open()}" }
+        }
+    }
+
+    /// Asks for a window that fails to open a while later: no window can be
+    /// made without a desktop, and an open that settles is all this needs.
+    #[component]
+    fn Listening(floating: FloatingWindow) -> Element {
+        rsx! {
+            button {
+                id: control_id("btn", "float"),
+                onclick: move |_| {
+                    floating.open_as(async {
+                        sleep_ms(OPENING_MS).await;
+                        None
+                    });
+                },
+                "float"
+            }
+        }
+    }
+
+    /// An open still settles after the screen that asked for it has gone.
+    /// It used to go with that screen: leave Listen before the window had
+    /// opened, and it opened untracked, with nothing in the main window able
+    /// to close or lock it.
+    #[test]
+    fn an_open_settles_after_the_screen_that_asked_for_it_has_gone() {
+        run(|| async {
+            let mut ui = Ui::new(LeavesListen, ());
+            ui.click("btn-float");
+            assert!(ui.has("open: true"), "{}", ui.html());
+            ui.click("btn-leave");
+            assert!(!ui.shows("btn-float"));
+            ui.advance(u64::from(OPENING_MS) * 2).await;
+            assert!(
+                ui.has("open: false"),
+                "the open went with the screen: {}",
+                ui.html()
+            );
+        });
     }
 
     #[test]

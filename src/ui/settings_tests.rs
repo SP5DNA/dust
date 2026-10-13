@@ -150,6 +150,61 @@ fn the_step_buttons_move_the_number_in_the_box() {
     });
 }
 
+/// − and + show the number they step to over text that was typed and never
+/// committed.
+///
+/// A key typed straight after Enter can be written over by the commit's
+/// redraw, a frame late. The box is then back as it was committed, so
+/// leaving it commits nothing, but the field still holds the text with the
+/// key in it. A step drew that text back over the new number: the box said
+/// 405 while the setting had gone to 41.
+#[test]
+fn a_step_shows_the_number_stepped_to_over_text_never_committed() {
+    run(|| async {
+        let (mut ui, _recorder) = Ui::app_with_settings(test_settings());
+        ui.click("nav-settings");
+        let field = "number-groups-per-session";
+        ui.type_into(field, "40");
+        ui.commit(field, "40");
+        // The 5, which the commit's redraw wrote over.
+        ui.type_into(field, "405");
+        ui.click("more-number-groups-per-session");
+        assert_eq!(value_of(&ui, field), "41");
+        assert_eq!(ui.stored_settings().await.curriculum.num_groups, 41);
+        // A phone can keep the box focused through a tap on −, so what is
+        // typed before it is never committed either.
+        ui.type_into(field, "7");
+        ui.click("less-number-groups-per-session");
+        assert_eq!(value_of(&ui, field), "40");
+        assert_eq!(ui.stored_settings().await.curriculum.num_groups, 40);
+    });
+}
+
+/// A step up to the field's top shows the top, not the text typed past it.
+#[test]
+fn a_step_to_the_top_shows_the_top_over_text_never_committed() {
+    run(|| async {
+        let mut settings = test_settings();
+        settings.curriculum.num_groups = cw_core::NUM_GROUPS_MAX - 1;
+        let (mut ui, _recorder) = Ui::app_with_settings(settings);
+        ui.click("nav-settings");
+        let field = "number-groups-per-session";
+        let more = "more-number-groups-per-session";
+        ui.type_into(field, "1995");
+        ui.click(more);
+        assert_eq!(value_of(&ui, field), cw_core::NUM_GROUPS_MAX.to_string());
+        assert!(
+            ui.input_tag(more).contains("disabled"),
+            "{}",
+            ui.input_tag(more)
+        );
+        assert_eq!(
+            ui.stored_settings().await.curriculum.num_groups,
+            cw_core::NUM_GROUPS_MAX
+        );
+    });
+}
+
 /// One click to look at another character set must not cost the level the
 /// learner had reached in this one.
 #[test]
