@@ -28,6 +28,18 @@ use crate::ui::training::{TrainingProgress, TrainingView};
 /// the noise does not rebuild the band, and measure its AGC, every frame.
 pub(crate) const BAND_FOLLOW_MS: u32 = 80;
 
+/// How many times a follow measures the AGC's knee before it takes the
+/// settings waiting: once for them, and again for a move that changed the
+/// band while it measured, but no more than this, so a slider dragged
+/// without a pause still has the band follow it.
+///
+/// Once in the browser, which measures on the page's own thread wherever it
+/// does: measuring again for a newer move takes no work off the page, as the
+/// band built for that move would measure the same knee on the same thread,
+/// and under a drag that moves through every measurement it only adds
+/// measurements of moves the drag has already left behind.
+pub(crate) const BAND_WARM_ROUNDS: usize = if cfg!(target_arch = "wasm32") { 1 } else { 3 };
+
 /// The screen `screen` names.
 #[component]
 pub fn Route(screen: Screen) -> Element {
@@ -92,7 +104,10 @@ fn SettingsRoute() -> Element {
 /// rather than measuring it under the slider being dragged. The settings
 /// stay waiting meanwhile: a move made while the knee is measured joins
 /// them instead of starting a second follow, so there is only ever one on
-/// its way and the newest settings are still the last to land.
+/// its way and the newest settings are still the last to land. A move that
+/// changed the band is measured in its turn before the follow takes it, up
+/// to [`BAND_WARM_ROUNDS`] measurements in all, so a slider being dragged
+/// finds its knee remembered too.
 fn use_band_follow(ctx: AppCtx) {
     let latest = use_hook(|| Rc::new(RefCell::new(None::<TrainingSettings>)));
     use_effect(move || {
@@ -107,11 +122,24 @@ fn use_band_follow(ctx: AppCtx) {
         let latest = latest.clone();
         spawn(async move {
             sleep_ms(BAND_FOLLOW_MS).await;
-            // Copied out in a statement of its own: a borrow still held over
-            // the await below is the one the next slider move would panic on.
-            let waiting = latest.borrow().clone();
-            if let Some(waiting) = waiting {
+            for _ in 0..BAND_WARM_ROUNDS {
+                // Copied out in a statement of its own: a borrow still held
+                // over the await below is the one the next slider move would
+                // panic on.
+                let waiting = latest.borrow().clone();
+                let Some(waiting) = waiting else {
+                    break;
+                };
                 warm_agc_knee(&waiting).await;
+                // The knee is asked of the band settings alone, the receiver
+                // being worked out from them too, so only a move that changed
+                // them asks it anew. A stopped preview has no band left to
+                // build, so nothing to measure for.
+                let moved =
+                    latest.borrow().as_ref().map(|newest| &newest.band) != Some(&waiting.band);
+                if !moved || !ctx.preview.peek().is_band() {
+                    break;
+                }
             }
             let settings = latest.borrow_mut().take();
             // A preview stopped meanwhile stays silent.
@@ -134,8 +162,9 @@ fn use_band_follow(ctx: AppCtx) {
 /// remembered by. It is asked only of a band there will be. The receiver is
 /// worked out here, on the thread that draws the band card: the card has
 /// just asked for the same one, and asking for it anywhere else would have
-/// the two keep forgetting each other's. Should the settings move before
-/// the follow takes them, the band measures its own knee, as it always did.
+/// the two keep forgetting each other's. Should the settings move after the
+/// follow's last measurement, the band measures its own knee, as it always
+/// did.
 async fn warm_agc_knee(settings: &TrainingSettings) {
     if !settings.band.has_background() {
         return;
