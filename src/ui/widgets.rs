@@ -475,6 +475,12 @@ pub fn SliderField(
 /// is typed through its prefixes: on the way to 30 the box holds 3, and a
 /// setting that took every key would take that too, which for one end of a
 /// range drags the other end down with it.
+///
+/// A key does not redraw the field. Every redraw sends the box its `value`
+/// again, and on the desktop and phone builds that lands a frame later, over
+/// whatever was typed in the meantime: a quick 120 could come out as 10. So
+/// the field redraws only when it is committed, or when what it is given
+/// changes, as the value does for − and +.
 #[component]
 pub fn NumberField(
     #[props(into)] label: String,
@@ -489,11 +495,16 @@ pub fn NumberField(
     onchange: EventHandler<f64>,
 ) -> Element {
     let name = id.unwrap_or_else(|| control_id("number", &label));
-    // The text being typed, until it is committed. Reading it here is what
-    // puts the committed value back in the box afterwards, even when the
-    // value itself did not move — 999 into a field already at its top.
-    let mut typed = use_signal(|| None::<String>);
-    let shown = typed().unwrap_or_else(|| value.to_string());
+    // The text being typed, until it is committed. Nothing subscribes to it,
+    // so a key costs no redraw; a redraw for any other reason shows the
+    // latest of it rather than taking the box back to the value.
+    let mut typed = use_hook(|| CopyValue::new(None::<String>));
+    // Moved on by every commit. Reading it here is what puts the committed
+    // value back in the box afterwards, even when the value itself did not
+    // move — 999 into a field already at its top.
+    let mut repaint = use_signal(|| 0u64);
+    let _ = repaint.read();
+    let shown = typed.peek().clone().unwrap_or_else(|| value.to_string());
     let less = format!("Decrease {label}");
     let more = format!("Increase {label}");
     rsx! {
@@ -520,6 +531,7 @@ pub fn NumberField(
                     oninput: move |e| typed.set(Some(e.value())),
                     onchange: move |e| {
                         typed.set(None);
+                        repaint += 1;
                         if let Some(v) = parse_number_input(&e.value(), min, max) {
                             onchange.call(v);
                         }
@@ -744,7 +756,52 @@ pub fn ScoreRing(pct: f64, value: String, caption: String) -> Element {
 
 #[cfg(test)]
 mod tests {
-    use super::{control_id, html_bool, nudge, parse_number_input, pct_between, pretty_number};
+    use dioxus::prelude::*;
+
+    use super::{
+        NumberField, control_id, html_bool, nudge, parse_number_input, pct_between, pretty_number,
+    };
+    use crate::testing::Ui;
+
+    /// A number field whose unit can be changed under it, which redraws it
+    /// without moving its value.
+    #[component]
+    fn ChangingUnit() -> Element {
+        let mut value = use_signal(|| 2.0);
+        let mut unit = use_signal(|| "sec");
+        rsx! {
+            NumberField {
+                label: "Count",
+                value: value(),
+                min: 0.0,
+                max: 200.0,
+                step: 1.0,
+                unit: unit(),
+                onchange: move |v| value.set(v),
+            }
+            button {
+                id: control_id("btn", "change unit"),
+                onclick: move |_| unit.set("min"),
+                "change unit"
+            }
+        }
+    }
+
+    /// A field redrawn while something is typed into it keeps what is typed:
+    /// a redraw sends the box its value, and until it is committed that is
+    /// the text typed, not the number it is to replace.
+    #[test]
+    fn a_field_redrawn_mid_typing_keeps_what_is_typed() {
+        let mut ui = Ui::new(ChangingUnit, ());
+        let _ = ui.take_work();
+        ui.type_into("number-count", "12");
+        assert_eq!(ui.take_work(), 0, "a key redrew the field");
+        ui.click("btn-change-unit");
+        assert!(ui.has(">min<"), "{}", ui.html());
+        assert!(ui.input_tag("number-count").contains("value=\"12\""));
+        ui.commit("number-count", "120");
+        assert!(ui.input_tag("number-count").contains("value=\"120\""));
+    }
 
     #[test]
     fn a_typed_number_is_held_inside_its_bounds() {
