@@ -12,6 +12,7 @@ use web_sys::{
     AudioBufferSourceNode, AudioContext, AudioContextState, AudioScheduledSourceNode, GainNode,
 };
 
+use super::param::Curve;
 use super::{page_is_hidden, reported_latency};
 use crate::audio::band_queue::{Reservation, callers_at, first_to_remake};
 use crate::audio::shape::{BAND_FADE_SEC, fade_curve};
@@ -93,25 +94,32 @@ struct Queued {
 impl BandStream {
     /// Start the band into `into`, the receiver's input, and its audio-stage
     /// floor into `floor_into`, past the compressor.
+    ///
+    /// `pileup` is the pile-up already calling when the band is started
+    /// under a send in flight. It is made room for from the very first
+    /// buffer: a band made for nobody would have to be taken back and made
+    /// again for the callers in the same breath, and those of its buffers
+    /// too close to the clock to take back would play on as if nobody were
+    /// calling.
     pub fn start(
         ctx: &AudioContext,
         into: &GainNode,
         floor_into: &GainNode,
         settings: &TrainingSettings,
+        pileup: Option<Reservation>,
     ) -> Result<Self, String> {
         let now = ctx.current_time();
+        // The rising half of an equal-power crossfade: the outgoing band
+        // falls along the other, and the hiss holds its level through the
+        // change where straight lines would sag 3 dB. The band and its floor
+        // rise along the one curve.
+        let points = fade_curve(FADE_POINTS, true, 1.0);
+        let rising = Curve::new(&points);
         let fading_in = |into: &GainNode| -> Result<GainNode, String> {
             let output = ctx.create_gain().map_err(|e| format!("band gain: {e:?}"))?;
-            let gain = output.gain();
-            // The rising half of an equal-power crossfade: the outgoing band
-            // falls along the other, and the hiss holds its level through
-            // the change where straight lines would sag 3 dB.
-            gain.set_value_curve_at_time(
-                &mut fade_curve(FADE_POINTS, true, 1.0),
-                now,
-                BAND_FADE_SEC,
-            )
-            .map_err(|e| format!("band fade: {e:?}"))?;
+            rising
+                .play_on(&output.gain(), now, BAND_FADE_SEC)
+                .map_err(|e| format!("band fade: {e:?}"))?;
             output
                 .connect_with_audio_node(into)
                 .map_err(|e| format!("band connect: {e:?}"))?;
@@ -150,7 +158,7 @@ impl BandStream {
             floor_chunk: vec![0.0; chunk],
             next_start: now,
             queued: VecDeque::new(),
-            pileup: None,
+            pileup,
             makes_room: settings.band.stations_max > STATIONS_MIN,
         }));
         state.borrow_mut().top_up()?;
@@ -195,11 +203,8 @@ impl BandStream {
             let gain = output.gain();
             let from = f64::from(gain.value());
             let _ = gain.cancel_scheduled_values(now);
-            let _ = gain.set_value_curve_at_time(
-                &mut fade_curve(FADE_POINTS, false, from),
-                now,
-                BAND_FADE_SEC,
-            );
+            let falling = fade_curve(FADE_POINTS, false, from);
+            let _ = Curve::new(&falling).play_on(&gain, now, BAND_FADE_SEC);
         }
         for queued in &stream.queued {
             let _ = queued

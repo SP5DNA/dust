@@ -80,4 +80,31 @@ mod tests {
         let short = Reservation::new(2, 0.25);
         assert_eq!(first_to_remake(queued, short, 0.0), Some(0));
     }
+
+    /// A band started under a pile-up already calling, as when the band
+    /// changes under a send in flight, makes room for it from its very first
+    /// buffer, the ones too close to the clock to take back included. So
+    /// there is nothing to make again for it, and a stop still takes back
+    /// whatever was made for the callers and is not yet due.
+    #[test]
+    fn a_band_started_under_a_pile_up_makes_room_for_it_from_its_first_buffer() {
+        let made_under = |pileup: Option<Reservation>| -> Vec<(f64, usize)> {
+            (0..5)
+                .map(|k| {
+                    let start = f64::from(k) / 10.0;
+                    (start, callers_at(pileup, start))
+                })
+                .collect()
+        };
+        let pileup = Reservation::new(2, 0.35);
+        let queued = made_under(pileup);
+        let made_for: Vec<usize> = queued.iter().map(|(_, callers)| *callers).collect();
+        assert_eq!(made_for, [2, 2, 2, 2, 0]);
+        assert_eq!(first_to_remake(queued.clone(), pileup, 0.0), None);
+        assert_eq!(first_to_remake(queued.clone(), pileup, 0.15), None);
+        assert_eq!(first_to_remake(queued, None, 0.15), Some(2));
+        // One that has stopped calling by the time the band starts is made
+        // room for nowhere, as if there were none.
+        assert_eq!(made_under(Reservation::new(2, 0.0)), made_under(None));
+    }
 }
