@@ -174,6 +174,14 @@ impl<S: GroupSource> SessionMachine<S> {
     /// is no deadline: it waits for the answer to sit still, so an entry
     /// still under way puts it off. Anything else — a send ending, a gap —
     /// leaves the answer open for more.
+    ///
+    /// Typing never closes the answer, and must not be made to. Closing it
+    /// has the runtime ask the answer box to finish what is entered, and the
+    /// box can hand the session what it finishes as an
+    /// [`SessionEvent::Input`] from inside that very dispatch. An input that
+    /// closed the answer would ask the box to finish again while it is still
+    /// finishing, and a UI callback called from inside itself panics: the
+    /// app would go down mid-session.
     pub fn closes_answer(&self, event: &SessionEvent) -> Option<AnswerClose> {
         if self.is_terminal() {
             return None;

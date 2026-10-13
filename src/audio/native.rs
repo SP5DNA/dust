@@ -229,11 +229,17 @@ impl MorseBackend for MorsePlayer {
             self.state.retire();
             return Err("Audio mixer failed to open.".into());
         };
+        // In a statement of its own, after the stream is up at whatever rate
+        // it opened at. Read inside the call below, the guard would last to
+        // the end of that statement, and the voice would be built — its
+        // allocations and all — with the audio callback locked out of the
+        // mixer.
+        let rate = self.mixer().sample_rate();
         let voice = SendVoice::new(
             plan,
             &FilterDesign::from_settings(settings),
             Qsb::of(&settings.band),
-            self.mixer().sample_rate(),
+            rate,
             self.opened_at.elapsed().as_secs_f64(),
         );
         let finished = voice.finished_flag();

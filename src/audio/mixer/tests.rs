@@ -1,8 +1,15 @@
 //! The mixer, listened to the way the stream plays it.
 
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell;
+use std::sync::atomic::AtomicUsize;
+
 use super::*;
-use cw_core::band::{BandMixer, FilterDesign};
-use cw_core::{SplitMix64, TrainingSettings, Transmission, plan_transmission, resolve_station};
+use cw_core::band::{BandMixer, FilterDesign, Qsb};
+use cw_core::{
+    CALLSIGN_TIER_MAX, STATIONS_MAX, SplitMix64, TrainingSettings, Transmission, generate_callsign,
+    plan_transmission, resolve_station,
+};
 
 /// Low enough to keep the long listens quick; the band sounds the same at
 /// any rate.
@@ -259,4 +266,229 @@ fn the_stream_never_waits_for_the_mixer() {
         "the send still plays through a poisoned lock"
     );
     assert!(!failed.load(Ordering::Acquire));
+}
+
+/// The system's allocator, handed every call unchanged, which also counts
+/// what a thread allocates and frees while that thread asks it to. It is the
+/// allocator of the whole test binary — there can only be one — so to every
+/// other test it is the system's in all but one load a call.
+struct Counting;
+
+/// What a counted thread has allocated and freed since it asked.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Counts {
+    allocations: usize,
+    frees: usize,
+}
+
+/// How many threads are being counted. Almost always none, and then a call
+/// goes straight on to the system. Relaxed is enough: a thread always sees
+/// its own count go up, and only its own calls are counted.
+static COUNTING: AtomicUsize = AtomicUsize::new(0);
+
+std::thread_local! {
+    /// This thread's counts, while it is being counted. Const, and with
+    /// nothing to drop, it is a plain thread-local static: reading it
+    /// allocates nothing, which is what lets the allocator read it.
+    static COUNTED: Cell<Option<Counts>> = const { Cell::new(None) };
+}
+
+/// Count one call on this thread, if it is being counted. Never panics, as
+/// an allocator must not.
+fn note(count: impl FnOnce(&mut Counts)) {
+    if COUNTING.load(Ordering::Relaxed) == 0 {
+        return;
+    }
+    let _ = COUNTED.try_with(|counted| {
+        if let Some(mut counts) = counted.get() {
+            count(&mut counts);
+            counted.set(Some(counts));
+        }
+    });
+}
+
+// Safety: every call goes to the system allocator as it came, and the
+// counting only touches this thread's own cell.
+unsafe impl GlobalAlloc for Counting {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        note(|counts| counts.allocations += 1);
+        // Safety: the caller's guarantees, passed on as they are.
+        unsafe { System.alloc(layout) }
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        note(|counts| counts.allocations += 1);
+        // Safety: as for `alloc`.
+        unsafe { System.alloc_zeroed(layout) }
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        // In place or moved, it is the allocator's work: counted as a new
+        // block and the old one freed.
+        note(|counts| {
+            counts.allocations += 1;
+            counts.frees += 1;
+        });
+        // Safety: as for `alloc`.
+        unsafe { System.realloc(ptr, layout, new_size) }
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        note(|counts| counts.frees += 1);
+        // Safety: as for `alloc`.
+        unsafe { System.dealloc(ptr, layout) }
+    }
+}
+
+#[global_allocator]
+static ALLOCATOR: Counting = Counting;
+
+/// What `body` allocated and freed on this thread.
+fn counted(body: impl FnOnce()) -> Counts {
+    COUNTED.with(|counted| counted.set(Some(Counts::default())));
+    COUNTING.fetch_add(1, Ordering::Relaxed);
+    body();
+    COUNTING.fetch_sub(1, Ordering::Relaxed);
+    COUNTED.with(Cell::take).unwrap_or_default()
+}
+
+/// A pile-up, as a session sends it: the station being copied, with every
+/// other station the settings allow calling across it, through the receiver
+/// and under the fading.
+fn pile_up(settings: &TrainingSettings, rng: &mut SplitMix64, at_sec: f64) -> SendVoice {
+    let voice = resolve_station(settings, rng);
+    let call = Transmission::calling(settings, "CQ TEST", voice, rng, |rng| {
+        generate_callsign(CALLSIGN_TIER_MAX, rng)
+    });
+    let plan = plan_transmission(&call, settings);
+    SendVoice::new(
+        &plan,
+        &FilterDesign::from_settings(settings),
+        Qsb::of(&settings.band),
+        SR,
+        at_sec,
+    )
+}
+
+/// A change made the way the player makes one: under the lock, with what it
+/// sweeps let go of only once the lock is released.
+fn on_ui(mixer: &Mutex<Mixer>, change: impl FnOnce(&mut Mixer, &mut Swept)) {
+    let mut swept = Swept::new();
+    change(&mut mixer.lock().expect("mixer"), &mut swept);
+    drop(swept);
+}
+
+/// The audio callback allocates nothing and frees nothing, whatever the UI
+/// does between its buffers. An allocator may wait on a lock of its own or
+/// on the system, and a callback that waits is a hole in the sound.
+///
+/// A minute of a busy band — its stations, its static, a pile-up calling
+/// over the sends, the fading on them — while the UI rebuilds the band as a
+/// dragged slider does and takes it away, starts sends over each other,
+/// stops one and lets another play out, keys the paddle's sidetone, and now
+/// and then holds the mixer through a buffer — and for a moment rebuilds the
+/// band and starts a send on every one of a host's shortest buffers, with
+/// more sends riding out their release than the mixer keeps room for.
+/// Everything is built before the lock is taken and let go of after it, as
+/// the player does it; the host hands over buffers of every size, up to the
+/// third of a second a default one can.
+#[test]
+fn the_audio_callback_never_allocates_or_frees() {
+    const SECONDS: usize = 60;
+    const FRAMES: [usize; 6] = [64, 160, 256, 441, 1_024, 5_333];
+    const SHORTEST: usize = 32;
+    const LATENCY: usize = 512;
+
+    // Without this the rest would pass for nothing.
+    let freed = counted(|| drop(std::hint::black_box(vec![0u8; 16])));
+    assert_eq!(
+        freed,
+        Counts {
+            allocations: 1,
+            frees: 1
+        },
+        "the counting counts"
+    );
+
+    let mut settings = TrainingSettings::default();
+    settings.band.stations_max = STATIONS_MAX;
+    settings.band.qrn_level = 1.0;
+    let settings = settings.clamp();
+    let mixer = Arc::new(Mutex::new(Mixer::new(SR)));
+    let control = Arc::new(SidetoneControl::new());
+    let failed = Arc::new(AtomicBool::new(false));
+    let mut output = Output::new(
+        Arc::clone(&mixer),
+        Arc::clone(&control),
+        Arc::clone(&failed),
+        SR,
+    );
+    let mut rng = SplitMix64::new(11);
+    // Made once, as the stream's own scratch buffer is.
+    let mut buffer = vec![0.0f32; FRAMES.into_iter().max().unwrap_or(0)];
+    let mut sends = Vec::new();
+    let (mut played, mut peak) = (0, 0.0f32);
+    let (mut total, mut first) = (Counts::default(), None);
+    let mut k = 0;
+    while played < SECONDS * SR as usize {
+        // Every quarter of a minute or so: a slider dragged, the band
+        // rebuilt on every buffer; a send every half second or so, each over
+        // the last, and one of them stopped; a burst of both on every one of
+        // a run of the shortest buffers, bands replaced before they are in
+        // and sends faster than they can ride out; then the last send left
+        // to play out, and the band taken away a while.
+        let cycle = k % 200;
+        let burst = (70..100).contains(&cycle);
+        if burst || cycle < 20 || cycle % 13 == 0 {
+            let next = (cycle != 130).then(|| band(&settings, k as u64));
+            on_ui(&mixer, |mixer, swept| mixer.set_band(next, swept));
+        }
+        if burst || (cycle < 100 && cycle % 8 == 0) {
+            let voice = pile_up(&settings, &mut rng, played as f64 / f64::from(SR));
+            sends.push(voice.finished_flag());
+            on_ui(&mixer, |mixer, swept| mixer.start(voice, swept));
+        }
+        if cycle == 52 {
+            mixer.lock().expect("mixer").stop();
+        }
+        if k % 3 == 0 {
+            let pitch = 500.0 + 50.0 * (k % 7) as f64;
+            control.set(crate::audio::shape::ToneRequest::new(
+                k % 6 == 0,
+                pitch,
+                0.2,
+            ));
+        }
+
+        let frames = if burst {
+            SHORTEST
+        } else {
+            FRAMES[k % FRAMES.len()]
+        };
+        let out = &mut buffer[..frames];
+        let held = (k % 50 == 7).then(|| mixer.lock().expect("mixer"));
+        let counts = counted(|| output.fill(out, LATENCY));
+        drop(held);
+
+        if counts != Counts::default() && first.is_none() {
+            first = Some(k);
+        }
+        total.allocations += counts.allocations;
+        total.frees += counts.frees;
+        peak = out.iter().fold(peak, |a, s| a.max(s.abs()));
+        played += frames;
+        k += 1;
+    }
+
+    assert_eq!(
+        total,
+        Counts::default(),
+        "the callback allocated or freed, first in buffer {first:?}"
+    );
+    assert!(!failed.load(Ordering::Acquire));
+    assert!(
+        sends.iter().any(|done| done.load(Ordering::Acquire)),
+        "no send was heard out"
+    );
+    assert!(peak > 0.1, "nothing much played: a peak of {peak}");
 }
