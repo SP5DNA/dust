@@ -1398,6 +1398,31 @@ mod interactions {
         }
     }
 
+    /// A paddle letter draws the one box it was keyed into, however long the
+    /// session: only the open box reads the draft, and a letter is the one
+    /// change to it the page has not seen.
+    #[test]
+    fn a_paddle_letter_costs_the_same_whatever_the_session_length() {
+        crate::testing::run(|| async {
+            let mut costs = Vec::new();
+            for count in [3, 30] {
+                HEARD.with(|heard| heard.borrow_mut().clear());
+                let mut ui = Ui::new(ManyGroupsHarness, ManyGroupsHarnessProps { count });
+                let _ = ui.take_work();
+                tap_dits(&mut ui, "group-input-0", 1).await;
+                assert!(box_shows(&ui, "E"), "{}", ui.input_tag("group-input-0"));
+                costs.push(ui.take_work());
+            }
+            assert_eq!(
+                costs[0], costs[1],
+                "a letter cost {} mutations in a three-group session and {} in a \
+                 thirty-group one — every box is being drawn for it",
+                costs[0], costs[1]
+            );
+            assert!(costs[0] <= 2, "a letter cost {} mutations", costs[0]);
+        });
+    }
+
     /// One character short of the send stays in the box. The session does not
     /// hear it until the debounce has sat still — and the box is not drawn
     /// for it in the meantime, since the page shows the key already.
@@ -1460,6 +1485,11 @@ mod interactions {
     fn box_shows(ui: &Ui, text: &str) -> bool {
         ui.input_tag("group-input-0")
             .contains(&format!("value=\"{text}\""))
+    }
+
+    /// How many cards carry what gives an opened box the focus as it mounts.
+    fn focus_markers(ui: &Ui) -> usize {
+        ui.html().matches("<span hidden").count()
     }
 
     /// A keyed letter is in the box the moment it is keyed, not once the
@@ -1538,12 +1568,12 @@ mod interactions {
         }
     }
 
-    /// The open box is drawn again for reasons of its own — here its send
-    /// counter, with the box left open while the group repeats — and then it
-    /// shows what was typed last: not the blank it was first drawn with, and
-    /// not the older answer the session has heard.
+    /// A group sent again with its box left open moves the card's send
+    /// counter on, and the box inside it is not drawn for that: drawing it
+    /// would write its value back a frame late, over a key typed meanwhile.
+    /// What is typed stays the page's own, and the session still hears it.
     #[test]
-    fn a_box_drawn_again_shows_the_latest_typing() {
+    fn the_send_counter_moves_without_drawing_the_box() {
         crate::testing::run(|| async {
             let mut ui = Ui::new(RepeatingHarness, ());
             assert!(ui.has("Send 1/2"));
@@ -1551,9 +1581,16 @@ mod interactions {
             ui.advance(u64::from(INPUT_COMMIT_DEBOUNCE_MS)).await;
             assert!(ui.has("committed:K"), "{}", ui.html());
             ui.type_into("group-input-0", "KM");
+            let before = ui.input_tag("group-input-0");
             ui.click("btn-finish-a-send");
             assert!(ui.has("Send 2/2"), "{}", ui.html());
-            assert!(box_shows(&ui, "KM"), "{}", ui.input_tag("group-input-0"));
+            assert_eq!(
+                ui.input_tag("group-input-0"),
+                before,
+                "the box was drawn for the send counter"
+            );
+            ui.advance(u64::from(INPUT_COMMIT_DEBOUNCE_MS)).await;
+            assert!(ui.has("committed:KM"), "{}", ui.html());
         });
     }
 
@@ -1707,11 +1744,15 @@ mod interactions {
             assert!(locked.contains("readonly"), "{locked}");
             ui.type_into("group-input-0", "KM");
             assert!(!ui.has("committed:"), "typing must not land while locked");
+            // What takes the focus as a box opens is carried by the open box's
+            // card alone, so a locked box has none.
+            assert_eq!(focus_markers(&ui), 0, "{}", ui.html());
 
             ui.click("btn-unlock-group");
             let open = ui.input_tag("group-input-0");
             assert!(!open.contains("readonly"), "{open}");
             assert!(!open.contains("disabled"), "{open}");
+            assert_eq!(focus_markers(&ui), 1, "{}", ui.html());
             ui.type_into("group-input-0", "KM");
             assert!(ui.has("committed:KM"), "{}", ui.html());
         });

@@ -51,15 +51,18 @@ pub fn TrainingProgress(
 /// its `value` again whether or not it changed; on the desktop and mobile
 /// builds that write reaches the page a frame later, over whatever was typed
 /// in the meantime, and the key typed in between is lost for good. What is
-/// typed is in the box already, so the box is drawn only for what it has not
-/// seen: a letter the paddles keyed, or a group that is over.
+/// typed is in the box already, so while it is open the box is drawn only for
+/// what it has not seen: a letter the paddles keyed. Its card is drawn without
+/// it ([`AnswerBox`]), and a group that is over is drawn from what the session
+/// holds.
 #[derive(Clone, Copy, PartialEq)]
 struct AnswerDraft {
     /// The text in the box. Not reactive: a key is in the box before it is
     /// here, and drawing the box for it would only write it back.
     text: CopyValue<String>,
     /// Moved on when `text` changes in a way the box has not seen, which
-    /// draws the box again. Only that box reads it, so it redraws one card.
+    /// draws the box again. Only the open box reads it, so it redraws that
+    /// box alone.
     repaint: Signal<u64>,
     /// The group `text` is the answer to.
     at: CopyValue<Option<usize>>,
@@ -156,13 +159,13 @@ impl AnswerDraft {
     /// A new group is up, or this one is over: the pause has nothing left to
     /// wait for, and a finished group's draft is gone. Whatever was typed is
     /// with the session already — only the session moves a group on, and it
-    /// takes what is waiting first.
+    /// takes what is waiting first. Nothing is drawn for it: a finished
+    /// group's box is closed, and shows what the session holds.
     fn settle(mut self, finished: bool) {
         self.cancel_pending();
         if finished {
             self.at.set(None);
             self.text.set(String::new());
-            self.redraw();
         }
     }
 
@@ -189,9 +192,6 @@ impl AnswerDraft {
 /// instead, the nineteen that did not move are skipped. That holds only while
 /// every prop is stable: a handler built afresh in the parent's body is a new
 /// prop on every render, and redraws them all.
-///
-/// The active card may read the draft. The others must not: a read would
-/// subscribe every card to every paddle letter and quietly undo the split.
 #[component]
 #[allow(clippy::too_many_arguments)]
 fn GroupCard(
@@ -217,20 +217,8 @@ fn GroupCard(
     } else {
         "group"
     };
-    let input_cls = if input_locked {
-        "answer locked"
-    } else {
-        "answer"
-    };
     let live = is_active && !input_locked;
-    let closed = disabled || input_locked;
-    let shown = if is_active {
-        draft.read_for(idx).unwrap_or_default()
-    } else {
-        value.clone()
-    };
     let correct = value.trim().eq_ignore_ascii_case(&sent);
-    let sent_for_input = sent.clone();
     rsx! {
         div { id: "group-card-{idx}", class: cls,
             div { class: "row-between",
@@ -251,38 +239,17 @@ fn GroupCard(
                     }
                 }
             }
-            input {
-                id: "group-input-{idx}",
-                class: input_cls,
-                aria_label: "Answer for group {idx + 1}",
-                value: "{shown}",
-                disabled: html_bool(disabled),
-                readonly: html_bool(input_locked || is_confirmed),
+            AnswerBox {
+                idx,
+                sent: sent.clone(),
+                value: value.clone(),
+                disabled,
+                input_locked,
+                is_active,
+                is_confirmed,
                 placeholder,
-                autocomplete: "off",
-                autocorrect: "off",
-                autocapitalize: "characters",
-                spellcheck: false,
-                enterkeyhint: "done",
-                inputmode: "text",
-                lang: "zxx",
-                oninput: move |e| {
-                    if !closed {
-                        draft.edit(idx, e.value(), &sent_for_input);
-                    }
-                },
-                // `[` and `]` are paddles: the app's root keys them and keeps
-                // them out of the box.
-                onkeydown: move |e| {
-                    if closed {
-                        e.prevent_default();
-                        return;
-                    }
-                    // What is typed reaches the session ahead of the confirm.
-                    if e.key() == Key::Enter {
-                        on_confirm.call(());
-                    }
-                },
+                draft,
+                on_confirm,
             }
             // The card is keyed on whether its box is live, so a box that
             // opens is a new card, and this mounts with it: mounting is when
@@ -308,6 +275,82 @@ fn GroupCard(
                     }
                 }
             }
+        }
+    }
+}
+
+/// The box a group is answered in.
+///
+/// A component of its own so that its card can be drawn without it. Drawing
+/// the box writes its `value` again, whether or not it changed, and on the
+/// desktop and mobile builds that write reaches the page a frame later, over
+/// whatever was typed in the meantime. The card is drawn again for things the
+/// box has nothing to do with — the send counter, while a group repeats with
+/// the box open — and given props to compare, the box is skipped then.
+///
+/// Only the open box reads the draft, and so only it is drawn for a paddle
+/// letter. The others must not: a read would subscribe every box to every
+/// letter and quietly undo the split.
+#[component]
+#[allow(clippy::too_many_arguments)]
+fn AnswerBox(
+    idx: usize,
+    sent: String,
+    /// What the session holds for this group. Blank for the open box, which
+    /// shows the draft instead.
+    value: String,
+    disabled: bool,
+    input_locked: bool,
+    is_active: bool,
+    is_confirmed: bool,
+    placeholder: &'static str,
+    draft: AnswerDraft,
+    on_confirm: EventHandler<()>,
+) -> Element {
+    let class = if input_locked {
+        "answer locked"
+    } else {
+        "answer"
+    };
+    let closed = disabled || input_locked;
+    let shown = if is_active {
+        draft.read_for(idx).unwrap_or_default()
+    } else {
+        value
+    };
+    rsx! {
+        input {
+            id: "group-input-{idx}",
+            class,
+            aria_label: "Answer for group {idx + 1}",
+            value: "{shown}",
+            disabled: html_bool(disabled),
+            readonly: html_bool(input_locked || is_confirmed),
+            placeholder,
+            autocomplete: "off",
+            autocorrect: "off",
+            autocapitalize: "characters",
+            spellcheck: false,
+            enterkeyhint: "done",
+            inputmode: "text",
+            lang: "zxx",
+            oninput: move |e| {
+                if !closed {
+                    draft.edit(idx, e.value(), &sent);
+                }
+            },
+            // `[` and `]` are paddles: the app's root keys them and keeps
+            // them out of the box.
+            onkeydown: move |e| {
+                if closed {
+                    e.prevent_default();
+                    return;
+                }
+                // What is typed reaches the session ahead of the confirm.
+                if e.key() == Key::Enter {
+                    on_confirm.call(());
+                }
+            },
         }
     }
 }
@@ -502,10 +545,15 @@ mod tests {
         );
         // `block`, not the `vertical` the desktop builds send for a mounted
         // element's scroll: `scrollIntoView` ignores that, and top-aligns.
-        assert!(script.contains(r#"block: "center""#), "{script}");
+        // Centred on both ways in, and never anywhere else.
+        let primary =
+            r#"card.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });"#;
+        let fallback = r#"card.scrollIntoView({ block: "center", inline: "nearest" });"#;
+        assert!(script.contains(primary), "{script}");
+        assert!(script.contains(fallback), "{script}");
+        assert_eq!(script.matches("block:").count(), 2, "{script}");
         assert!(!script.contains("vertical"), "{script}");
-        assert!(script.contains(r#"behavior: "instant""#), "{script}");
-        let scroll = script.find("scrollIntoView").expect("the card is scrolled");
+        let scroll = script.find(primary).expect("the card is scrolled");
         let focus = script
             .find("input.focus({ preventScroll: true })")
             .expect("the box takes the focus without scrolling again");
