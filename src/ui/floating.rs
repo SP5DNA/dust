@@ -27,6 +27,7 @@
 use std::cell::RefCell;
 use std::rc::{Rc, Weak};
 
+use dioxus::core::spawn_forever;
 use dioxus::desktop::{Config, DesktopService, LogicalSize, WindowBuilder, window};
 use dioxus::html::input_data::MouseButton;
 use dioxus::prelude::*;
@@ -77,9 +78,56 @@ pub struct FloatingWindow {
     open: Signal<bool>,
     /// Whether clicks go through it.
     locked: Signal<bool>,
+    /// Moved on by every open and every close. A window takes a while to
+    /// open, and by the time it has, it may have been closed and opened
+    /// again; this is how it finds out.
+    generation: CopyValue<u64>,
+}
+
+/// What becomes of an open once the window it asked for has settled.
+#[derive(Debug, PartialEq)]
+enum Settled<W> {
+    /// The window is the one asked for: it is the one to track.
+    Track(W),
+    /// The window opened after it was closed again, or after a newer open
+    /// was asked for. It is closed; the window tracked now is left alone.
+    Close(W),
+    /// The window never opened, and nothing has been asked for since: it is
+    /// not open after all.
+    Failed,
+    /// The window never opened, but it had been superseded anyway: whatever
+    /// was asked for since stands.
+    Stale,
+}
+
+/// Decide what an open asked for at generation `asked` comes to, once its
+/// window has opened (`Some`) or failed to (`None`), with the handle now at
+/// generation `current` and `open` as it is now.
+fn settle<W>(opened: Option<W>, asked: u64, current: u64, open: bool) -> Settled<W> {
+    // Every close moves the generation on, so a matching one is still open;
+    // `open` is checked as well rather than left to that reasoning.
+    let still_wanted = asked == current && open;
+    match (opened, still_wanted) {
+        (Some(window), true) => Settled::Track(window),
+        (Some(window), false) => Settled::Close(window),
+        (None, true) => Settled::Failed,
+        (None, false) => Settled::Stale,
+    }
 }
 
 impl FloatingWindow {
+    /// Closed, with nothing to show yet. Its signals belong to the scope it
+    /// is made in, which has to outlive every screen that opens it.
+    fn new() -> Self {
+        Self {
+            feed: CopyValue::new(Rc::new(Feed::default())),
+            window: CopyValue::new(None),
+            open: Signal::new(false),
+            locked: Signal::new(false),
+            generation: CopyValue::new(0),
+        }
+    }
+
     pub fn is_open(self) -> bool {
         (self.open)()
     }
@@ -104,12 +152,21 @@ impl FloatingWindow {
         self.window.peek().as_ref().and_then(Weak::upgrade)
     }
 
+    /// Start a new open or close, which supersedes any open still on its
+    /// way. Returns the generation it starts.
+    fn supersede(mut self) -> u64 {
+        let next = *self.generation.peek() + 1;
+        self.generation.set(next);
+        next
+    }
+
     /// Open it, or close it if it is open.
     pub fn toggle(mut self) {
         if *self.open.peek() {
             if let Some(shown) = self.shown() {
                 shown.close();
             }
+            self.supersede();
             self.window.set(None);
             self.open.set(false);
             self.locked.set(false);
@@ -118,17 +175,32 @@ impl FloatingWindow {
         let feed = FeedRef(Rc::downgrade(&self.feed.peek()));
         let dom = VirtualDom::new_with_props(Floating, FloatingProps { feed });
         let pending = window().new_window(dom, floating_config());
+        self.open_as(async move { pending.try_resolve().await.ok() });
+    }
+
+    /// Mark it open, and settle what the open comes to once `opening` has
+    /// given the window asked for, or nothing.
+    fn open_as(mut self, opening: impl Future<Output = Option<Rc<DesktopService>>> + 'static) {
+        let asked = self.supersede();
         self.open.set(true);
-        spawn(async move {
-            let Ok(shown) = pending.try_resolve().await else {
-                self.open.set(false);
-                return;
-            };
-            if *self.open.peek() {
-                self.window.set(Some(Rc::downgrade(&shown)));
-            } else {
-                // Closed again before it had even opened.
-                shown.close();
+        // In the root scope, not the caller's. The button that opens it is on
+        // Listen, and a task of that screen's is dropped when it is left:
+        // leave Listen before the window has opened, and it would open all
+        // the same, with nothing here to close or lock it. What this touches
+        // is the handle's own, made by the app's root component, which
+        // outlives every screen.
+        spawn_forever(async move {
+            let opened = opening.await;
+            // Each read in a statement of its own: a guard left alive in the
+            // match below would still be held when an arm writes `open`.
+            let current = *self.generation.peek();
+            let open = *self.open.peek();
+            match settle(opened, asked, current, open) {
+                Settled::Track(shown) => self.window.set(Some(Rc::downgrade(&shown))),
+                // Closed again, or opened again, before it had even opened.
+                Settled::Close(shown) => shown.close(),
+                Settled::Failed => self.open.set(false),
+                Settled::Stale => {}
             }
         });
     }
@@ -137,12 +209,7 @@ impl FloatingWindow {
 /// The floating window's handle, kept up to date with what the stream sends.
 /// Called once, from the app's root.
 pub fn use_floating_window(ctx: AppCtx) -> FloatingWindow {
-    let floating = use_context_provider(|| FloatingWindow {
-        feed: CopyValue::new(Rc::new(Feed::default())),
-        window: CopyValue::new(None),
-        open: Signal::new(false),
-        locked: Signal::new(false),
-    });
+    let floating = use_context_provider(FloatingWindow::new);
     use_effect(move || {
         let view = FeedView {
             heard: ctx.stream_heard.read().clone(),
@@ -339,6 +406,9 @@ fn Floating(feed: FeedRef) -> Element {
 mod tests {
     use super::*;
 
+    use crate::testing::{Ui, run};
+    use crate::ui::widgets::control_id;
+
     fn group(text: &str) -> HeardGroup {
         HeardGroup {
             text: text.into(),
@@ -429,6 +499,104 @@ mod tests {
         let head = floating_head();
         assert!(head.contains("window.requestAnimationFrame ="));
         assert!(head.contains("background: transparent"));
+    }
+
+    #[test]
+    fn a_window_that_opens_as_asked_is_the_one_tracked() {
+        assert_eq!(settle(Some("window"), 1, 1, true), Settled::Track("window"));
+        // A failure leaves nothing open.
+        assert_eq!(settle(None::<&str>, 1, 1, true), Settled::Failed);
+    }
+
+    /// Opened, closed and opened again faster than a window can appear: the
+    /// first window is no longer wanted when it arrives. It used to be
+    /// tracked, then lost behind the second, and it stayed on screen with
+    /// nothing in the main window able to close or lock it.
+    #[test]
+    fn a_window_that_opens_after_it_was_superseded_is_closed() {
+        // Asked at 1, closed at 2, asked again at 3. Each settles against the
+        // handle as it is when it arrives, so the order they arrive in makes
+        // no difference.
+        let now = 3;
+        // Closing names the late window only: the one tracked is not touched.
+        assert_eq!(settle(Some("first"), 1, now, true), Settled::Close("first"));
+        assert_eq!(
+            settle(Some("second"), 3, now, true),
+            Settled::Track("second")
+        );
+        // Closed and not opened again.
+        assert_eq!(settle(Some("first"), 1, 2, false), Settled::Close("first"));
+    }
+
+    /// A late failure of an open that was superseded must not mark the
+    /// newer window as closed.
+    #[test]
+    fn a_superseded_open_that_fails_leaves_the_newer_one_alone() {
+        // Asked at 1, closed at 2, asked again at 3: the third stays open.
+        assert_eq!(settle(None::<&str>, 1, 3, true), Settled::Stale);
+        // Closed since, and not asked again: it is closed either way.
+        assert_eq!(settle(None::<&str>, 1, 2, false), Settled::Stale);
+    }
+
+    /// How long the window [`Listening`] asks for takes to come to nothing.
+    const OPENING_MS: u32 = 200;
+
+    /// The app's root, holding the handle, over a screen that opens the
+    /// window the way Listen does and can be left.
+    #[component]
+    fn LeavesListen() -> Element {
+        let floating = use_hook(FloatingWindow::new);
+        let mut listening = use_signal(|| true);
+        rsx! {
+            if listening() {
+                Listening { floating }
+            }
+            button {
+                id: control_id("btn", "leave"),
+                onclick: move |_| listening.set(false),
+                "leave"
+            }
+            p { "open: {floating.is_open()}" }
+        }
+    }
+
+    /// Asks for a window that fails to open a while later: no window can be
+    /// made without a desktop, and an open that settles is all this needs.
+    #[component]
+    fn Listening(floating: FloatingWindow) -> Element {
+        rsx! {
+            button {
+                id: control_id("btn", "float"),
+                onclick: move |_| {
+                    floating.open_as(async {
+                        sleep_ms(OPENING_MS).await;
+                        None
+                    });
+                },
+                "float"
+            }
+        }
+    }
+
+    /// An open still settles after the screen that asked for it has gone.
+    /// It used to go with that screen: leave Listen before the window had
+    /// opened, and it opened untracked, with nothing in the main window able
+    /// to close or lock it.
+    #[test]
+    fn an_open_settles_after_the_screen_that_asked_for_it_has_gone() {
+        run(|| async {
+            let mut ui = Ui::new(LeavesListen, ());
+            ui.click("btn-float");
+            assert!(ui.has("open: true"), "{}", ui.html());
+            ui.click("btn-leave");
+            assert!(!ui.shows("btn-float"));
+            ui.advance(u64::from(OPENING_MS) * 2).await;
+            assert!(
+                ui.has("open: false"),
+                "the open went with the screen: {}",
+                ui.html()
+            );
+        });
     }
 
     #[test]

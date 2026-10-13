@@ -80,4 +80,33 @@ mod tests {
         let short = Reservation::new(2, 0.25);
         assert_eq!(first_to_remake(queued, short, 0.0), Some(0));
     }
+
+    /// A queue made under a pile-up from its first buffer, each buffer made
+    /// for the callers `callers_at` gives its start, has nothing to remake
+    /// for that pile-up, the buffers too close to the clock to take back
+    /// included; a stop still remakes whatever was made for the callers and
+    /// is not yet due. That is the queue a band started under a send in
+    /// flight is meant to hold. This checks the arithmetic on such a queue,
+    /// not the web stream that builds one.
+    #[test]
+    fn a_queue_made_under_a_pile_up_has_nothing_to_remake_for_it() {
+        let made_under = |pileup: Option<Reservation>| -> Vec<(f64, usize)> {
+            (0..5)
+                .map(|k| {
+                    let start = f64::from(k) / 10.0;
+                    (start, callers_at(pileup, start))
+                })
+                .collect()
+        };
+        let pileup = Reservation::new(2, 0.35);
+        let queued = made_under(pileup);
+        let made_for: Vec<usize> = queued.iter().map(|(_, callers)| *callers).collect();
+        assert_eq!(made_for, [2, 2, 2, 2, 0]);
+        assert_eq!(first_to_remake(queued.clone(), pileup, 0.0), None);
+        assert_eq!(first_to_remake(queued.clone(), pileup, 0.15), None);
+        assert_eq!(first_to_remake(queued, None, 0.15), Some(2));
+        // One that has stopped calling by the time the band starts is made
+        // room for nowhere, as if there were none.
+        assert_eq!(made_under(Reservation::new(2, 0.0)), made_under(None));
+    }
 }

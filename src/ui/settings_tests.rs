@@ -56,7 +56,8 @@ fn typing_into_one_end_of_the_side_tone_keeps_its_box() {
 }
 
 /// A number committed past what the field allows comes back as the most it
-/// allows, even when that is what the setting already was.
+/// allows, even when that is what the setting already was. Until then the
+/// 999 is the box's own: nothing is written over it while it is typed.
 #[test]
 fn a_number_committed_out_of_bounds_shows_where_it_landed() {
     run(|| async {
@@ -65,12 +66,141 @@ fn a_number_committed_out_of_bounds_shows_where_it_landed() {
         let (mut ui, _recorder) = Ui::app_with_settings(settings);
         ui.click("nav-settings");
         let field = "number-pause-after-each-group";
+        let _ = ui.take_work();
         ui.type_into(field, "999");
-        assert_eq!(value_of(&ui, field), "999");
+        assert_eq!(ui.take_work(), 0, "typing wrote over the box");
         ui.commit(field, "999");
+        // The setting did not move, so only the field itself can write the
+        // most it allows back over the 999.
+        assert!(ui.take_work() > 0, "the commit left 999 in the box");
         assert_eq!(
             value_of(&ui, field),
             cw_core::GROUP_PAUSE_MAX_SEC.to_string()
+        );
+        ui.click("less-number-pause-after-each-group");
+        assert_eq!(
+            value_of(&ui, field),
+            (cw_core::GROUP_PAUSE_MAX_SEC - 0.5).to_string()
+        );
+    });
+}
+
+/// A number typed faster than the page draws is committed whole.
+///
+/// On the desktop and phone builds a redraw reaches the box a frame after it
+/// was made, and it sends the box its `value` whether or not that changed. A
+/// field that redrew for every key wrote each key's text back over whatever
+/// had been typed since, and a quick 120 came out as 10. The harness draws
+/// at once, so this plays the webview's part, at its worst: every redraw
+/// lands a key late.
+#[test]
+fn a_number_typed_faster_than_the_page_draws_is_committed_whole() {
+    run(|| async {
+        let (mut ui, _recorder) = Ui::app_with_settings(test_settings());
+        ui.click("nav-settings");
+        let field = "number-groups-per-session";
+        let _ = ui.take_work();
+        // What the box on screen holds, and a redraw still on its way to it.
+        let mut screen = String::new();
+        let mut on_its_way: Option<String> = None;
+        for key in ['1', '2', '0'] {
+            screen.push(key);
+            ui.type_into(field, &screen);
+            if let Some(late) = on_its_way.take() {
+                screen = late;
+            }
+            if ui.take_work() > 0 {
+                on_its_way = Some(value_of(&ui, field));
+            }
+        }
+        if let Some(late) = on_its_way {
+            screen = late;
+        }
+        assert_eq!(screen, "120");
+        assert_eq!(
+            ui.stored_settings().await.curriculum.num_groups,
+            2,
+            "nothing is taken before it is committed"
+        );
+        ui.commit(field, &screen);
+        assert_eq!(value_of(&ui, field), "120");
+        assert_eq!(ui.stored_settings().await.curriculum.num_groups, 120);
+    });
+}
+
+/// − and + move the box as well as the setting, before anything is typed
+/// and after.
+#[test]
+fn the_step_buttons_move_the_number_in_the_box() {
+    run(|| async {
+        let (mut ui, _recorder) = Ui::app_with_settings(test_settings());
+        ui.click("nav-settings");
+        let field = "number-groups-per-session";
+        ui.click("more-number-groups-per-session");
+        assert_eq!(value_of(&ui, field), "3");
+        ui.type_into(field, "12");
+        ui.commit(field, "12");
+        assert_eq!(value_of(&ui, field), "12");
+        ui.click("more-number-groups-per-session");
+        assert_eq!(value_of(&ui, field), "13");
+        ui.click("less-number-groups-per-session");
+        ui.click("less-number-groups-per-session");
+        assert_eq!(value_of(&ui, field), "11");
+        assert_eq!(ui.stored_settings().await.curriculum.num_groups, 11);
+    });
+}
+
+/// − and + show the number they step to over text that was typed and never
+/// committed.
+///
+/// A key typed straight after Enter can be written over by the commit's
+/// redraw, a frame late. The box is then back as it was committed, so
+/// leaving it commits nothing, but the field still holds the text with the
+/// key in it. A step drew that text back over the new number: the box said
+/// 405 while the setting had gone to 41.
+#[test]
+fn a_step_shows_the_number_stepped_to_over_text_never_committed() {
+    run(|| async {
+        let (mut ui, _recorder) = Ui::app_with_settings(test_settings());
+        ui.click("nav-settings");
+        let field = "number-groups-per-session";
+        ui.type_into(field, "40");
+        ui.commit(field, "40");
+        // The 5, which the commit's redraw wrote over.
+        ui.type_into(field, "405");
+        ui.click("more-number-groups-per-session");
+        assert_eq!(value_of(&ui, field), "41");
+        assert_eq!(ui.stored_settings().await.curriculum.num_groups, 41);
+        // A phone can keep the box focused through a tap on −, so what is
+        // typed before it is never committed either.
+        ui.type_into(field, "7");
+        ui.click("less-number-groups-per-session");
+        assert_eq!(value_of(&ui, field), "40");
+        assert_eq!(ui.stored_settings().await.curriculum.num_groups, 40);
+    });
+}
+
+/// A step up to the field's top shows the top, not the text typed past it.
+#[test]
+fn a_step_to_the_top_shows_the_top_over_text_never_committed() {
+    run(|| async {
+        let mut settings = test_settings();
+        settings.curriculum.num_groups = cw_core::NUM_GROUPS_MAX - 1;
+        let (mut ui, _recorder) = Ui::app_with_settings(settings);
+        ui.click("nav-settings");
+        let field = "number-groups-per-session";
+        let more = "more-number-groups-per-session";
+        ui.type_into(field, "1995");
+        ui.click(more);
+        assert_eq!(value_of(&ui, field), cw_core::NUM_GROUPS_MAX.to_string());
+        assert!(
+            ui.input_tag(more).contains("disabled"),
+            "{}",
+            ui.input_tag(more)
+        );
+        assert_eq!(
+            ui.stored_settings().await.curriculum.num_groups,
+            cw_core::NUM_GROUPS_MAX
         );
     });
 }

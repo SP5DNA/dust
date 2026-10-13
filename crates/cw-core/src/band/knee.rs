@@ -29,22 +29,38 @@ pub const FLOOR_MEASURE_RATE: u32 = 16_000;
 ///
 /// Remembered, because measuring it is three seconds of band: the floor
 /// depends only on the noise, the static and the receiver, so moving the
-/// fading, the stations or the volume asks the same question again.
+/// fading, the stations or the volume asks the same question again. That is
+/// also what lets it be measured ahead, before a band is built: asked of the
+/// same settings, the band finds the answer waiting.
 pub fn agc_knee(band: &BandSettings, receiver: &FilterDesign) -> Option<f64> {
     if !band.agc_enabled {
         return None;
     }
-    static LAST: LastAnswer<(Exact, Exact, FilterDesign), f64> = LastAnswer::new();
-    let key = (
-        Exact(noise_level(band)),
-        Exact(qrn_level(band)),
-        receiver.clone(),
-    );
-    Some(LAST.get_or(key, || {
+    static LAST: LastAnswer<KneeAsk, f64> = LastAnswer::new();
+    Some(LAST.get_or(KneeAsk::of(band, receiver), || {
         let floor =
             band_standing_level(FLOOR_MEASURE_RATE, band, receiver).max(reference_floor_level());
         AGC_TRIGGER * floor
     }))
+}
+
+/// What the knee is measured from, and so what it is remembered by: the
+/// noise and the static as they are heard, and the receiver.
+#[derive(Clone, Debug, PartialEq)]
+struct KneeAsk {
+    noise: Exact,
+    qrn: Exact,
+    receiver: FilterDesign,
+}
+
+impl KneeAsk {
+    fn of(band: &BandSettings, receiver: &FilterDesign) -> Self {
+        Self {
+            noise: Exact(noise_level(band)),
+            qrn: Exact(qrn_level(band)),
+            receiver: receiver.clone(),
+        }
+    }
 }
 
 /// How high this band's floor ordinarily peaks, through the receiver.
@@ -121,9 +137,63 @@ pub fn reference_floor_level() -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::settings::FILTER_WIDTH_MIN;
+    use crate::settings::{FILTER_WIDTH_MAX, FILTER_WIDTH_MIN, SIDE_TONE_MAX_HZ, SIDE_TONE_MIN_HZ};
 
     const SR: u32 = 48_000;
+
+    /// The band preview measures the knee ahead of building the band, for
+    /// the settings as the app holds them — clamped once — and the band then
+    /// asks for it with those settings clamped again (`BandMixer::new`). The
+    /// two have to be one question, or what was measured ahead is never what
+    /// is asked for: a second clamp must not move anything the knee is
+    /// remembered by, whatever the settings came in as.
+    #[test]
+    fn clamping_twice_asks_the_knee_the_same_question() {
+        let ask = |settings: &TrainingSettings| {
+            KneeAsk::of(&settings.band, &FilterDesign::from_settings(settings))
+        };
+        let levels = [f64::NAN, f64::NEG_INFINITY, -1.0, 0.0, 0.4, 1.0, 9.0];
+        let widths = [
+            f64::NAN,
+            -500.0,
+            FILTER_WIDTH_MIN,
+            500.0,
+            FILTER_WIDTH_MAX,
+            90_000.0,
+        ];
+        let tones = [
+            (f64::NAN, f64::INFINITY),
+            (9_000.0, 1.0),
+            (SIDE_TONE_MIN_HZ, SIDE_TONE_MAX_HZ),
+            (700.0, 700.0),
+        ];
+        let mut case = 0;
+        for shape in [FilterShape::Sharp, FilterShape::Soft, FilterShape::Peaked] {
+            for width in widths {
+                for (low, high) in tones {
+                    let mut s = TrainingSettings::default();
+                    s.band.filter_shape = shape;
+                    s.band.filter_width_hz = width;
+                    s.band.side_tone_min = low;
+                    s.band.side_tone_max = high;
+                    // The levels and switches turn over at their own pace,
+                    // mixed in with the filters rather than multiplying them.
+                    s.band.noise_enabled = case % 3 != 0;
+                    s.band.qrn_enabled = case % 2 == 0;
+                    s.band.noise_level = levels[case % levels.len()];
+                    s.band.qrn_level = levels[(case / 2) % levels.len()];
+                    case += 1;
+                    let once = s.clamp();
+                    let twice = once.clone().clamp();
+                    assert_eq!(
+                        ask(&once),
+                        ask(&twice),
+                        "{shape:?} at {width} Hz over {low}-{high} Hz"
+                    );
+                }
+            }
+        }
+    }
 
     fn standing(sample_rate: u32, settings: &TrainingSettings) -> f64 {
         let settings = settings.clone().clamp();

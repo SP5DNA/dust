@@ -174,6 +174,14 @@ impl<S: GroupSource> SessionMachine<S> {
     /// is no deadline: it waits for the answer to sit still, so an entry
     /// still under way puts it off. Anything else — a send ending, a gap —
     /// leaves the answer open for more.
+    ///
+    /// Typing never closes the answer, and must not be made to. Closing it
+    /// has the runtime ask the answer box to finish what is entered, and the
+    /// box can hand the session what it finishes as an
+    /// [`SessionEvent::Input`] from inside that very dispatch. An input that
+    /// closed the answer would ask the box to finish again while it is still
+    /// finishing, and a UI callback called from inside itself panics: the
+    /// app would go down mid-session.
     pub fn closes_answer(&self, event: &SessionEvent) -> Option<AnswerClose> {
         if self.is_terminal() {
             return None;
@@ -555,7 +563,9 @@ mod tests {
 
     /// Confirming, finishing, and the answer window or auto-confirm running
     /// out close the answer. A send ending, or the gap between sends running
-    /// out, leaves it open for more.
+    /// out, leaves it open for more. Typing closes nothing, and must not:
+    /// not even an answer as long as the group, the one auto-confirm waits
+    /// on to settle.
     #[test]
     fn only_what_closes_the_answer_says_so() {
         use AnswerClose::{Deadline, Settled};
@@ -575,6 +585,7 @@ mod tests {
         assert_eq!(m.closes_answer(&SessionEvent::Confirm), Some(Deadline));
         assert_eq!(m.closes_answer(&SessionEvent::FinishNow), Some(Deadline));
         assert_eq!(m.closes_answer(&typed(0, "K")), None);
+        assert_eq!(m.closes_answer(&typed(0, "KM")), None);
         assert_eq!(m.closes_answer(&SessionEvent::Abort), None);
         // A full answer starts auto-confirm, which waits for it to settle.
         let auto = m.apply(typed(0, "KM"), MonoMs(1_500));
@@ -583,6 +594,10 @@ mod tests {
             m.closes_answer(&SessionEvent::TimerFired { id: auto_id }),
             Some(Settled)
         );
+        // The same full answer again, with auto-confirm waiting on it, or a
+        // different one, closes nothing either.
+        assert_eq!(m.closes_answer(&typed(0, "KM")), None);
+        assert_eq!(m.closes_answer(&typed(0, "MK")), None);
         // A timer the machine has forgotten closes nothing, and nothing does
         // once the session is over.
         assert_eq!(m.closes_answer(&SessionEvent::TimerFired { id: 999 }), None);

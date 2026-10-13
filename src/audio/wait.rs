@@ -411,6 +411,53 @@ mod tests {
         );
     }
 
+    /// A native stream has no clock of its own to report, so a stall is
+    /// judged by the time that really passed between polls: all of it,
+    /// however it was spent. A process frozen whole for longer than the send
+    /// and its grace — a phone that put the app on hold, a debugger that
+    /// stopped it — wakes to a send that is still playing, because its audio
+    /// froze with it, and calls that a stall: the group is rebuilt and sent
+    /// again rather than heard out. Charging less would let a stream that
+    /// died during the gap sit silent for up to the whole grace before
+    /// anything noticed. A send the audio heard out while the waiter slept is
+    /// still believed: its word outranks the budget.
+    #[test]
+    fn a_long_gap_between_polls_is_charged_to_the_stall_budget() {
+        use std::task::Poll;
+        use std::time::Duration;
+
+        let playing = flags();
+        let mut done = flags();
+        done.finished = true;
+        let after_a_gap = |steps: Vec<WaitFlags>| {
+            run(async move {
+                crate::time::reset_mono_clock();
+                let mut wait = std::pin::pin!(scripted(1.0, steps).wait());
+                // One poll, still playing, and the waiter asleep until the
+                // next; then ten seconds go by at once.
+                let first = std::future::poll_fn(|cx| Poll::Ready(wait.as_mut().poll(cx))).await;
+                assert!(first.is_pending());
+                tokio::time::advance(Duration::from_millis(10_000)).await;
+                wait.await
+            })
+        };
+        assert_eq!(
+            after_a_gap(vec![playing, done]),
+            PlaybackOutcome::Completed,
+            "finished by the time the waiter woke"
+        );
+        assert_eq!(
+            after_a_gap(vec![playing, playing, done]),
+            PlaybackOutcome::Failed,
+            "still playing when the waiter woke, and finished a poll later"
+        );
+        // Polled as often as asked, the same send is heard out.
+        assert_eq!(
+            run(scripted(1.0, vec![playing, playing, done]).wait()),
+            PlaybackOutcome::Completed
+        );
+    }
+
     #[test]
     fn waiting_gives_up_on_a_send_that_never_starts() {
         let stalled = WaitFlags {

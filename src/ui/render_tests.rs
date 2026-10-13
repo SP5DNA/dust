@@ -25,7 +25,7 @@ use super::paddle::{PaddlePad, use_paddle_keys};
 use super::results::ResultsView;
 use super::settings::SettingsView;
 use super::stats::{StatsView, StatsViewProps};
-use super::training::{TrainingProgress, TrainingView};
+use super::training::{INPUT_COMMIT_DEBOUNCE_MS, TrainingProgress, TrainingView};
 use crate::audio::fake::Recorder;
 use crate::session_runtime::AnswerOutbox;
 use crate::state::{AppState, Screen};
@@ -33,6 +33,10 @@ use crate::state::{AppState, Screen};
 std::thread_local! {
     /// How many times a [`Keyed`] with no sound device has looked for one.
     static DEVICE_LOOKS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// What the session behind a `ManyGroupsHarness` has been handed, kept
+    /// off the page so that its hearing an answer draws nothing of its own.
+    static HEARD: std::cell::RefCell<Vec<(usize, String)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// The app's paddle keyer around a screen drawn on its own, keyed from a
@@ -1320,7 +1324,10 @@ mod interactions {
                 locked: false,
                 repeat_total: 1,
                 repeat_done: 1,
-                on_change: move |(_, value): (usize, String)| typed.set(value),
+                on_change: move |(index, value): (usize, String)| {
+                    HEARD.with(|heard| heard.borrow_mut().push((index, value.clone())));
+                    typed.set(value);
+                },
                 on_confirm: move |()| {},
                 on_submit: move |_| {},
                 on_stop: move |_| {},
@@ -1328,7 +1335,7 @@ mod interactions {
         }
     }
 
-    /// A key lands in one box, so it must cost one box.
+    /// A key costs the renderer nothing, however long the session.
     ///
     /// The group card used to be written inline in the list's loop, which put
     /// the draft signal inside every iteration: one keystroke rebuilt and
@@ -1337,31 +1344,30 @@ mod interactions {
     /// the letter appearing. With twenty groups that is most of a session's
     /// worth of DOM per character, and it is what made typing feel like wading.
     ///
-    /// So the measure is scaling, not a number: typing into a session of
-    /// thirty groups must cost about what it costs in a session of three.
+    /// Even one box is one too many. The key is in the box before anything
+    /// here hears of it, and drawing the box again writes its `value` back,
+    /// which the desktop and mobile builds apply a frame later — over a key
+    /// typed in that frame, which is then lost. The session hearing the
+    /// answer once typing has paused changes nothing on screen either, so it
+    /// must not redraw the box, or any other card, for it.
     #[test]
     fn typing_costs_the_same_whatever_the_session_length() {
         crate::testing::run(|| async {
-            let small = typing_cost(3).await;
-            let large = typing_cost(30).await;
-            assert!(small.key > 0, "the keystroke did nothing at all");
-            assert!(
-                large.key <= small.key * 2,
-                "a key cost {} mutations in a three-group session and {} in a \
-                 thirty-group one — the whole list is being rebuilt per character",
-                small.key,
-                large.key
-            );
-            // The session hearing it, once typing has paused, is one box too:
-            // the cards whose groups did not change are not redrawn.
-            assert!(small.commit > 0, "the debounce never committed");
-            assert!(
-                large.commit <= small.commit * 2,
-                "a commit cost {} mutations in a three-group session and {} in a \
-                 thirty-group one — every card is redrawn when one answer lands",
-                small.commit,
-                large.commit
-            );
+            for count in [3, 30] {
+                let cost = typing_cost(count).await;
+                assert_eq!(
+                    cost.key, 0,
+                    "a key cost {} mutations in a {count}-group session — the box \
+                     is being written back under the typing",
+                    cost.key
+                );
+                assert_eq!(
+                    cost.commit, 0,
+                    "the session hearing an answer cost {} mutations in a \
+                     {count}-group session — the box is being written back",
+                    cost.commit
+                );
+            }
         });
     }
 
@@ -1373,28 +1379,66 @@ mod interactions {
     /// What one key costs the renderer in a session of `count` groups, and
     /// what the session hearing it after the debounce costs.
     async fn typing_cost(count: usize) -> TypingCost {
+        HEARD.with(|heard| heard.borrow_mut().clear());
+        let heard = || HEARD.with(|heard| heard.borrow().clone());
         let mut ui = Ui::new(ManyGroupsHarness, ManyGroupsHarnessProps { count });
         let _ = ui.take_work();
         ui.type_into("group-input-0", "K");
         let key = ui.take_work();
-        ui.advance(60).await;
+        assert!(heard().is_empty(), "heard before typing had paused");
+        ui.advance(u64::from(INPUT_COMMIT_DEBOUNCE_MS)).await;
+        assert_eq!(
+            heard(),
+            [(0, "K".to_string())],
+            "the session must hear the key once typing has paused"
+        );
         TypingCost {
             key,
             commit: ui.take_work(),
         }
     }
 
+    /// A paddle letter draws the one box it was keyed into, however long the
+    /// session: only the open box reads the draft, and a letter is the one
+    /// change to it the page has not seen.
+    #[test]
+    fn a_paddle_letter_costs_the_same_whatever_the_session_length() {
+        crate::testing::run(|| async {
+            let mut costs = Vec::new();
+            for count in [3, 30] {
+                HEARD.with(|heard| heard.borrow_mut().clear());
+                let mut ui = Ui::new(ManyGroupsHarness, ManyGroupsHarnessProps { count });
+                let _ = ui.take_work();
+                tap_dits(&mut ui, "group-input-0", 1).await;
+                assert!(box_shows(&ui, "E"), "{}", ui.input_tag("group-input-0"));
+                costs.push(ui.take_work());
+            }
+            assert_eq!(
+                costs[0], costs[1],
+                "a letter cost {} mutations in a three-group session and {} in a \
+                 thirty-group one — every box is being drawn for it",
+                costs[0], costs[1]
+            );
+            assert!(costs[0] <= 2, "a letter cost {} mutations", costs[0]);
+        });
+    }
+
     /// One character short of the send stays in the box. The session does not
-    /// hear it until the debounce has sat still.
+    /// hear it until the debounce has sat still — and the box is not drawn
+    /// for it in the meantime, since the page shows the key already.
     #[test]
     fn an_incomplete_answer_stays_local_until_debounce() {
         crate::testing::run(|| async {
             let mut ui = Ui::new(AnsweringHarness, ());
+            let _ = ui.take_work();
             ui.type_into("group-input-0", "K");
-            assert!(ui.has("K"));
+            assert_eq!(ui.take_work(), 0, "the key was written back into the box");
             assert!(!ui.has("committed:"));
-            ui.advance(48).await;
-            assert!(ui.has("committed:K"));
+            // The harness clock moves in steps of 4 ms.
+            ui.advance(u64::from(INPUT_COMMIT_DEBOUNCE_MS) - 4).await;
+            assert!(!ui.has("committed:"), "heard before the pause was over");
+            ui.advance(4).await;
+            assert!(ui.has("committed:K"), "{}", ui.html());
         });
     }
 
@@ -1426,11 +1470,189 @@ mod interactions {
             ui.advance(120).await; // letter gap
             ui.advance(48).await;
             assert!(ui.has("committed:O"), "{}", ui.html());
+            // The page has not seen a keyed letter, so the box is drawn with it.
+            let tag = ui.input_tag("group-input-0");
+            assert!(tag.contains("value=\"O\""), "{tag}");
             assert!(
                 !ui.html().contains("value=\"]\""),
                 "the dah paddle must not land as a bracket: {}",
                 ui.html()
             );
+        });
+    }
+
+    /// Whether the box for group 0 is drawn showing `text`.
+    fn box_shows(ui: &Ui, text: &str) -> bool {
+        ui.input_tag("group-input-0")
+            .contains(&format!("value=\"{text}\""))
+    }
+
+    /// How many cards carry what gives an opened box the focus as it mounts.
+    fn focus_markers(ui: &Ui) -> usize {
+        ui.html().matches("<span hidden").count()
+    }
+
+    /// A keyed letter is in the box the moment it is keyed, not once the
+    /// session has heard it: nothing else would ever put it on the page.
+    #[test]
+    fn a_paddle_letter_is_drawn_into_the_box_at_once() {
+        crate::testing::run(|| async {
+            let mut ui = Ui::new(AnsweringHarness, ());
+            ui.press_key(
+                "group-input-0",
+                Key::Character("[".into()),
+                Code::BracketLeft,
+            );
+            ui.advance(30).await;
+            ui.release_key(
+                "group-input-0",
+                Key::Character("[".into()),
+                Code::BracketLeft,
+            );
+            assert!(
+                ui.run_until(400, |ui| box_shows(ui, "E")).await,
+                "{}",
+                ui.html()
+            );
+            // Seen at the first look after the letter landed, which is
+            // sooner than the pause it starts is long.
+            assert!(!ui.has("committed:"), "{}", ui.html());
+            ui.advance(u64::from(INPUT_COMMIT_DEBOUNCE_MS)).await;
+            assert!(ui.has("committed:E"), "{}", ui.html());
+        });
+    }
+
+    /// Typing and keying share a box. A letter keyed after a key typed goes
+    /// after it, and the box is drawn with both — the typed key was never
+    /// drawn, only typed, so drawing the letter alone would wipe it.
+    #[test]
+    fn a_paddle_letter_keys_onto_what_was_typed() {
+        crate::testing::run(|| async {
+            let mut ui = Ui::new(AnsweringHarness, ());
+            ui.type_into("group-input-0", "K");
+            tap_dits(&mut ui, "group-input-0", 1).await;
+            assert!(box_shows(&ui, "KE"), "{}", ui.input_tag("group-input-0"));
+            assert!(ui.has("committed:KE"), "{}", ui.html());
+        });
+    }
+
+    #[component]
+    fn RepeatingHarness() -> Element {
+        let mut sends_done = use_signal(|| 0u32);
+        let mut typed = use_signal(String::new);
+        rsx! {
+            TrainingScreen {
+                current: 0,
+                total: 1,
+                groups: vec!["KMR".to_string()],
+                inputs: vec![typed()],
+                confirmed: vec![false],
+                focused: 0,
+                playing: true,
+                locked: false,
+                repeat_total: 2,
+                repeat_done: sends_done(),
+                on_change: move |(_, value): (usize, String)| typed.set(value),
+                on_confirm: move |()| {},
+                on_submit: move |_| {},
+                on_stop: move |_| {},
+            }
+            button {
+                id: control_id("btn", "finish a send"),
+                onclick: move |_| sends_done += 1,
+                "next send"
+            }
+            if !typed().is_empty() {
+                p { id: "committed-answer", "committed:{typed()}" }
+            }
+        }
+    }
+
+    /// A group sent again with its box left open moves the card's send
+    /// counter on, and the box inside it is not drawn for that: drawing it
+    /// would write its value back a frame late, over a key typed meanwhile.
+    /// What is typed stays the page's own, and the session still hears it.
+    #[test]
+    fn the_send_counter_moves_without_drawing_the_box() {
+        crate::testing::run(|| async {
+            let mut ui = Ui::new(RepeatingHarness, ());
+            assert!(ui.has("Send 1/2"));
+            ui.type_into("group-input-0", "K");
+            ui.advance(u64::from(INPUT_COMMIT_DEBOUNCE_MS)).await;
+            assert!(ui.has("committed:K"), "{}", ui.html());
+            ui.type_into("group-input-0", "KM");
+            let before = ui.input_tag("group-input-0");
+            ui.click("btn-finish-a-send");
+            assert!(ui.has("Send 2/2"), "{}", ui.html());
+            assert_eq!(
+                ui.input_tag("group-input-0"),
+                before,
+                "the box was drawn for the send counter"
+            );
+            ui.advance(u64::from(INPUT_COMMIT_DEBOUNCE_MS)).await;
+            assert!(ui.has("committed:KM"), "{}", ui.html());
+        });
+    }
+
+    #[component]
+    fn RedrawnViewHarness() -> Element {
+        let mut shown = use_signal(|| true);
+        let mut typed = use_signal(String::new);
+        let answer = use_hook(AnswerOutbox::new);
+        rsx! {
+            Keyed { screen: Screen::Training,
+                if shown() {
+                    TrainingView {
+                        current: 0,
+                        groups: vec!["KMR".to_string()],
+                        inputs: vec![typed()],
+                        confirmed: vec![false],
+                        focused: 0,
+                        playing: false,
+                        locked: false,
+                        repeat_total: 1,
+                        repeat_done: 1,
+                        answer,
+                        on_change: move |(_, value): (usize, String)| typed.set(value),
+                        on_confirm: move |()| {},
+                        on_submit: move |_| {},
+                        on_stop: move |_| {},
+                    }
+                }
+                button {
+                    id: control_id("btn", "redraw the view"),
+                    onclick: move |_| shown.toggle(),
+                    "redraw"
+                }
+                if !typed().is_empty() {
+                    p { id: "committed-answer", "committed:{typed()}" }
+                }
+            }
+        }
+    }
+
+    /// A training view drawn afresh on a session under way — as a hot reload
+    /// does — opens the box on the answer the session holds, and a letter
+    /// keyed into it goes after that answer.
+    #[test]
+    fn a_view_drawn_afresh_opens_the_box_on_the_answer_so_far() {
+        crate::testing::run(|| async {
+            let mut ui = Ui::new(RedrawnViewHarness, ());
+            ui.type_into("group-input-0", "K");
+            ui.advance(u64::from(INPUT_COMMIT_DEBOUNCE_MS)).await;
+            assert!(ui.has("committed:K"), "{}", ui.html());
+            ui.click("btn-redraw-the-view");
+            assert!(!ui.shows("group-input-0"));
+            ui.click("btn-redraw-the-view");
+            assert!(box_shows(&ui, "K"), "{}", ui.input_tag("group-input-0"));
+            tap_dits(&mut ui, "group-input-0", 1).await;
+            assert!(
+                ui.run_until(400, |ui| box_shows(ui, "KE")).await,
+                "{}",
+                ui.input_tag("group-input-0")
+            );
+            ui.advance(u64::from(INPUT_COMMIT_DEBOUNCE_MS)).await;
+            assert!(ui.has("committed:KE"), "{}", ui.html());
         });
     }
 
@@ -1522,11 +1744,15 @@ mod interactions {
             assert!(locked.contains("readonly"), "{locked}");
             ui.type_into("group-input-0", "KM");
             assert!(!ui.has("committed:"), "typing must not land while locked");
+            // What takes the focus as a box opens is carried by the open box's
+            // card alone, so a locked box has none.
+            assert_eq!(focus_markers(&ui), 0, "{}", ui.html());
 
             ui.click("btn-unlock-group");
             let open = ui.input_tag("group-input-0");
             assert!(!open.contains("readonly"), "{open}");
             assert!(!open.contains("disabled"), "{open}");
+            assert_eq!(focus_markers(&ui), 1, "{}", ui.html());
             ui.type_into("group-input-0", "KM");
             assert!(ui.has("committed:KM"), "{}", ui.html());
         });

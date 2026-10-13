@@ -42,6 +42,18 @@ fn themed_document_head() -> String {
     head.push_str("</script><style>");
     head.push_str(crate::app::STYLESHEET);
     head.push_str("</style>");
+    // WebKitGTK composites a fixed root background as a window-sized layer of
+    // its own on every frame, and with compositing off it repaints the whole
+    // window on every scroll step. Letting the paper scroll with the document
+    // shows nowhere: .app-root covers the page, and before it mounts there is
+    // nothing to scroll. Only an overscroll could reveal the difference, and
+    // no-repeat keeps the paper from tiling there. It stays Linux-only: the
+    // cost was measured in WebKitGTK, and macOS rubber-bands. It comes after
+    // the stylesheet, which it overrides on source order alone.
+    #[cfg(target_os = "linux")]
+    head.push_str(
+        "<style>html { background-attachment: scroll; background-repeat: no-repeat; }</style>",
+    );
     // The font sheet must not hold up the first paint: it loads as print
     // media and switches itself on once it has arrived.
     head.push_str(&format!(
@@ -71,6 +83,25 @@ mod tests {
         let head = super::themed_document_head();
         assert!(head.contains("window.requestAnimationFrame ="));
         assert!(head.contains("document.hidden"));
+    }
+
+    /// On Linux the paper scrolls with the page instead of being composited
+    /// as a fixed layer. The override has the same specificity as the
+    /// stylesheet's `html` rule, so it only wins by coming after it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_linux_head_lets_the_paper_scroll_with_the_page() {
+        let head = super::themed_document_head();
+        let sheet = head
+            .find(crate::app::STYLESHEET)
+            .expect("the app stylesheet is inlined whole");
+        let after = &head[sheet + crate::app::STYLESHEET.len()..];
+        assert!(
+            after.contains(
+                "<style>html { background-attachment: scroll; background-repeat: no-repeat; }</style>"
+            ),
+            "the override follows the stylesheet"
+        );
     }
 }
 

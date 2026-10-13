@@ -475,6 +475,15 @@ pub fn SliderField(
 /// is typed through its prefixes: on the way to 30 the box holds 3, and a
 /// setting that took every key would take that too, which for one end of a
 /// range drags the other end down with it.
+///
+/// A key does not redraw the field. Every redraw sends the box its `value`
+/// again, and on the desktop and phone builds that lands a frame later, over
+/// whatever was typed in the meantime: a quick 120 could come out as 10. So
+/// the field redraws only when it is committed or stepped, or when what it
+/// is given changes.
+///
+/// − and + show the value they leave in the box, over anything typed and not
+/// committed, even when the setting did not take the step.
 #[component]
 pub fn NumberField(
     #[props(into)] label: String,
@@ -489,11 +498,33 @@ pub fn NumberField(
     onchange: EventHandler<f64>,
 ) -> Element {
     let name = id.unwrap_or_else(|| control_id("number", &label));
-    // The text being typed, until it is committed. Reading it here is what
-    // puts the committed value back in the box afterwards, even when the
-    // value itself did not move — 999 into a field already at its top.
-    let mut typed = use_signal(|| None::<String>);
-    let shown = typed().unwrap_or_else(|| value.to_string());
+    // The text being typed, until it is committed or stepped over. Nothing
+    // subscribes to it, so a key costs no redraw; a redraw for any other
+    // reason shows the latest of it rather than taking the box back to the
+    // value.
+    let mut typed = use_hook(|| CopyValue::new(None::<String>));
+    // Moved on by every commit and every step. Reading it here is what puts
+    // the value back in the box afterwards, even when the value itself did
+    // not move — 999 into a field already at its top, or a step the setting
+    // did not take.
+    let mut repaint = use_signal(|| 0u64);
+    let _ = repaint.read();
+    // Drop what is typed, redraw the box, and hand `to` on if there is one.
+    // − and + do this as well as a commit, because some typing is never
+    // committed. Text put back the way it was has nothing to commit. A key
+    // typed straight after Enter can be written over by the commit's redraw,
+    // a frame late, which puts the box back as it was committed. And a phone
+    // can keep the box focused through a tap on − or +. The text is still
+    // held then, and a step that kept it would show it in place of the
+    // number stepped to.
+    let mut settle = move |to: Option<f64>| {
+        typed.set(None);
+        repaint += 1;
+        if let Some(v) = to {
+            onchange.call(v);
+        }
+    };
+    let shown = typed.peek().clone().unwrap_or_else(|| value.to_string());
     let less = format!("Decrease {label}");
     let more = format!("Increase {label}");
     rsx! {
@@ -506,7 +537,7 @@ pub fn NumberField(
                     r#type: "button",
                     aria_label: less,
                     disabled: html_bool(value <= min),
-                    onclick: move |_| onchange.call(nudge(value - step, step, min, max)),
+                    onclick: move |_| settle(Some(nudge(value - step, step, min, max))),
                     "−"
                 }
                 input {
@@ -518,12 +549,7 @@ pub fn NumberField(
                     step: "{step}",
                     value: "{shown}",
                     oninput: move |e| typed.set(Some(e.value())),
-                    onchange: move |e| {
-                        typed.set(None);
-                        if let Some(v) = parse_number_input(&e.value(), min, max) {
-                            onchange.call(v);
-                        }
-                    },
+                    onchange: move |e| settle(parse_number_input(&e.value(), min, max)),
                 }
                 if let Some(unit) = unit {
                     span { class: "unit", "{unit}" }
@@ -534,7 +560,7 @@ pub fn NumberField(
                     r#type: "button",
                     aria_label: more,
                     disabled: html_bool(value >= max),
-                    onclick: move |_| onchange.call(nudge(value + step, step, min, max)),
+                    onclick: move |_| settle(Some(nudge(value + step, step, min, max))),
                     "+"
                 }
             }
@@ -744,7 +770,123 @@ pub fn ScoreRing(pct: f64, value: String, caption: String) -> Element {
 
 #[cfg(test)]
 mod tests {
-    use super::{control_id, html_bool, nudge, parse_number_input, pct_between, pretty_number};
+    use dioxus::prelude::*;
+
+    use super::{
+        NumberField, control_id, html_bool, nudge, parse_number_input, pct_between, pretty_number,
+    };
+    use crate::testing::Ui;
+
+    /// A number field whose unit can be changed under it, which redraws it
+    /// without moving its value.
+    #[component]
+    fn ChangingUnit() -> Element {
+        let mut value = use_signal(|| 2.0);
+        let mut unit = use_signal(|| "sec");
+        rsx! {
+            NumberField {
+                label: "Count",
+                value: value(),
+                min: 0.0,
+                max: 200.0,
+                step: 1.0,
+                unit: unit(),
+                onchange: move |v| value.set(v),
+            }
+            button {
+                id: control_id("btn", "change unit"),
+                onclick: move |_| unit.set("min"),
+                "change unit"
+            }
+        }
+    }
+
+    /// A field redrawn while something is typed into it keeps what is typed:
+    /// a redraw sends the box its value, and until it is committed that is
+    /// the text typed, not the number it is to replace.
+    #[test]
+    fn a_field_redrawn_mid_typing_keeps_what_is_typed() {
+        let mut ui = Ui::new(ChangingUnit, ());
+        let _ = ui.take_work();
+        ui.type_into("number-count", "12");
+        assert_eq!(ui.take_work(), 0, "a key redrew the field");
+        ui.click("btn-change-unit");
+        assert!(ui.has(">min<"), "{}", ui.html());
+        assert!(ui.input_tag("number-count").contains("value=\"12\""));
+        ui.commit("number-count", "120");
+        assert!(ui.input_tag("number-count").contains("value=\"120\""));
+    }
+
+    /// A number field on a page of its own, over a setting that goes no
+    /// higher than `ceiling`. The setting is written only when it moves, as
+    /// the settings page passes on only what changed: a page redrawn on
+    /// every edit would redraw the field with it, whether or not the field
+    /// redraws itself.
+    #[component]
+    fn UpTo(start: f64, ceiling: f64) -> Element {
+        let mut value = use_signal(|| start);
+        rsx! {
+            NumberField {
+                label: "Count",
+                value: value(),
+                min: 0.0,
+                max: 200.0,
+                step: 1.0,
+                onchange: move |v: f64| {
+                    let v = v.min(ceiling);
+                    if v != *value.peek() {
+                        value.set(v);
+                    }
+                },
+            }
+        }
+    }
+
+    /// 999 committed into a field already at its top leaves the value where
+    /// it was, so only the field itself can take the 999 out of the box. The
+    /// page holds nothing else, and redrawing the field changes nothing but
+    /// the box's `value`, so the commit's one write is the top going back
+    /// over the 999: none means it stays on screen.
+    #[test]
+    fn a_commit_that_leaves_the_value_where_it_was_still_writes_the_box() {
+        let mut ui = Ui::new(
+            UpTo,
+            UpToProps {
+                start: 200.0,
+                ceiling: 200.0,
+            },
+        );
+        let _ = ui.take_work();
+        ui.type_into("number-count", "999");
+        assert_eq!(ui.take_work(), 0, "typing wrote over the box");
+        ui.commit("number-count", "999");
+        assert_eq!(
+            ui.take_work(),
+            1,
+            "the commit should write the box, and only that"
+        );
+        assert!(ui.input_tag("number-count").contains("value=\"200\""));
+    }
+
+    /// A step the setting does not take still shows its value, over text
+    /// typed and never committed. At 5, short of the field's own top, + is
+    /// offered and the setting stays where it is, so again the one write is
+    /// the field's own.
+    #[test]
+    fn a_step_the_setting_does_not_take_still_shows_its_value() {
+        let mut ui = Ui::new(
+            UpTo,
+            UpToProps {
+                start: 5.0,
+                ceiling: 5.0,
+            },
+        );
+        ui.type_into("number-count", "57");
+        let _ = ui.take_work();
+        ui.click("more-number-count");
+        assert_eq!(ui.take_work(), 1, "the step left 57 in the box");
+        assert!(ui.input_tag("number-count").contains("value=\"5\""));
+    }
 
     #[test]
     fn a_typed_number_is_held_inside_its_bounds() {

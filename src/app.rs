@@ -1016,6 +1016,165 @@ mod ui_tests {
         });
     }
 
+    /// Every band the player has been asked to bring up, oldest first.
+    fn bands(recorder: &crate::audio::fake::Recorder) -> Vec<cw_core::band::BandKey> {
+        recorder
+            .calls()
+            .into_iter()
+            .filter_map(|call| match call {
+                crate::audio::fake::Call::Band(key) => Some(key),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Start the band preview on the settings screen, and wait for its first
+    /// call. The call takes most of a second, so for a while after this only
+    /// a follow brings the band up.
+    async fn previewing_the_band() -> (Ui, std::rc::Rc<crate::audio::fake::Recorder>) {
+        let (mut ui, recorder) = Ui::app_with_settings(with_receiver());
+        ui.click("nav-settings");
+        ui.click("btn-band-preview");
+        assert!(ui.run_until(20_000, |_| !recorder.texts().is_empty()).await);
+        (ui, recorder)
+    }
+
+    /// A follow measures the band's AGC before it takes the settings, so a
+    /// stop can land in between. The band must not come back up behind it.
+    #[test]
+    fn a_preview_stopped_while_its_band_follows_stays_silent() {
+        run(|| async {
+            let (mut ui, recorder) = previewing_the_band().await;
+            let before = bands(&recorder).len();
+            ui.type_into("slider-filter-width", "400");
+            // The step that wakes the follow is the last one: it measures
+            // the knee then, and lets the page have its turn before it takes
+            // the settings, which is where this leaves it.
+            ui.advance(u64::from(crate::routes::BAND_FOLLOW_MS)).await;
+            assert_eq!(
+                bands(&recorder).len(),
+                before,
+                "the follow should still be measuring"
+            );
+
+            ui.click("btn-band-stop");
+            ui.advance(200).await;
+            assert_eq!(
+                bands(&recorder).len(),
+                before,
+                "the band followed a stopped preview"
+            );
+            assert!(
+                !recorder.band_running.get(),
+                "the stopped preview's receiver came back"
+            );
+        });
+    }
+
+    /// A move made while a follow measures the band's AGC joins the settings
+    /// that follow is about to take: it is neither left behind nor sent
+    /// after them in a second rebuild, and the band ends where the slider
+    /// was left.
+    #[test]
+    fn a_move_made_while_the_band_follows_still_lands() {
+        run(|| async {
+            let (mut ui, recorder) = previewing_the_band().await;
+            let before = bands(&recorder).len();
+            ui.type_into("slider-filter-width", "400");
+            ui.advance(u64::from(crate::routes::BAND_FOLLOW_MS)).await;
+            assert_eq!(
+                bands(&recorder).len(),
+                before,
+                "the follow should still be measuring"
+            );
+
+            ui.type_into("slider-filter-width", "600");
+            ui.advance(200).await;
+            let mut expected = with_receiver();
+            expected.band.filter_width_hz = 600.0;
+            assert_eq!(
+                bands(&recorder)[before..],
+                [cw_core::band::BandKey::of(&expected.clamp().band)],
+                "the band should have followed the newest move, once"
+            );
+            assert!(recorder.band_running.get());
+        });
+    }
+
+    /// The band the preview's settings bring up with the receiver this wide.
+    fn band_with_width(width_hz: f64) -> cw_core::band::BandKey {
+        let mut settings = with_receiver();
+        settings.band.filter_width_hz = width_hz;
+        cw_core::band::BandKey::of(&settings.clamp().band)
+    }
+
+    /// A move made while a follow measures the band's AGC asks about a band
+    /// of its own, so the follow measures that one too before it takes it:
+    /// building the band then finds its knee remembered. The follow waits
+    /// for the second measurement, and still brings the band up once, on the
+    /// newest move.
+    #[test]
+    fn a_move_made_while_the_band_follows_is_measured_before_it_lands() {
+        run(|| async {
+            let (mut ui, recorder) = previewing_the_band().await;
+            let before = bands(&recorder).len();
+            ui.type_into("slider-filter-width", "400");
+            ui.advance(u64::from(crate::routes::BAND_FOLLOW_MS)).await;
+            ui.type_into("slider-filter-width", "600");
+            // The step that ends the first measurement starts the second,
+            // which this leaves unfinished; the next one ends it.
+            ui.advance(1).await;
+            assert_eq!(
+                bands(&recorder).len(),
+                before,
+                "the follow took the newest move without measuring it"
+            );
+            ui.advance(1).await;
+            assert_eq!(
+                bands(&recorder)[before..],
+                [band_with_width(600.0)],
+                "the follow should take the newest move once it is measured"
+            );
+
+            ui.advance(200).await;
+            assert_eq!(
+                bands(&recorder)[before..],
+                [band_with_width(600.0)],
+                "the band should have followed the newest move, once"
+            );
+        });
+    }
+
+    /// A slider that moves through every measurement is measured again only
+    /// so often: then the follow takes the newest move as it stands, and the
+    /// band measures that knee itself, rather than the band never following.
+    #[test]
+    fn a_slider_moved_through_every_measurement_is_still_followed() {
+        run(|| async {
+            let (mut ui, recorder) = previewing_the_band().await;
+            let before = bands(&recorder).len();
+            let mut width_hz = 400.0;
+            ui.type_into("slider-filter-width", &format!("{width_hz}"));
+            ui.advance(u64::from(crate::routes::BAND_FOLLOW_MS)).await;
+            for round in 1..=crate::routes::BAND_WARM_ROUNDS {
+                assert_eq!(
+                    bands(&recorder).len(),
+                    before,
+                    "the follow took a move before measurement {round} was done"
+                );
+                // Each step ends a measurement with a newer move waiting.
+                width_hz += 10.0;
+                ui.type_into("slider-filter-width", &format!("{width_hz}"));
+                ui.advance(1).await;
+            }
+            assert_eq!(
+                bands(&recorder)[before..],
+                [band_with_width(width_hz)],
+                "the follow should have taken the newest move after its last measurement"
+            );
+        });
+    }
+
     #[test]
     fn the_band_preview_can_be_stopped_where_it_was_started() {
         run(|| async {

@@ -159,10 +159,13 @@ impl MorsePlayer {
             return Ok(());
         }
         if settings.band.has_background() {
-            let stream =
-                BandStream::start(&self.ctx, &self.chain.mix, &self.chain.floor_in, settings)?;
-            stream.reserve(pileup);
-            self.band = Some(stream);
+            self.band = Some(BandStream::start(
+                &self.ctx,
+                &self.chain.mix,
+                &self.chain.floor_in,
+                settings,
+                pileup,
+            )?);
         }
         self.chain.tune_agc(&self.ctx, settings);
         self.band_key = Some(key);
