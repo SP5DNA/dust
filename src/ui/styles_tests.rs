@@ -199,3 +199,221 @@ fn the_stylesheet_styles_only_what_the_app_draws() {
     unread.dedup();
     assert!(unread.is_empty(), "defined but never read: {unread:?}");
 }
+
+/// Every rule that holds declarations, as its selector list and its
+/// declarations split into property and value. At-rules such as `@media` are
+/// looked through: only the rules inside them hold declarations.
+fn rules(css: &str) -> Vec<(&str, Vec<(&str, &str)>)> {
+    let mut rules = Vec::new();
+    let mut prelude = 0;
+    let mut open: Option<(&str, usize)> = None;
+    for (at, ch) in css.char_indices() {
+        match ch {
+            '{' => {
+                open = Some((css[prelude..at].trim(), at + 1));
+                prelude = at + 1;
+            }
+            '}' => {
+                // A block that opened another, like `@media`, already gave
+                // its place to the rule inside it.
+                if let Some((selector, body)) = open.take() {
+                    let declarations = css[body..at]
+                        .split(';')
+                        .filter_map(|declaration| declaration.split_once(':'))
+                        .map(|(property, value)| (property.trim(), value.trim()))
+                        .collect();
+                    rules.push((selector, declarations));
+                }
+                prelude = at + 1;
+            }
+            _ => {}
+        }
+    }
+    rules
+}
+
+/// The selectors of a selector list, split at the commas outside brackets,
+/// so `:has(a, b)` stays whole.
+fn selector_list(list: &str) -> Vec<&str> {
+    let mut selectors = Vec::new();
+    let mut depth = 0;
+    let mut start = 0;
+    for (at, ch) in list.char_indices() {
+        match ch {
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth -= 1,
+            ',' if depth == 0 => {
+                selectors.push(list[start..at].trim());
+                start = at + 1;
+            }
+            _ => {}
+        }
+    }
+    selectors.push(list[start..].trim());
+    selectors
+}
+
+/// The element type a selector picks out, from its last compound: `body` for
+/// `html > body:hover`, and nothing for `.app-root`.
+fn subject_type(selector: &str) -> &str {
+    let mut depth = 0;
+    let mut start = 0;
+    for (at, ch) in selector.char_indices() {
+        match ch {
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth -= 1,
+            '>' | '+' | '~' if depth == 0 => start = at + 1,
+            _ if depth == 0 && ch.is_whitespace() => start = at + 1,
+            _ => {}
+        }
+    }
+    let compound = &selector[start..];
+    let end = compound
+        .find(|ch: char| !ch.is_ascii_alphanumeric())
+        .unwrap_or(compound.len());
+    &compound[..end]
+}
+
+/// What the block opened by `prelude` holds, nested rules and all.
+fn block<'a>(css: &'a str, prelude: &str) -> &'a str {
+    let start = css
+        .find(&format!("{prelude} {{"))
+        .unwrap_or_else(|| panic!("no block for {prelude}"));
+    let open = start + css[start..].find('{').expect("a block opens") + 1;
+    let mut depth = 1;
+    for (at, ch) in css[open..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &css[open..open + at];
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("{prelude} never closes")
+}
+
+/// Only the root paints the paper, and only it is fixed to the window. On any
+/// other box a fixed background puts WebKit on its slow scroll path, where
+/// every scroll frame repaints the whole window and the desktop app waits on
+/// each of them. The selector is plain `html` because the Linux window head
+/// overrides this rule on source order alone (src/main.rs), which a more
+/// specific rule, `:root` included, would quietly defeat.
+#[test]
+fn only_the_root_has_a_fixed_background() {
+    let css = without_comments(CSS);
+    let rules = rules(&css);
+    let fixed: Vec<&str> = rules
+        .iter()
+        .filter(|(_, declarations)| {
+            declarations.iter().any(|(property, value)| {
+                property.starts_with("background")
+                    && value
+                        .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '-'))
+                        .any(|word| word == "fixed")
+            })
+        })
+        .map(|(selector, _)| *selector)
+        .collect();
+    assert_eq!(fixed, ["html"], "only the root's background is fixed");
+
+    let (_, paper) = rules
+        .iter()
+        .find(|(selector, declarations)| {
+            *selector == "html"
+                && declarations
+                    .iter()
+                    .any(|(property, _)| *property == "background-image")
+        })
+        .expect("the root paints the paper");
+    let colours: Vec<&str> = paper
+        .iter()
+        .filter(|(property, _)| *property == "background-color")
+        .map(|(_, value)| *value)
+        .collect();
+    assert_eq!(
+        colours,
+        ["#f2e9d9", "var(--bg)"],
+        "a literal colour comes first, for an engine without custom properties"
+    );
+}
+
+/// Body stays transparent, so the root alone paints the paper. Body's box is
+/// covered by .app-root anyway; a background of its own would only cost a
+/// paint, and a fixed one a slow scroll on every frame.
+#[test]
+fn the_body_paints_no_background_of_its_own() {
+    let css = without_comments(CSS);
+    let body_rules: Vec<_> = rules(&css)
+        .into_iter()
+        .filter(|(selector, _)| {
+            selector_list(selector)
+                .iter()
+                .any(|one| subject_type(one) == "body")
+        })
+        .collect();
+    assert!(!body_rules.is_empty(), "the rules for body were not found");
+    for (selector, declarations) in body_rules {
+        let painted: Vec<_> = declarations
+            .iter()
+            .filter(|(property, _)| property.starts_with("background"))
+            .collect();
+        assert!(
+            painted.is_empty(),
+            "{selector} gives body a background of its own: {painted:?}"
+        );
+    }
+}
+
+/// The sending dot pulses for as long as a group is sent, and it grows a
+/// box-shadow, which no engine composites: a smooth pulse repaints on every
+/// frame. Held steps let the webview rest between them. The shorthand resets
+/// the timing, so the steps have to follow it, and the shorthand's own easing
+/// is what an engine without `jump-none` keeps.
+#[test]
+fn the_sending_dot_pulses_in_held_steps() {
+    let css = without_comments(CSS);
+    let live = declarations(&css, "\n.status-dot.live");
+    let pulse = live
+        .iter()
+        .position(|line| line == "animation: pulse-dot 1.1s ease-in-out infinite;")
+        .expect("the dot pulses for the whole send, smoothly where steps are unknown");
+    let steps = live
+        .iter()
+        .position(|line| line == "animation-timing-function: steps(6, jump-none);")
+        .expect("the pulse moves in held steps");
+    assert!(
+        pulse < steps,
+        "the shorthand would undo the steps: {live:?}"
+    );
+}
+
+/// Reduced motion stills every animation, the sending dot's among them, on
+/// the pseudo-elements as well as the elements. `*` loses to every rule that
+/// sets an animation, so only `!important` reaches them.
+#[test]
+fn reduced_motion_stills_every_animation() {
+    let css = without_comments(CSS);
+    let reduced = block(&css, "@media (prefers-reduced-motion: reduce)");
+    let (selector, declarations) = rules(reduced)
+        .into_iter()
+        .find(|(selector, _)| selector_list(selector).contains(&"*"))
+        .expect("reduced motion has a rule for every element");
+    for every in ["*", "*::before", "*::after"] {
+        assert!(
+            selector_list(selector).contains(&every),
+            "reduced motion leaves {every} moving"
+        );
+    }
+    for property in ["animation-duration", "animation-iteration-count"] {
+        assert!(
+            declarations
+                .iter()
+                .any(|(name, value)| *name == property && value.ends_with("!important")),
+            "reduced motion has to force {property}"
+        );
+    }
+}
