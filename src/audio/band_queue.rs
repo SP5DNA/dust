@@ -81,13 +81,15 @@ mod tests {
         assert_eq!(first_to_remake(queued, short, 0.0), Some(0));
     }
 
-    /// A band started under a pile-up already calling, as when the band
-    /// changes under a send in flight, makes room for it from its very first
-    /// buffer, the ones too close to the clock to take back included. So
-    /// there is nothing to make again for it, and a stop still takes back
-    /// whatever was made for the callers and is not yet due.
+    /// A queue made under a pile-up from its first buffer, each buffer made
+    /// for the callers `callers_at` gives its start, has nothing to remake
+    /// for that pile-up, the buffers too close to the clock to take back
+    /// included; a stop still remakes whatever was made for the callers and
+    /// is not yet due. That is the queue a band started under a send in
+    /// flight is meant to hold. This checks the arithmetic on such a queue,
+    /// not the web stream that builds one.
     #[test]
-    fn a_band_started_under_a_pile_up_makes_room_for_it_from_its_first_buffer() {
+    fn a_queue_made_under_a_pile_up_has_nothing_to_remake_for_it() {
         let made_under = |pileup: Option<Reservation>| -> Vec<(f64, usize)> {
             (0..5)
                 .map(|k| {

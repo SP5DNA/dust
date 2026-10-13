@@ -241,8 +241,10 @@ html, body {
   -webkit-font-smoothing: antialiased;
 }
 
-/* Only the root paints the paper; body stays transparent. A fixed background
-   on <body>, which is a box of its own once <html> has one, puts WebKit on its
+/* Only the root paints the paper; nothing here gives body a background. On
+   the web build index.html paints body, and #main over it, in its solid boot
+   colour, which .app-root covers once the app is up. A fixed background on
+   <body>, which is a box of its own once <html> has one, puts WebKit on its
    slow scroll path: every scroll frame repaints the whole window, and the
    desktop app runs nothing more after a render until the webview has drawn
    it. Body only repeated the root's viewport-fixed image, under an opaque
