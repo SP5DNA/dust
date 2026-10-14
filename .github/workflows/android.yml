@@ -101,6 +101,10 @@ jobs:
       - name: Bundle APK
         run: |
           set -euo pipefail
+          # shellcheck disable=SC1091
+          source scripts/android-icon-hook.sh
+          install_android_icon_hook "$PWD"
+          trap 'rm -f "$ANDROID_ICON_HOOK"' EXIT
           args=(bundle --platform android --target "${ANDROID_TRIPLE}" --package-types apk --locked)
           if [[ "${{ inputs.profile }}" != "debug" ]]; then
             args+=(--release)

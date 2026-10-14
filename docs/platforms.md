@@ -15,6 +15,13 @@ as-is, with cpal routing it to AAudio through
 oboe's C++ with the NDK toolchain, which is why an NDK is needed and not just
 the SDK.
 
+The launcher icon is [`assets/icon.png`](../assets/icon.png). Android 8 and
+later show the adaptive icon packed in the app, and the project `dx`
+generates still carries the stock robot there. The bundle commands below
+install a Gradle init hook that copies [`assets/android/`](../assets/android)
+over those resources before the package is built. Regenerate the densities
+with `scripts/render-android-icons.py` after changing the master.
+
 The Morse, the band noise and static, and the paddle sidetone are mixed into
 one output stream, so there is no second stream for a device to refuse — some
 Android devices will not open two at once.
@@ -29,6 +36,10 @@ and the practice screen says so.
 rustup target add aarch64-linux-android
 export ANDROID_HOME=~/Android/Sdk          # or /usr/lib/android-sdk
 export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018"
+# shellcheck disable=SC1091
+source scripts/android-icon-hook.sh
+install_android_icon_hook "$PWD"
+trap 'rm -f "$ANDROID_ICON_HOOK"' EXIT
 dx bundle --platform android --target aarch64-linux-android --package-types apk --release
 ```
 

@@ -105,6 +105,13 @@ export CXX_aarch64_linux_android="${cc}++"
 export AR_aarch64_linux_android="$bin/llvm-ar"
 export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$cc"
 
+# dx writes the stock robot as the launcher icon. Gradle loads every script
+# in ~/.gradle/init.d, so this one replaces it. Removed when this script exits.
+# shellcheck disable=SC1091
+source "$ROOT/scripts/android-icon-hook.sh"
+install_android_icon_hook "$ROOT"
+trap 'rm -f "$ANDROID_ICON_HOOK"' EXIT
+
 echo "dx bundle --platform android --release (AAB)"
 dx bundle --release --locked \
   --platform android \
