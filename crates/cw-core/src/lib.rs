@@ -34,7 +34,9 @@ pub use auto_level::{
     auto_level_progress, complete_session, evaluate_auto_level,
 };
 pub use callsign::{CALLSIGN_TIER_MAX, generate_callsign, tier_examples};
-pub use heatmap::{HEATMAP_WEEKS, HeatmapCell, HeatmapColorMode, HeatmapGrid, build_heatmap};
+pub use heatmap::{
+    HEATMAP_MONTHS, HeatmapCell, HeatmapColorMode, HeatmapGrid, HeatmapMonth, build_heatmap,
+};
 pub use keyer::{Keyer, KeyerMode, KeyerOutput, Paddle, paddle_from_bracket};
 pub use machine::{
     AUTO_CONFIRM_DELAY_MS, AnswerClose, GroupSource, SessionEffect, SessionEvent, SessionMachine,
