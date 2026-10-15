@@ -104,9 +104,10 @@ export CXX_aarch64_linux_android="${cc}++"
 export AR_aarch64_linux_android="$bin/llvm-ar"
 export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$cc"
 
-# dx writes the stock robot as the launcher icon and 1 as the version code.
-# Gradle loads every script in ~/.gradle/init.d, so this one puts both right.
-# Removed when this script exits.
+# dx writes the stock robot as the launcher icon and 1 as the version code,
+# and asks for no native debug symbols. Gradle loads every script in
+# ~/.gradle/init.d, so this one puts all three right. Removed when this
+# script exits.
 install_android_gradle_hook "$ROOT"
 trap 'rm -f "$ANDROID_GRADLE_HOOK"' EXIT
 
@@ -134,6 +135,16 @@ jarsigner -sigalg SHA256withRSA -digestalg SHA256 \
   "$out" "$KEY_ALIAS"
 
 jarsigner -verify -certs "$out"
+
+symbols="$(android_bundle_symbols "$out")"
+if [[ -n "$symbols" ]]; then
+  echo "Native debug symbols in the bundle, for Play:"
+  while IFS= read -r entry; do
+    echo "  $entry"
+  done <<< "$symbols"
+else
+  echo "No native debug symbols in $out: Play will show native crashes as bare addresses." >&2
+fi
 
 cert_out="dist/dust-upload-certificate.pem"
 keytool -exportcert -rfc \
