@@ -15,12 +15,23 @@ as-is, with cpal routing it to AAudio through
 oboe's C++ with the NDK toolchain, which is why an NDK is needed and not just
 the SDK.
 
-The launcher icon is [`assets/icon.png`](../assets/icon.png). Android 8 and
-later show the adaptive icon packed in the app, and the project `dx`
-generates still carries the stock robot there. The bundle commands below
-install a Gradle init hook that copies [`assets/android/`](../assets/android)
-over those resources before the package is built. Regenerate the densities
-with `scripts/render-android-icons.py` after changing the master.
+The project `dx` generates needs two things put right, and `dx` 0.7 has a
+setting for neither. Every bundle command below, in CI as well, first installs
+a Gradle init hook, [`scripts/android-gradle-hook.sh`](../scripts/android-gradle-hook.sh),
+that does both:
+
+- **Launcher icon.** The icon is [`assets/icon.png`](../assets/icon.png).
+  Android 8 and later show the adaptive icon packed in the app, and `dx`
+  puts the stock robot there. The hook copies
+  [`assets/android/`](../assets/android) over those resources before the
+  package is built. Regenerate the densities with
+  `scripts/render-android-icons.py` after changing the master.
+- **Version code.** `dx` writes `versionCode = 1` into every build, and Play
+  turns away an upload whose version code is not above every earlier one.
+  The hook sets it from the workspace version in `Cargo.toml`: MAJOR × 1,000,000
+  \+ MINOR × 1,000 + PATCH, so 0.14.4 is 14004. Every new version is then a
+  higher code. The version name is the version itself. CI reads both back out
+  of the APK it built and fails if either is wrong.
 
 The Morse, the band noise and static, and the paddle sidetone are mixed into
 one output stream, so there is no second stream for a device to refuse — some
@@ -37,9 +48,9 @@ rustup target add aarch64-linux-android
 export ANDROID_HOME=~/Android/Sdk          # or /usr/lib/android-sdk
 export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018"
 # shellcheck disable=SC1091
-source scripts/android-icon-hook.sh
-install_android_icon_hook "$PWD"
-trap 'rm -f "$ANDROID_ICON_HOOK"' EXIT
+source scripts/android-gradle-hook.sh
+install_android_gradle_hook "$PWD"
+trap 'rm -f "$ANDROID_GRADLE_HOOK"' EXIT
 dx bundle --platform android --target aarch64-linux-android --package-types apk --release
 ```
 
@@ -88,9 +99,11 @@ Then, with a JDK that includes `javac` (17 or 21) and a writable SDK:
 scripts/android-play-bundle.sh
 ```
 
-That writes `dist/dust-<version>-android-arm64.aab` (`dev.dust.morse`). In Play
-Console create the app, let Google generate the app signing key, and upload that
-AAB. Back up `~/.android/dust-play-upload.jks` and the env file beside it. The
+That writes `dist/dust-<version>-android-arm64.aab` (`dev.dust.morse`) and
+prints its version code. In Play Console create the app, let Google generate the
+app signing key, and upload that AAB. Each later upload must come from a higher
+version in `Cargo.toml`. Rebuilding the same version gives the same code, which
+Play refuses. Back up `~/.android/dust-play-upload.jks` and the env file beside it. The
 public upload certificate is `dist/dust-upload-certificate.pem`.
 
 The store listing privacy-policy URL is

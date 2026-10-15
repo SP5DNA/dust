@@ -360,6 +360,13 @@ jobs:
 
       - name: Bundle APK
         run: |
+          set -euo pipefail
+          # dx writes the stock robot as the launcher icon and 1 as the
+          # version code; the hook puts both right.
+          # shellcheck disable=SC1091
+          source scripts/android-gradle-hook.sh
+          install_android_gradle_hook "$PWD"
+          trap 'rm -f "$ANDROID_GRADLE_HOOK"' EXIT
           dx bundle --release --locked \
             --platform android \
             --target "${ANDROID_TRIPLE}" \
@@ -378,6 +385,9 @@ jobs:
             echo "No APK was produced"
             exit 1
           fi
+          # shellcheck disable=SC1091
+          source scripts/android-gradle-hook.sh
+          check_android_apk_version "$PWD" "$apk"
           mkdir -p artifacts
           cp "$apk" "artifacts/dust-${VERSION}-android-arm64.apk"
           ls -lh artifacts
