@@ -102,9 +102,9 @@ jobs:
         run: |
           set -euo pipefail
           # shellcheck disable=SC1091
-          source scripts/android-icon-hook.sh
-          install_android_icon_hook "$PWD"
-          trap 'rm -f "$ANDROID_ICON_HOOK"' EXIT
+          source scripts/android-gradle-hook.sh
+          install_android_gradle_hook "$PWD"
+          trap 'rm -f "$ANDROID_GRADLE_HOOK"' EXIT
           args=(bundle --platform android --target "${ANDROID_TRIPLE}" --package-types apk --locked)
           if [[ "${{ inputs.profile }}" != "debug" ]]; then
             args+=(--release)
@@ -130,6 +130,11 @@ jobs:
             echo "No APK was produced"
             exit 1
           fi
+
+          # The version code dx writes is always 1; the hook replaces it.
+          # shellcheck disable=SC1091
+          source scripts/android-gradle-hook.sh
+          check_android_apk_version "$PWD" "$apk"
 
           mkdir -p artifacts
           name="dust-${version}-android-arm64.apk"

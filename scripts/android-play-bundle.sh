@@ -17,11 +17,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-VERSION="$(awk '
-  /^\[workspace.package\]/ { in_pkg = 1; next }
-  in_pkg && /^\[/ { in_pkg = 0 }
-  in_pkg && /^version *=/ { gsub(/[" ]/, "", $3); print $3; exit }
-' Cargo.toml)"
+# shellcheck disable=SC1091
+source "$ROOT/scripts/android-gradle-hook.sh"
+VERSION="$(dust_version "$ROOT")"
+VERSION_CODE="$(dust_version_code "$VERSION")"
 
 KEYSTORE="${DUST_ANDROID_KEYSTORE:-$HOME/.android/dust-play-upload.jks}"
 ENV_FILE="${DUST_ANDROID_KEYSTORE_ENV:-$HOME/.android/dust-play-upload.env}"
@@ -105,12 +104,11 @@ export CXX_aarch64_linux_android="${cc}++"
 export AR_aarch64_linux_android="$bin/llvm-ar"
 export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$cc"
 
-# dx writes the stock robot as the launcher icon. Gradle loads every script
-# in ~/.gradle/init.d, so this one replaces it. Removed when this script exits.
-# shellcheck disable=SC1091
-source "$ROOT/scripts/android-icon-hook.sh"
-install_android_icon_hook "$ROOT"
-trap 'rm -f "$ANDROID_ICON_HOOK"' EXIT
+# dx writes the stock robot as the launcher icon and 1 as the version code.
+# Gradle loads every script in ~/.gradle/init.d, so this one puts both right.
+# Removed when this script exits.
+install_android_gradle_hook "$ROOT"
+trap 'rm -f "$ANDROID_GRADLE_HOOK"' EXIT
 
 echo "dx bundle --platform android --release (AAB)"
 dx bundle --release --locked \
@@ -145,5 +143,6 @@ keytool -exportcert -rfc \
   -file "$cert_out" >/dev/null
 
 ls -lh "$out" "$cert_out"
+echo "Version ${VERSION}, version code ${VERSION_CODE}: above every earlier upload."
 echo "Upload $out to Play Console (Release → Production / testing)."
 echo "Public upload certificate: $cert_out"
