@@ -135,7 +135,10 @@ whole-group rate stays near the target throughout.
     default `Balanced`)
 
   Both are `serde(default)`, so older saves load with the feature off.
-- `stats.rs`: `group_length_forecast(settings, sessions)` for the Stats tab.
+- `stats.rs`:
+  - `group_length_forecast(settings, sessions)` for the Sampling tab.
+  - `span_history(settings, sessions)`: the span estimated after each session,
+    found by replaying the history, for the Overview chart.
 
 Nothing new is stored. The belief is rebuilt from the session history each
 time, the same way the character sampler's is, and the history already holds
@@ -143,22 +146,30 @@ every group's sent and received text. No migration is needed.
 
 **App and UI**
 
+Settings holds only the controls. Everything the model has learned is shown
+on the Stats screen, so the settings page doesn't grow.
+
 - **Settings → Session shape, under Group size:**
-  - A switch, "Adapt group size to me".
-  - When it is on, an "Aim for" segmented control (Comfortable · Balanced ·
-    Stretch) and a small panel with your copy span ("5.9 ± 0.2 chars") and a
-    bar chart of next session's lengths.
+  - A switch, "Adapt group size to me". Its description ends with "Your copy
+    span is under Stats."
+  - When the switch is on, an "Aim for" segmented control (Comfortable ·
+    Balanced · Stretch) with a one-line explanation. Nothing else.
   - With a fixed group size, the switch is disabled and says why. In callsign
     mode it is hidden along with the range.
-  - `SettingsView` gets the session history passed down from `routes.rs`, which
-    it doesn't receive today.
-- **Stats → Sampling tab:** a "Group length" card next to the character
-  snapshot. Each length in the range gets a row with its chance of being drawn
-  next and how often you copy a group that long whole, under the same
-  headline span.
+- **Stats → Overview:** a "Copy span" card under "Accuracy over time":
+  - The headline span ("5.9 ± 0.2 chars").
+  - A line of the span estimated after each session, in the same style as the
+    accuracy chart, with the change over the period shown.
+  - It is shown whenever there is history, adaptive or not. It is a measure of
+    progress in its own right, and it's how people will find the feature.
+- **Stats → Sampling:** a "Group length" card next to the character snapshot.
+  Each length in the range gets a row with its chance of being drawn next and
+  how often you copy a group that long whole. With adaptive off, the chances
+  are even, and the card says so.
 - **Results screen** (optional): one line, e.g. "Groups ran 4–6 chars · span
   5.6 → 5.9".
-- `assets/styles.css`: a few classes for the span bar chart.
+- `assets/styles.css`: nothing new is expected. The cards reuse the existing
+  chart, bar and KPI styles.
 
 ## How it interacts with auto level
 
@@ -187,8 +198,10 @@ different timescales.
 - **UI:**
   - The switch exists and is off by default.
   - It is disabled for a fixed size and hidden in callsign mode.
-  - The target segments write the setting.
-  - The span readout and the Stats card render from history.
+  - The target segments appear only while the switch is on, and they write the
+    setting.
+  - The Overview span card and the Sampling length card render from history,
+    with adaptive both on and off.
 
 ## Decisions for you
 
