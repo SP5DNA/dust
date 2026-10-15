@@ -21,7 +21,7 @@ pub fn PrivacyCard() -> Element {
                 }
             }
             p { class: "muted",
-                "Dust stores your settings and practice history only on this device: speed and alphabet, the groups that were sent, what you typed, and the scores. There is no account, and that history is not uploaded. The newest 500 sessions are kept."
+                "Dust stores your settings and practice history only on this device: speed and alphabet, the groups that were sent, what you typed, and the scores. There is no account, and that history is not uploaded. The newest 500 sessions are kept, and any of them can be deleted under Stats → History."
             }
             p { class: "muted",
                 "The app does load its typefaces from Google Fonts. That request includes your IP address. Your practice is not part of it. Google is the only third party the app contacts."

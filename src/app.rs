@@ -9,7 +9,7 @@ use dioxus::prelude::*;
 
 use crate::routes::Route;
 use crate::session_runtime::send_event;
-use crate::state::{AppCtx, AppState, Screen, TOAST_MS};
+use crate::state::{AppCtx, AppState, Screen, ToastAction};
 use crate::theme::Theme;
 use crate::time::sleep_ms;
 use crate::ui::paddle::use_paddle_keys;
@@ -117,7 +117,7 @@ pub fn App() -> Element {
     use_effect(move || {
         if let Some(shown) = toasts.current() {
             spawn(async move {
-                sleep_ms(TOAST_MS).await;
+                sleep_ms(shown.lasts_ms()).await;
                 toasts.dismiss(&shown);
             });
         }
@@ -214,7 +214,22 @@ pub fn App() -> Element {
             }
             if let Some(toast) = toasts.current() {
                 div { class: if show_nav { "toast-dock has-nav" } else { "toast-dock" },
-                    div { class: "toast", "{toast.text}" }
+                    div { class: "toast", role: "status",
+                        span { "{toast.text}" }
+                        if let Some(action) = toast.action {
+                            button {
+                                id: control_id("toast", action.label()),
+                                class: "toast-action",
+                                onclick: move |_| {
+                                    match action {
+                                        ToastAction::UndoDelete => ctx.undo_delete(),
+                                    }
+                                    toasts.dismiss(&toast);
+                                },
+                                "{action.label()}"
+                            }
+                        }
+                    }
                 }
             }
         }

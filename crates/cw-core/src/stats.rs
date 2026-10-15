@@ -88,6 +88,9 @@ pub struct SessionHistoryRow {
     pub correct_groups: u32,
     pub total_chars: u32,
     pub timestamp: u64,
+    /// Where the session sits in the history the rows were made from, so a
+    /// row names one session even when two finished in the same millisecond.
+    pub index: usize,
 }
 
 /// Sort rank for a character: its place in the LCWO sequence, or last for a
@@ -366,7 +369,8 @@ pub fn sampling_rows(settings: &TrainingSettings, sessions: &[SessionResult]) ->
 pub fn session_history(sessions: &[SessionResult]) -> Vec<SessionHistoryRow> {
     let mut rows: Vec<SessionHistoryRow> = sessions
         .iter()
-        .map(|s| SessionHistoryRow {
+        .enumerate()
+        .map(|(index, s)| SessionHistoryRow {
             date: s.date.clone(),
             accuracy_pct: s.accuracy * 100.0,
             score: s.score,
@@ -374,6 +378,7 @@ pub fn session_history(sessions: &[SessionResult]) -> Vec<SessionHistoryRow> {
             correct_groups: s.groups.iter().filter(|g| g.correct).count() as u32,
             total_chars: s.total_chars,
             timestamp: s.timestamp,
+            index,
         })
         .collect();
     rows.sort_by_key(|r| std::cmp::Reverse(r.timestamp));
@@ -601,6 +606,8 @@ mod tests {
         assert_eq!(rows[1].total_chars, 2);
         assert_eq!(rows[1].accuracy_pct, 50.0);
         assert!(session_history(&[]).is_empty());
+        // Each row still names the session it came from.
+        assert_eq!((rows[0].index, rows[1].index), (1, 0));
     }
 
     #[test]

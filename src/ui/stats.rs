@@ -4,6 +4,7 @@ use cw_core::{
 };
 use dioxus::prelude::*;
 
+use crate::state::SessionPick;
 use crate::ui::settings::target_label;
 use crate::ui::stats_detail::{HistoryTab, LettersTab, MistakesTab, SamplingTab};
 use crate::ui::widgets::{CardHead, IconName, Seg};
@@ -245,7 +246,13 @@ fn SpanCard(settings: TrainingSettings, sessions: Vec<SessionResult>) -> Element
 }
 
 #[component]
-pub fn StatsView(settings: TrainingSettings, sessions: Vec<SessionResult>) -> Element {
+pub fn StatsView(
+    settings: TrainingSettings,
+    sessions: Vec<SessionResult>,
+    /// Where deleting sessions from the history goes. Without it the history
+    /// is only shown.
+    on_delete: Option<EventHandler<Vec<SessionPick>>>,
+) -> Element {
     let mut tab = use_signal(|| StatsTab::Overview);
     // Accuracy, letters and mistakes are counted over the whole history: a
     // letter is the same letter whichever character set it was sent under.
@@ -271,7 +278,7 @@ pub fn StatsView(settings: TrainingSettings, sessions: Vec<SessionResult>) -> El
                 StatsTab::Letters => rsx! { LettersTab { sessions } },
                 StatsTab::Mistakes => rsx! { MistakesTab { sessions } },
                 StatsTab::Sampling => rsx! { SamplingTab { settings, sessions } },
-                StatsTab::History => rsx! { HistoryTab { sessions } },
+                StatsTab::History => rsx! { HistoryTab { sessions, on_delete } },
             }
         }
     }

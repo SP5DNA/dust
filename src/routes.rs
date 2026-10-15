@@ -14,7 +14,7 @@ use dioxus::prelude::*;
 use crate::persist::auto_progress;
 use crate::playback;
 use crate::session_runtime::{send_event, start_session};
-use crate::state::{AppCtx, Screen};
+use crate::state::{AppCtx, Screen, SessionPick};
 use crate::time::{local_date_string, sleep_ms};
 use crate::ui::home::Home;
 use crate::ui::listen::ListenView;
@@ -193,7 +193,11 @@ async fn warm_agc_knee(settings: &TrainingSettings) {
 fn StatsRoute() -> Element {
     let ctx = use_context::<AppCtx>();
     rsx! {
-        StatsView { settings: ctx.settings.read().clone(), sessions: ctx.sessions.read().clone() }
+        StatsView {
+            settings: ctx.settings.read().clone(),
+            sessions: ctx.sessions.read().clone(),
+            on_delete: move |picked: Vec<SessionPick>| ctx.delete_sessions(&picked),
+        }
     }
 }
 
