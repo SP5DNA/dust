@@ -15,10 +15,10 @@ as-is, with cpal routing it to AAudio through
 oboe's C++ with the NDK toolchain, which is why an NDK is needed and not just
 the SDK.
 
-The project `dx` generates needs two things put right, and `dx` 0.7 has a
-setting for neither. Every bundle command below, in CI as well, first installs
-a Gradle init hook, [`scripts/android-gradle-hook.sh`](../scripts/android-gradle-hook.sh),
-that does both:
+The project `dx` generates needs three things put right, and `dx` 0.7 has a
+setting for none of them. Every bundle command below, in CI as well, first
+installs a Gradle init hook, [`scripts/android-gradle-hook.sh`](../scripts/android-gradle-hook.sh),
+that does all three:
 
 - **Launcher icon.** The icon is [`assets/icon.png`](../assets/icon.png).
   Android 8 and later show the adaptive icon packed in the app, and `dx`
@@ -32,6 +32,15 @@ that does both:
   \+ MINOR × 1,000 + PATCH, so 0.14.4 is 14004. Every new version is then a
   higher code. The version name is the version itself. CI reads both back out
   of the APK it built and fails if either is wrong.
+- **Native debug symbols.** Play warns about an app bundle with native code
+  but no debug symbols, and shows its native crashes as bare addresses. The
+  release profile keeps the symbol table (`strip = "debuginfo"` in
+  `Cargo.toml` drops only the debug info), so the hook asks the Android plugin
+  to pack it into the bundle (`debugSymbolLevel = "SYMBOL_TABLE"`). Play reads
+  it from there with nothing to upload by hand, and the libraries inside the
+  app ship without it. The plugin needs an NDK to read the symbols with, so the
+  hook points it at `ANDROID_NDK_HOME`, the NDK the Rust code was built with;
+  otherwise it looks only for its own pinned NDK version.
 
 The Morse, the band noise and static, and the paddle sidetone are mixed into
 one output stream, so there is no second stream for a device to refuse — some
@@ -99,8 +108,9 @@ Then, with a JDK that includes `javac` (17 or 21) and a writable SDK:
 scripts/android-play-bundle.sh
 ```
 
-That writes `dist/dust-<version>-android-arm64.aab` (`dev.dust.morse`) and
-prints its version code. In Play Console create the app, let Google generate the
+That writes `dist/dust-<version>-android-arm64.aab` (`dev.dust.morse`), prints
+its version code, and lists the native debug symbols packed inside it, or warns
+when there are none. In Play Console create the app, let Google generate the
 app signing key, and upload that AAB. Each later upload must come from a higher
 version in `Cargo.toml`. Rebuilding the same version gives the same code, which
 Play refuses. Back up `~/.android/dust-play-upload.jks` and the env file beside it. The
