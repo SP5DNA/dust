@@ -8,9 +8,9 @@ use cw_core::{
     ADJUST_COUNT_MAX, ADJUST_THRESHOLD_MAX_PCT, ADJUST_THRESHOLD_MIN_PCT, AutoLevelSettings,
     COVERAGE_STRENGTH_MAX, CharSetMode, ERROR_WEIGHT_MAX, EXTRA_WORD_SPACE_MAX,
     EXTRA_WORD_SPACE_MIN, GROUP_PAUSE_MAX_SEC, GROUP_REPEAT_MAX, GROUP_REPEAT_MIN, GROUP_SIZE_MAX,
-    GROUP_SIZE_MIN, GROUP_TIMEOUT_MAX_SEC, KeyerMode, NUM_GROUPS_MAX, NUM_GROUPS_MIN, RangeSetting,
-    SIDE_TONE_MAX_HZ, SIDE_TONE_MIN_HZ, SettingsSection, TrainingSettings, VOLUME_MAX, VOLUME_MIN,
-    WPM_MAX, WPM_MIN,
+    GROUP_SIZE_MIN, GROUP_TIMEOUT_MAX_SEC, GroupSizeTarget, KeyerMode, NUM_GROUPS_MAX,
+    NUM_GROUPS_MIN, RangeSetting, SIDE_TONE_MAX_HZ, SIDE_TONE_MIN_HZ, SettingsSection,
+    TrainingSettings, VOLUME_MAX, VOLUME_MIN, WPM_MAX, WPM_MIN,
 };
 use dioxus::prelude::*;
 
@@ -22,6 +22,14 @@ use crate::ui::widgets::{
     CardHead, IconName, NumberField, SectionReset, Seg, SettingsRange, SliderField, Switch,
     control_id,
 };
+
+/// What adaptive group size can aim for, in the order the control offers
+/// them.
+pub(crate) const GROUP_SIZE_TARGETS: [(GroupSizeTarget, &str); 3] = [
+    (GroupSizeTarget::Comfortable, "Comfortable"),
+    (GroupSizeTarget::Balanced, "Balanced"),
+    (GroupSizeTarget::Stretch, "Stretch"),
+];
 
 /// The keyer modes, in the order the control offers them.
 const KEYER_MODES: [(KeyerMode, &str); 4] = [
@@ -111,6 +119,10 @@ pub fn SettingsView(
 #[derive(Clone, PartialEq)]
 struct SessionShape {
     callsigns: bool,
+    /// The group size is one length, so there is nothing to adapt.
+    one_size: bool,
+    adaptive: bool,
+    target: GroupSizeTarget,
     num_groups: u32,
     group_timeout: f64,
     group_pause_sec: f64,
@@ -125,6 +137,9 @@ impl SessionShape {
         let p = &settings.playback;
         Self {
             callsigns: settings.curriculum.char_set_mode == CharSetMode::Callsign,
+            one_size: settings.curriculum.min_group_size >= settings.curriculum.max_group_size,
+            adaptive: settings.curriculum.adaptive_group_size,
+            target: settings.curriculum.group_size_target,
             num_groups: settings.curriculum.num_groups,
             group_timeout: p.group_timeout,
             group_pause_sec: p.group_pause_sec,
@@ -134,6 +149,18 @@ impl SessionShape {
             paddle_swap: p.paddle_swap,
         }
     }
+}
+
+/// What a target asks of you, in a sentence.
+fn target_note(target: GroupSizeTarget) -> String {
+    let label = GROUP_SIZE_TARGETS
+        .iter()
+        .find(|(each, _)| *each == target)
+        .map_or("", |(_, label)| label);
+    format!(
+        "{label} aims for {:.0}% of groups copied whole.",
+        target.success_rate() * 100.0
+    )
 }
 
 #[component]
@@ -190,6 +217,33 @@ fn SessionShapeCard(settings: Signal<TrainingSettings>) -> Element {
                     min_bound: f64::from(GROUP_SIZE_MIN),
                     max_bound: f64::from(GROUP_SIZE_MAX),
                     step: 1.0,
+                }
+                Switch {
+                    title: "Adapt group size to me",
+                    description: if s.one_size {
+                        "Set Group size to Random to use this: one size leaves nothing to adapt."
+                    } else {
+                        "Within this range: longer groups while you copy them whole, shorter ones when you don't. Your copy span is under Stats."
+                    },
+                    checked: s.adaptive,
+                    onchange: move |on| settings.write().curriculum.adaptive_group_size = on,
+                }
+                if s.adaptive && !s.one_size {
+                    div { class: "field",
+                        span { class: "field-label", "Aim for" }
+                        div { class: "segmented",
+                            for (target, label) in GROUP_SIZE_TARGETS {
+                                Seg {
+                                    label,
+                                    active: s.target == target,
+                                    onclick: move |_| settings.write().curriculum.group_size_target = target,
+                                }
+                            }
+                        }
+                        p { class: "muted", style: "margin: 0; font-size: 0.8rem;",
+                            {target_note(s.target)}
+                        }
+                    }
                 }
             }
             SettingsRange {

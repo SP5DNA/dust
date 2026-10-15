@@ -9,6 +9,7 @@ use crate::pool::compute_char_pool;
 use crate::rng::{Rng, SplitMix64, weighted_random_pick};
 use crate::session::SessionResult;
 use crate::settings::{CharSetMode, LevelAxis, TrainingSettings};
+use crate::span::SpanBelief;
 
 pub const CHAR_SAMPLING_PRIOR_ALPHA: f64 = 1.0;
 pub const CHAR_SAMPLING_PRIOR_BETA: f64 = 1.0;
@@ -68,10 +69,12 @@ impl CharSamplingState {
 
 /// The trainer's own group source: groups drawn for the curriculum, leaning
 /// on the characters the history says are hard and on those this session
-/// has not sent yet, and learning from every answer as it comes.
+/// has not sent yet, and learning from every answer as it comes. With
+/// adaptive group size on, their lengths lean on what you copy whole, too.
 #[derive(Clone, Debug)]
 pub struct Sampler {
     state: CharSamplingState,
+    span: SpanBelief,
     rng: SplitMix64,
 }
 
@@ -82,6 +85,7 @@ impl Sampler {
     pub fn new(history: &[SessionResult], settings: &TrainingSettings, seed: u64) -> Self {
         Self {
             state: CharSamplingState::from_history(history, settings),
+            span: SpanBelief::from_history(history, settings),
             rng: SplitMix64::new(seed),
         }
     }
@@ -89,13 +93,39 @@ impl Sampler {
 
 impl GroupSource for Sampler {
     fn next_group(&mut self, settings: &TrainingSettings) -> (String, u32) {
-        let group = generate_training_group(settings, &mut self.state, &mut self.rng);
+        let length = adaptive_bounds(settings).map(|(shortest, longest)| {
+            let target = settings.curriculum.group_size_target.success_rate();
+            self.span
+                .draw_length(shortest, longest, target, &mut self.rng)
+        });
+        let group = generate_group(settings, &mut self.state, length, &mut self.rng);
         (group, resolve_group_repeats(settings, &mut self.rng))
     }
 
     fn learn(&mut self, copied: &CopyTally) {
         self.state.learn(copied);
+        self.span.learn_copy(copied);
     }
+}
+
+/// The shortest and longest group `settings` asks for. At least one
+/// character: a group of none is a silent send nobody can answer, and only
+/// settings that were never clamped could ask for it.
+pub(crate) fn group_size_bounds(settings: &TrainingSettings) -> (usize, usize) {
+    let shortest = settings.curriculum.min_group_size.max(1) as usize;
+    let longest = (settings.curriculum.max_group_size as usize).max(shortest);
+    (shortest, longest)
+}
+
+/// The range adaptive group size draws within, when it has one to draw in:
+/// it is switched on, there is more than one length to choose from, and the
+/// groups are not callsigns, which are as long as they are.
+pub(crate) fn adaptive_bounds(settings: &TrainingSettings) -> Option<(usize, usize)> {
+    let (shortest, longest) = group_size_bounds(settings);
+    (settings.curriculum.adaptive_group_size
+        && settings.curriculum.char_set_mode != CharSetMode::Callsign
+        && shortest < longest)
+        .then_some((shortest, longest))
 }
 
 #[derive(Clone, Debug)]
@@ -371,6 +401,17 @@ pub fn generate_training_group(
     state: &mut CharSamplingState,
     rng: &mut impl Rng,
 ) -> String {
+    generate_group(settings, state, None, rng)
+}
+
+/// The next group, `length` characters long when one is given and otherwise
+/// any length the range allows, evenly.
+fn generate_group(
+    settings: &TrainingSettings,
+    state: &mut CharSamplingState,
+    length: Option<usize>,
+    rng: &mut impl Rng,
+) -> String {
     // A callsign is a group like any other once it exists — it is only built
     // differently. This is the single place the two modes part company.
     let config = config_from_settings(settings);
@@ -378,17 +419,17 @@ pub fn generate_training_group(
         return generate_callsign_group(settings, state, &config, rng);
     }
     let pool = compute_char_pool(settings);
-    // At least one character: a group of none is a silent send nobody can
-    // answer, and only settings that were never clamped could ask for it.
-    let shortest = settings.curriculum.min_group_size.max(1) as usize;
-    let longest = (settings.curriculum.max_group_size as usize).max(shortest);
-    let group_size = rng.usize_in(shortest, longest);
+    let group_size = length.unwrap_or_else(|| {
+        let (shortest, longest) = group_size_bounds(settings);
+        rng.usize_in(shortest, longest)
+    });
     sample_training_group(&pool, group_size, state, &config, rng)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::GroupResult;
 
     /// A generator stuck on one value: the worst a broken stub can do.
     struct Stuck(f64);
@@ -853,5 +894,117 @@ mod tests {
                 "group {group:?} has {len} characters"
             );
         }
+    }
+
+    fn length_settings(adaptive: bool) -> TrainingSettings {
+        let mut settings = TrainingSettings::default();
+        settings.curriculum.char_set_mode = CharSetMode::Koch;
+        settings.curriculum.level = 10;
+        settings.curriculum.min_group_size = 2;
+        settings.curriculum.max_group_size = 10;
+        settings.curriculum.adaptive_group_size = adaptive;
+        settings
+    }
+
+    fn history_of(sent: &str, correct: bool) -> Vec<SessionResult> {
+        (0..5)
+            .map(|i| SessionResult {
+                timestamp: i,
+                groups: vec![
+                    GroupResult {
+                        sent: sent.to_string(),
+                        received: if correct {
+                            sent.to_string()
+                        } else {
+                            String::new()
+                        },
+                        correct,
+                    };
+                    20
+                ],
+                ..SessionResult::empty_for_test()
+            })
+            .collect()
+    }
+
+    /// Off means off: not one draw differs from the sampler before adaptive
+    /// group size existed.
+    #[test]
+    fn with_adaptive_length_off_the_draws_are_what_they_always_were() {
+        let settings = length_settings(false);
+        let history = history_of("KMKMKMKM", true);
+        let mut sampler = Sampler::new(&history, &settings, 42);
+        let mut state = CharSamplingState::from_history(&history, &settings);
+        let mut rng = SplitMix64::new(42);
+        for _ in 0..50 {
+            let expected = (
+                generate_training_group(&settings, &mut state, &mut rng),
+                resolve_group_repeats(&settings, &mut rng),
+            );
+            assert_eq!(sampler.next_group(&settings), expected);
+        }
+    }
+
+    /// A history of long groups copied whole draws longer groups than one of
+    /// short groups missed, and neither leaves the range.
+    #[test]
+    fn with_adaptive_length_on_the_lengths_follow_the_history() {
+        let settings = length_settings(true);
+        let mean_length = |history: &[SessionResult]| {
+            let mut sampler = Sampler::new(history, &settings, 7);
+            let lengths: Vec<usize> = (0..200)
+                .map(|_| sampler.next_group(&settings).0.chars().count())
+                .collect();
+            assert!(lengths.iter().all(|length| (2..=10).contains(length)));
+            lengths.iter().sum::<usize>() as f64 / lengths.len() as f64
+        };
+        let strong = mean_length(&history_of("KMKMKMKMK", true));
+        let weak = mean_length(&history_of("KMK", false));
+        assert!(strong > weak + 3.0, "strong {strong}, weak {weak}");
+    }
+
+    #[test]
+    fn adaptive_length_needs_a_range_and_groups_that_are_drawn() {
+        let mut settings = length_settings(true);
+        assert_eq!(adaptive_bounds(&settings), Some((2, 10)));
+        settings.curriculum.max_group_size = 2;
+        assert_eq!(adaptive_bounds(&settings), None, "one length is no choice");
+        settings.curriculum.max_group_size = 10;
+        settings.curriculum.char_set_mode = CharSetMode::Callsign;
+        assert_eq!(
+            adaptive_bounds(&settings),
+            None,
+            "callsigns are as long as they are"
+        );
+        settings.curriculum.char_set_mode = CharSetMode::Koch;
+        settings.curriculum.adaptive_group_size = false;
+        assert_eq!(adaptive_bounds(&settings), None);
+    }
+
+    /// The sampler learns lengths as the session goes, not only from the
+    /// history it started with.
+    #[test]
+    fn misses_during_a_session_shorten_the_groups() {
+        let settings = length_settings(true);
+        // One session of six-character groups, all copied whole: a span
+        // somewhere past six, and nothing yet to say how far.
+        let history = history_of("KMKMKM", true)[..1].to_vec();
+        let mut fresh = Sampler::new(&history, &settings, 9);
+        let mut struggling = fresh.clone();
+        for _ in 0..30 {
+            let (group, _) = struggling.next_group(&settings);
+            struggling.learn(&CopyTally::of(&group, ""));
+        }
+        let mean = |sampler: &mut Sampler| {
+            (0..100)
+                .map(|_| sampler.next_group(&settings).0.chars().count())
+                .sum::<usize>() as f64
+                / 100.0
+        };
+        let (struggling, fresh) = (mean(&mut struggling), mean(&mut fresh));
+        assert!(
+            struggling < fresh - 1.0,
+            "struggling {struggling}, fresh {fresh}"
+        );
     }
 }

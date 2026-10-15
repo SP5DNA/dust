@@ -1,9 +1,10 @@
 use cw_core::{
-    AccuracyPoint, MasteryStatus, SessionResult, TrainingSettings, accuracy_chart,
-    character_diagnostics,
+    AccuracyPoint, MasteryStatus, SessionResult, SpanPoint, TrainingSettings, accuracy_chart,
+    character_diagnostics, span_history,
 };
 use dioxus::prelude::*;
 
+use crate::ui::settings::GROUP_SIZE_TARGETS;
 use crate::ui::stats_detail::{HistoryTab, LettersTab, MistakesTab, SamplingTab};
 use crate::ui::widgets::{CardHead, IconName, Seg};
 
@@ -50,6 +51,46 @@ fn chart_floor(points: &[AccuracyPoint]) -> f64 {
     (((min - 6.0) / 10.0).floor() * 10.0).clamp(0.0, 80.0)
 }
 
+/// Where each of `count` sessions sits across the chart: spread over its
+/// whole width, or, for a single session, a flat line across it — which beats
+/// an empty chart, the way a one-point polyline renders.
+fn series(values: &[f64], y_at: impl Fn(f64) -> f64) -> Vec<(f64, f64)> {
+    if let [only] = values {
+        let y = y_at(*only);
+        return vec![(0.0, y), (CHART_W, y)];
+    }
+    let last = values.len().saturating_sub(1).max(1) as f64;
+    values
+        .iter()
+        .enumerate()
+        .map(|(i, value)| (i as f64 / last * CHART_W, y_at(*value)))
+        .collect()
+}
+
+fn polyline(coords: &[(f64, f64)]) -> String {
+    coords
+        .iter()
+        .map(|(x, y)| format!("{x:.1},{y:.1}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The points marked with a dot: every session on a short history, the last
+/// on a long one, the middle of the line for a single session.
+fn marks(coords: &[(f64, f64)], sessions: usize) -> Vec<(f64, f64)> {
+    if sessions == 1 {
+        coords
+            .first()
+            .map(|(_, y)| (CHART_W / 2.0, *y))
+            .into_iter()
+            .collect()
+    } else if sessions <= 30 {
+        coords.to_vec()
+    } else {
+        coords.last().copied().into_iter().collect()
+    }
+}
+
 fn chart_geometry(points: &[AccuracyPoint], threshold_pct: f64) -> Option<ChartGeometry> {
     if points.is_empty() {
         return None;
@@ -61,25 +102,9 @@ fn chart_geometry(points: &[AccuracyPoint], threshold_pct: f64) -> Option<ChartG
         (CHART_H - ((pct - floor_pct) / span) * CHART_H).clamp(0.0, CHART_H)
     };
 
-    let coords: Vec<(f64, f64)> = if points.len() == 1 {
-        // One session: a flat line across the card with a dot on it beats an
-        // empty chart, which is what a single-point polyline renders as.
-        let y = y_at(points[0].accuracy_pct);
-        vec![(0.0, y), (CHART_W, y)]
-    } else {
-        let last = (points.len() - 1) as f64;
-        points
-            .iter()
-            .enumerate()
-            .map(|(i, p)| (i as f64 / last * CHART_W, y_at(p.accuracy_pct)))
-            .collect()
-    };
-
-    let line = coords
-        .iter()
-        .map(|(x, y)| format!("{x:.1},{y:.1}"))
-        .collect::<Vec<_>>()
-        .join(" ");
+    let values: Vec<f64> = points.iter().map(|p| p.accuracy_pct).collect();
+    let coords = series(&values, y_at);
+    let line = polyline(&coords);
     let mut area = format!("M{:.1},{CHART_H:.1}", coords[0].0);
     for (x, y) in &coords {
         area.push_str(&format!(" L{x:.1},{y:.1}"));
@@ -89,22 +114,137 @@ fn chart_geometry(points: &[AccuracyPoint], threshold_pct: f64) -> Option<ChartG
         coords.last().map(|(x, _)| *x).unwrap_or(0.0)
     ));
 
-    let dots = if points.len() == 1 {
-        vec![(CHART_W / 2.0, coords[0].1)]
-    } else if points.len() <= 30 {
-        coords
-    } else {
-        coords.last().copied().into_iter().collect()
-    };
-
     Some(ChartGeometry {
         line,
         area,
-        dots,
+        dots: marks(&coords, points.len()),
         floor_pct,
         threshold_y: (threshold_pct > floor_pct && threshold_pct < 100.0)
             .then(|| y_at(threshold_pct)),
     })
+}
+
+/// Chart shape for the copy span: its estimate after each session, and a
+/// band one standard deviation either side of it, which narrows as the
+/// estimate firms up.
+struct SpanChart {
+    line: String,
+    band: String,
+    dots: Vec<(f64, f64)>,
+    /// The scale, in characters, bottom to top.
+    low: f64,
+    high: f64,
+}
+
+fn span_chart(points: &[SpanPoint]) -> Option<SpanChart> {
+    if points.is_empty() {
+        return None;
+    }
+    let below = |p: &SpanPoint| p.estimate.mean - p.estimate.sd;
+    let above = |p: &SpanPoint| p.estimate.mean + p.estimate.sd;
+    let low = points.iter().map(below).fold(f64::INFINITY, f64::min);
+    let high = points.iter().map(above).fold(f64::NEG_INFINITY, f64::max);
+    let low = low.floor().max(0.0);
+    let high = high.ceil().max(low + 2.0);
+    let y_at = |chars: f64| (CHART_H - (chars - low) / (high - low) * CHART_H).clamp(0.0, CHART_H);
+
+    let means: Vec<f64> = points.iter().map(|p| p.estimate.mean).collect();
+    let tops: Vec<f64> = points.iter().map(above).collect();
+    let bottoms: Vec<f64> = points.iter().map(below).collect();
+    let coords = series(&means, y_at);
+    let mut band = String::new();
+    for (i, (x, y)) in series(&tops, y_at).into_iter().enumerate() {
+        band.push_str(&format!("{}{x:.1},{y:.1}", if i == 0 { "M" } else { " L" }));
+    }
+    for (x, y) in series(&bottoms, y_at).into_iter().rev() {
+        band.push_str(&format!(" L{x:.1},{y:.1}"));
+    }
+    band.push_str(" Z");
+
+    Some(SpanChart {
+        line: polyline(&coords),
+        band,
+        dots: marks(&coords, points.len()),
+        low,
+        high,
+    })
+}
+
+/// How many sessions of span the overview draws.
+const SPAN_SESSIONS_SHOWN: usize = 30;
+
+/// The copy span: how long a group you copy whole, and how that has moved.
+/// Nothing for callsigns, which are as long as they are, or before a session
+/// of the character set being trained.
+#[component]
+fn SpanCard(settings: TrainingSettings, sessions: Vec<SessionResult>) -> Element {
+    let points = span_history(&settings, &sessions);
+    let shown = &points[points.len().saturating_sub(SPAN_SESSIONS_SHOWN)..];
+    let (Some(first), Some(last), Some(chart)) = (shown.first(), shown.last(), span_chart(shown))
+    else {
+        return rsx! {};
+    };
+    let change = last.estimate.mean - first.estimate.mean;
+    let count = shown.len();
+    let trend = if count == 1 {
+        "after 1 session".to_string()
+    } else if change.abs() < 0.05 {
+        format!("steady over {count} sessions")
+    } else if change > 0.0 {
+        format!("up {change:.1} over {count} sessions")
+    } else {
+        format!("down {:.1} over {count} sessions", -change)
+    };
+    let curriculum = &settings.curriculum;
+    let adapting =
+        curriculum.adaptive_group_size && curriculum.min_group_size < curriculum.max_group_size;
+    let mode = if adapting {
+        let target = GROUP_SIZE_TARGETS
+            .iter()
+            .find(|(target, _)| *target == curriculum.group_size_target)
+            .map_or("", |(_, label)| label);
+        format!("Adapting · {target}")
+    } else {
+        "Adaptive length off".to_string()
+    };
+    rsx! {
+        div { class: "card chart-card",
+            CardHead {
+                icon: IconName::Target,
+                title: "Copy span",
+                note: format!("{:.1} ± {:.1} chars · {trend}", last.estimate.mean, last.estimate.sd),
+            }
+            svg {
+                class: "sparkline",
+                view_box: "0 0 420 96",
+                path { d: "{chart.band}", fill: "var(--info)", fill_opacity: "0.16", stroke: "none" }
+                polyline {
+                    points: "{chart.line}",
+                    fill: "none",
+                    stroke: "var(--info)",
+                    stroke_width: "2.2",
+                    stroke_linecap: "round",
+                    stroke_linejoin: "round",
+                }
+                for (x, y) in chart.dots.iter() {
+                    circle {
+                        cx: "{x:.1}",
+                        cy: "{y:.1}",
+                        r: "3",
+                        fill: "var(--info)",
+                        stroke: "var(--surface)",
+                        stroke_width: "1.5",
+                    }
+                }
+            }
+            div { class: "row-between",
+                span { class: "tiny", style: "text-transform: none; letter-spacing: 0.02em;",
+                    "Copied whole about half the time · scale {chart.low:.0}–{chart.high:.0} chars"
+                }
+                span { class: if adapting { "chip good" } else { "chip" }, "{mode}" }
+            }
+        }
+    }
 }
 
 #[component]
@@ -129,10 +269,7 @@ pub fn StatsView(settings: TrainingSettings, sessions: Vec<SessionResult>) -> El
             }
             match tab() {
                 StatsTab::Overview => rsx! {
-                    OverviewTab {
-                        sessions,
-                        threshold: settings.auto_level.auto_adjust_threshold,
-                    }
+                    OverviewTab { settings, sessions }
                 },
                 StatsTab::Letters => rsx! { LettersTab { sessions } },
                 StatsTab::Mistakes => rsx! { MistakesTab { sessions } },
@@ -144,7 +281,8 @@ pub fn StatsView(settings: TrainingSettings, sessions: Vec<SessionResult>) -> El
 }
 
 #[component]
-fn OverviewTab(sessions: Vec<SessionResult>, threshold: f64) -> Element {
+fn OverviewTab(settings: TrainingSettings, sessions: Vec<SessionResult>) -> Element {
+    let threshold = settings.auto_level.auto_adjust_threshold;
     let chart = accuracy_chart(&sessions);
     let letters = character_diagnostics(&sessions);
     let avg = if sessions.is_empty() {
@@ -248,6 +386,7 @@ fn OverviewTab(sessions: Vec<SessionResult>, threshold: f64) -> Element {
                         }
                     }
                 }
+                SpanCard { settings, sessions }
             }
         }
     }

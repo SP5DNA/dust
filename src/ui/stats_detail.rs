@@ -1,6 +1,6 @@
 use cw_core::{
     GROUP_START_BIGRAM_TOKEN, MasteryStatus, SessionResult, TrainingSettings,
-    character_diagnostics, mistake_stats, sampling_rows, session_history,
+    character_diagnostics, group_length_forecast, mistake_stats, sampling_rows, session_history,
 };
 use dioxus::prelude::*;
 
@@ -107,6 +107,16 @@ pub fn MistakesTab(sessions: Vec<SessionResult>) -> Element {
 
 #[component]
 pub fn SamplingTab(settings: TrainingSettings, sessions: Vec<SessionResult>) -> Element {
+    rsx! {
+        div { class: "stack",
+            CharacterSamplingCard { settings: settings.clone(), sessions: sessions.clone() }
+            GroupLengthCard { settings, sessions }
+        }
+    }
+}
+
+#[component]
+fn CharacterSamplingCard(settings: TrainingSettings, sessions: Vec<SessionResult>) -> Element {
     let rows = sampling_rows(&settings, &sessions);
     let max_p = rows
         .iter()
@@ -132,6 +142,51 @@ pub fn SamplingTab(settings: TrainingSettings, sessions: Vec<SessionResult>) -> 
                                 span { class: "mono muted", "{(row.sampling_prob * 100.0).round()}%" }
                                 span { class: "tiny", style: "text-transform: none; letter-spacing: 0;", "p(err) {(row.p_error * 100.0).round()}%" }
                             }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The group lengths the next session can send: how likely each is, and how
+/// often a group that long is copied whole. Nothing for callsigns, which are
+/// as long as they are.
+#[component]
+fn GroupLengthCard(settings: TrainingSettings, sessions: Vec<SessionResult>) -> Element {
+    let rows = group_length_forecast(&settings, &sessions);
+    if rows.is_empty() {
+        return rsx! {};
+    }
+    let max_drawn = rows
+        .iter()
+        .map(|row| row.drawn)
+        .fold(0.0_f64, f64::max)
+        .max(0.0001);
+    let curriculum = &settings.curriculum;
+    let note = if !curriculum.adaptive_group_size {
+        "Adaptive group size is off, so every length is as likely as the next. Whole is how often you copy a group that long without a mistake."
+    } else if rows.len() == 1 {
+        "The group size is fixed, so there is no length to choose. Whole is how often you copy a group that long without a mistake."
+    } else {
+        "Chance of each length in the next group, and how often you copy a group that long without a mistake."
+    };
+    rsx! {
+        div { class: "card stack",
+            div { class: "tiny", "Group length" }
+            p { class: "muted", "{note}" }
+            for row in rows.iter() {
+                {
+                    let width = (row.drawn / max_drawn * 100.0).clamp(4.0, 100.0);
+                    rsx! {
+                        div { class: "letter-row",
+                            span { class: "letter-key mono", "{row.length}" }
+                            div { class: "bar-track",
+                                span { class: "bar-fill sample", style: "width: {width}%;" }
+                            }
+                            span { class: "mono muted", "{(row.drawn * 100.0).round()}%" }
+                            span { class: "tiny", style: "text-transform: none; letter-spacing: 0;", "whole {(row.whole * 100.0).round()}%" }
                         }
                     }
                 }

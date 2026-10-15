@@ -16,6 +16,8 @@ impl TrainingSettings {
                 self.curriculum.min_group_size = d.curriculum.min_group_size;
                 self.curriculum.max_group_size = d.curriculum.max_group_size;
                 self.curriculum.link_group_size = d.curriculum.link_group_size;
+                self.curriculum.adaptive_group_size = d.curriculum.adaptive_group_size;
+                self.curriculum.group_size_target = d.curriculum.group_size_target;
                 self.playback.group_repeat_min = d.playback.group_repeat_min;
                 self.playback.group_repeat_max = d.playback.group_repeat_max;
                 self.playback.link_group_repeat = d.playback.link_group_repeat;

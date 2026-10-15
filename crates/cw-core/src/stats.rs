@@ -6,11 +6,13 @@ use crate::alignment::align_group;
 use crate::morse::LCWO_SEQUENCE;
 use crate::pool::compute_char_pool;
 use crate::sampling::{
-    CharSamplingConfig, CharSamplingState, belief_for, beta_posterior_mean_error,
-    compute_raw_sampling_weights, config_from_settings, generate_callsign_group, normalize_weights,
+    CharSamplingConfig, CharSamplingState, adaptive_bounds, belief_for, beta_posterior_mean_error,
+    compute_raw_sampling_weights, config_from_settings, generate_callsign_group, group_size_bounds,
+    normalize_weights,
 };
 use crate::session::SessionResult;
 use crate::settings::{CharSetMode, TrainingSettings};
+use crate::span::{LengthForecast, SpanBelief, SpanPoint};
 
 pub const MASTERED_MIN_ATTEMPTS: u32 = 5;
 pub const MASTERED_MIN_ACCURACY: f64 = 0.9;
@@ -378,6 +380,34 @@ pub fn session_history(sessions: &[SessionResult]) -> Vec<SessionHistoryRow> {
     rows
 }
 
+/// Your copy span after each session of the character set `settings`
+/// trains, oldest first. Empty for callsigns, which are as long as they are.
+pub fn span_history(settings: &TrainingSettings, sessions: &[SessionResult]) -> Vec<SpanPoint> {
+    SpanBelief::history(sessions, settings)
+}
+
+/// Each group length the next session can send: how likely it is to come
+/// next, and how often a group that long is copied whole. With adaptive group
+/// size off, every length is as likely as the next. Empty for callsigns.
+pub fn group_length_forecast(
+    settings: &TrainingSettings,
+    sessions: &[SessionResult],
+) -> Vec<LengthForecast> {
+    if settings.curriculum.char_set_mode == CharSetMode::Callsign {
+        return Vec::new();
+    }
+    let (shortest, longest) = group_size_bounds(settings);
+    let target = settings.curriculum.group_size_target.success_rate();
+    let mut rows = SpanBelief::from_history(sessions, settings).forecast(shortest, longest, target);
+    if adaptive_bounds(settings).is_none() {
+        let even = 1.0 / rows.len() as f64;
+        for row in &mut rows {
+            row.drawn = even;
+        }
+    }
+    rows
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -694,5 +724,50 @@ mod tests {
         let only_koch = k_belief(&sampling_rows(&settings, &[koch.clone()]));
         let mixed_history = k_belief(&sampling_rows(&settings, &[koch, digits]));
         assert_eq!(only_koch, mixed_history);
+    }
+
+    fn length_settings(adaptive: bool) -> TrainingSettings {
+        let mut settings = TrainingSettings::default();
+        settings.curriculum.char_set_mode = CharSetMode::Koch;
+        settings.curriculum.min_group_size = 2;
+        settings.curriculum.max_group_size = 7;
+        settings.curriculum.adaptive_group_size = adaptive;
+        settings
+    }
+
+    #[test]
+    fn with_adaptive_length_off_every_length_is_as_likely() {
+        let rows = group_length_forecast(&length_settings(false), &[session()]);
+        assert_eq!(
+            rows.iter().map(|row| row.length).collect::<Vec<_>>(),
+            [2, 3, 4, 5, 6, 7]
+        );
+        assert!(rows.iter().all(|row| (row.drawn - 1.0 / 6.0).abs() < 1e-12));
+        // What is copied whole is still the model's to say.
+        assert!(rows.windows(2).all(|pair| pair[0].whole > pair[1].whole));
+    }
+
+    #[test]
+    fn with_adaptive_length_on_the_lengths_lean_and_still_add_up() {
+        let rows = group_length_forecast(&length_settings(true), &[session()]);
+        let total: f64 = rows.iter().map(|row| row.drawn).sum();
+        assert!((total - 1.0).abs() < 1e-9);
+        assert!(rows.iter().any(|row| (row.drawn - 1.0 / 6.0).abs() > 0.01));
+    }
+
+    #[test]
+    fn callsigns_have_no_group_length_to_show() {
+        let mut settings = length_settings(true);
+        settings.curriculum.char_set_mode = CharSetMode::Callsign;
+        assert!(group_length_forecast(&settings, &[session()]).is_empty());
+        assert!(span_history(&settings, &[session()]).is_empty());
+    }
+
+    #[test]
+    fn the_span_history_has_a_point_for_each_session_of_the_set() {
+        let mut later = session();
+        later.timestamp = 2;
+        let points = span_history(&length_settings(false), &[session(), later]);
+        assert_eq!(points.len(), 2);
     }
 }

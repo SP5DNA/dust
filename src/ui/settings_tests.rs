@@ -4,6 +4,8 @@
 //! These read the page rather than the store, so they say what the learner
 //! sees; the store is written from the same settings the page shows.
 
+use cw_core::{CharSetMode, GroupSizeTarget};
+
 use crate::testing::{Ui, run, test_settings};
 
 /// The value an input is showing.
@@ -331,5 +333,48 @@ fn a_slider_tick_redraws_its_own_card_only() {
                 "{control} cost {work} mutations; its card alone is at most {most}"
             );
         }
+    });
+}
+
+/// Adaptive group size is off until asked for. What it aims for shows only
+/// once it is on, both are stored, and a group size of one length says why
+/// there is nothing to adapt.
+#[test]
+fn adaptive_group_size_is_opt_in_and_its_target_follows_the_switch() {
+    run(|| async {
+        let mut settings = test_settings();
+        settings.curriculum.max_group_size = 6;
+        let (mut ui, _recorder) = Ui::app_with_settings(settings);
+        ui.click("nav-settings");
+        assert!(ui.shows("switch-adapt-group-size-to-me"));
+        assert!(ui.has("Your copy span is under Stats."));
+        assert!(!ui.shows("seg-balanced"), "no target until it is on");
+
+        ui.commit("switch-adapt-group-size-to-me", "true");
+        assert!(ui.has("Balanced aims for 70% of groups copied whole."));
+        ui.click("seg-stretch");
+        assert!(ui.has("Stretch aims for 50% of groups copied whole."));
+        let stored = ui.stored_settings().await;
+        assert!(stored.curriculum.adaptive_group_size);
+        assert_eq!(
+            stored.curriculum.group_size_target,
+            GroupSizeTarget::Stretch
+        );
+
+        ui.click("link-group-size");
+        assert!(ui.has("one size leaves nothing to adapt"));
+        assert!(!ui.shows("seg-stretch"));
+    });
+}
+
+/// A callsign is as long as it is, so there is no size to adapt and no switch.
+#[test]
+fn callsigns_have_no_adaptive_group_size() {
+    run(|| async {
+        let mut settings = test_settings();
+        settings.curriculum.char_set_mode = CharSetMode::Callsign;
+        let (mut ui, _recorder) = Ui::app_with_settings(settings);
+        ui.click("nav-settings");
+        assert!(!ui.shows("switch-adapt-group-size-to-me"));
     });
 }
