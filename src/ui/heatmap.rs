@@ -72,7 +72,7 @@ fn heat_color(intensity: f64) -> String {
 pub fn ActivityHeatmap(sessions: Vec<SessionResult>, today: String) -> Element {
     let mut mode = use_signal(|| HeatmapColorMode::Volume);
     let mut selected = use_signal(|| None::<String>);
-    let Some(grid) = cw_core::build_heatmap(&sessions, &today, cw_core::HEATMAP_WEEKS, mode())
+    let Some(grid) = cw_core::build_heatmap(&sessions, &today, cw_core::HEATMAP_MONTHS, mode())
     else {
         return rsx! {};
     };
@@ -81,8 +81,7 @@ pub fn ActivityHeatmap(sessions: Vec<SessionResult>, today: String) -> Element {
     } else {
         "Better copy"
     };
-    let selected_cell =
-        selected().and_then(|date| grid.cells.iter().find(|c| c.date == date).cloned());
+    let selected_cell = selected().and_then(|date| grid.cell(&date).cloned());
     let selected_summary = selected_cell.as_ref().map(|cell| {
         if cell.sessions == 0 {
             format!("{} · no practice", cell.date)
@@ -139,41 +138,75 @@ pub fn ActivityHeatmap(sessions: Vec<SessionResult>, today: String) -> Element {
     }
 }
 
+/// Weekday headings over each month's columns, Monday first.
+const WEEKDAYS: [&str; 7] = ["M", "T", "W", "T", "F", "S", "S"];
+
+const MONTH_NAMES: [&str; 12] = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+];
+
+/// "September 2026" for 2026 and 9.
+fn month_label(year: i32, month: u32) -> String {
+    let name = month
+        .checked_sub(1)
+        .and_then(|index| MONTH_NAMES.get(index as usize))
+        .copied()
+        .unwrap_or_default();
+    format!("{name} {year}")
+}
+
 #[component]
 fn HeatmapGridView(
     grid: HeatmapGrid,
     selected: Option<String>,
     on_select: EventHandler<String>,
 ) -> Element {
-    let labels = ["Mon", "", "Wed", "", "Fri", "", ""];
     rsx! {
-        div { class: "heatmap-wrap",
-            div { class: "heatmap-days",
-                for label in labels {
-                    span { class: "heatmap-day-label", "{label}" }
-                }
-            }
-            div { class: "heatmap-grid",
-                for cell in grid.cells.iter() {
-                    {
-                        let date = cell.date.clone();
-                        let is_selected = selected.as_deref() == Some(date.as_str());
-                        let cls = if is_selected { "heat-cell selected" } else { "heat-cell" };
-                        let paint = cell.intensity.map(|intensity| format!("background: {};", heat_color(intensity)));
-                        let title = if cell.sessions == 0 {
-                            format!("{} — no practice", cell.date)
-                        } else {
-                            format!("{} — {} chars, {} sessions", cell.date, cell.chars, cell.sessions)
-                        };
-                        rsx! {
-                            button {
-                                id: control_id("day", &cell.date),
-                                class: cls,
-                                style: paint,
-                                title: "{title}",
-                                aria_label: "{title}",
-                                disabled: html_bool(cell.in_future),
-                                onclick: move |_| on_select.call(date.clone()),
+        div { class: "heatmap-months",
+            for month in grid.months.iter() {
+                div { class: "heatmap-month",
+                    span { class: "heatmap-month-label", "{month_label(month.year, month.month)}" }
+                    div { class: "heatmap-month-grid",
+                        for day in WEEKDAYS {
+                            span { class: "heatmap-day-label", "{day}" }
+                        }
+                        for (n, cell) in month.cells.iter().enumerate() {
+                            {
+                                let date = cell.date.clone();
+                                let is_selected = selected.as_deref() == Some(date.as_str());
+                                let cls = if is_selected { "heat-cell selected" } else { "heat-cell" };
+                                // The 1st sits under its weekday, and every day after it follows on.
+                                let column = (n == 0).then(|| format!("grid-column-start: {};", month.lead + 1));
+                                let paint = cell.intensity.map(|intensity| format!("background: {};", heat_color(intensity)));
+                                let style: Vec<String> = [column, paint].into_iter().flatten().collect();
+                                let style = (!style.is_empty()).then(|| style.join(" "));
+                                let title = if cell.sessions == 0 {
+                                    format!("{} — no practice", cell.date)
+                                } else {
+                                    format!("{} — {} chars, {} sessions", cell.date, cell.chars, cell.sessions)
+                                };
+                                rsx! {
+                                    button {
+                                        id: control_id("day", &cell.date),
+                                        class: cls,
+                                        style: style,
+                                        title: "{title}",
+                                        aria_label: "{title}",
+                                        disabled: html_bool(cell.in_future),
+                                        onclick: move |_| on_select.call(date.clone()),
+                                    }
+                                }
                             }
                         }
                     }
@@ -185,7 +218,7 @@ fn HeatmapGridView(
 
 #[cfg(test)]
 mod tests {
-    use super::heat_color;
+    use super::{heat_color, month_label};
 
     #[test]
     fn days_shade_from_red_through_yellow_to_green() {
@@ -195,5 +228,14 @@ mod tests {
         // Out-of-range input is clamped rather than producing a broken colour.
         assert_eq!(heat_color(-1.0), heat_color(0.0));
         assert_eq!(heat_color(9.0), heat_color(1.0));
+    }
+
+    #[test]
+    fn a_month_is_named_in_full_with_its_year() {
+        assert_eq!(month_label(2026, 1), "January 2026");
+        assert_eq!(month_label(2026, 12), "December 2026");
+        // A month out of range names no month rather than panicking.
+        assert_eq!(month_label(2026, 0), " 2026");
+        assert_eq!(month_label(2026, 13), " 2026");
     }
 }

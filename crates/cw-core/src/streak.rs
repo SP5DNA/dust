@@ -58,7 +58,7 @@ pub fn parse_ymd(date: &str) -> Option<(i32, u32, u32)> {
 /// Days in a month of the proleptic Gregorian calendar. Without it the 31st
 /// of February parsed, and landed on a different day than the heatmap, which
 /// looks dates up by their text.
-fn days_in_month(year: i32, month: u32) -> u32 {
+pub(crate) fn days_in_month(year: i32, month: u32) -> u32 {
     match month {
         2 if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 => 29,
         2 => 28,

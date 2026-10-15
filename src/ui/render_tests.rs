@@ -852,13 +852,45 @@ mod interactions {
         let mut ui = Ui::new(HeatmapHarness, ());
         assert!(ui.has("Tap a day for details."));
         assert!(ui.has("Practice calendar"));
-        // One button per day, sixteen weeks of them.
-        assert_eq!(ui.controls("day-").len(), 16 * 7);
+        // One button per day, June to September of them.
+        assert_eq!(ui.controls("day-").len(), 30 + 31 + 31 + 30);
 
         // Each day answers to its own date.
         ui.click("day-2026-09-08");
         assert!(ui.has("2026-09-08 · 1 session · 2 chars"));
         assert!(ui.has("accuracy"));
+    }
+
+    #[test]
+    fn each_month_has_its_own_tile() {
+        let ui = Ui::new(HeatmapHarness, ());
+        let html = ui.html();
+        let tiles: Vec<usize> = ["June 2026", "July 2026", "August 2026", "September 2026"]
+            .iter()
+            .map(|name| {
+                html.find(&format!(">{name}<"))
+                    .unwrap_or_else(|| panic!("no tile for {name}"))
+            })
+            .collect();
+        assert!(tiles.is_sorted(), "the months run oldest first");
+        assert_eq!(html.matches("class=\"heatmap-month\"").count(), 4);
+        // 2026-09-01 is a Tuesday, so it sits in the second column; the 2nd
+        // just follows on.
+        assert!(
+            ui.input_tag("day-2026-09-01")
+                .contains("grid-column-start: 2;")
+        );
+        assert!(!ui.input_tag("day-2026-09-02").contains("grid-column-start"));
+        // A day of the month is not in the month before's tile.
+        let september = tiles[3];
+        assert!(
+            html.find("id=\"day-2026-08-31\"")
+                .is_some_and(|at| at < september)
+        );
+        assert!(
+            html.find("id=\"day-2026-09-01\"")
+                .is_some_and(|at| at > september)
+        );
     }
 
     #[test]
