@@ -1,10 +1,10 @@
 use cw_core::{
     AccuracyPoint, MasteryStatus, SessionResult, SpanPoint, TrainingSettings, accuracy_chart,
-    character_diagnostics, span_history,
+    adapts_group_size, character_diagnostics, span_history,
 };
 use dioxus::prelude::*;
 
-use crate::ui::settings::GROUP_SIZE_TARGETS;
+use crate::ui::settings::target_label;
 use crate::ui::stats_detail::{HistoryTab, LettersTab, MistakesTab, SamplingTab};
 use crate::ui::widgets::{CardHead, IconName, Seg};
 
@@ -195,15 +195,12 @@ fn SpanCard(settings: TrainingSettings, sessions: Vec<SessionResult>) -> Element
     } else {
         format!("down {:.1} over {count} sessions", -change)
     };
-    let curriculum = &settings.curriculum;
-    let adapting =
-        curriculum.adaptive_group_size && curriculum.min_group_size < curriculum.max_group_size;
+    let adapting = adapts_group_size(&settings);
     let mode = if adapting {
-        let target = GROUP_SIZE_TARGETS
-            .iter()
-            .find(|(target, _)| *target == curriculum.group_size_target)
-            .map_or("", |(_, label)| label);
-        format!("Adapting · {target}")
+        format!(
+            "Adapting · {}",
+            target_label(settings.curriculum.group_size_target)
+        )
     } else {
         "Adaptive length off".to_string()
     };

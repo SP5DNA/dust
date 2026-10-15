@@ -20,10 +20,12 @@
 //! closest to the target are favoured. While the posterior is wide that
 //! explores; as it narrows it settles.
 
+use std::sync::OnceLock;
+
 use crate::alignment::CopyTally;
 use crate::rng::Rng;
 use crate::session::SessionResult;
-use crate::settings::{CharSetMode, TrainingSettings};
+use crate::settings::{CharSetMode, GROUP_SIZE_MAX, TrainingSettings};
 
 /// The chance of fumbling a group however short it is.
 const LAPSE: f64 = 0.03;
@@ -60,6 +62,24 @@ fn spread_of(cell: usize) -> f64 {
 /// The chance of copying a group of `length` whole, for one span and spread.
 fn p_whole(length: f64, span: f64, spread: f64) -> f64 {
     (1.0 - LAPSE) / (1.0 + ((length - span) / spread).exp())
+}
+
+/// `ln P(whole)` and `ln P(not whole)` for a group of `length`, for one cell.
+fn log_chances(length: f64, cell: usize) -> [f64; 2] {
+    let p = p_whole(length, span_of(cell), spread_of(cell)).clamp(1e-12, 1.0 - 1e-12);
+    [p.ln(), (1.0 - p).ln()]
+}
+
+/// [`log_chances`] for every length a group can be and every cell, worked
+/// out once, so that replaying a history is additions rather than
+/// logarithms.
+fn log_chance_table() -> &'static [[f64; 2]] {
+    static TABLE: OnceLock<Vec<[f64; 2]>> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        (1..=GROUP_SIZE_MAX as usize)
+            .flat_map(|length| (0..CELLS).map(move |cell| log_chances(length as f64, cell)))
+            .collect()
+    })
 }
 
 /// One index, in proportion to `weights`. A table with no weight in it, or
@@ -132,6 +152,15 @@ impl SpanBelief {
         Self::replay(history, settings, |_, _| {})
     }
 
+    /// The belief a new session starts from: the history's, with all of it
+    /// one session older, so the last session counts for a little less than
+    /// the one about to be sent.
+    pub fn for_session(history: &[SessionResult], settings: &TrainingSettings) -> Self {
+        let mut belief = Self::from_history(history, settings);
+        belief.fade();
+        belief
+    }
+
     /// The span after each session of the history that counts towards it,
     /// oldest first.
     pub fn history(history: &[SessionResult], settings: &TrainingSettings) -> Vec<SpanPoint> {
@@ -160,9 +189,11 @@ impl SpanBelief {
         if mode == CharSetMode::Callsign {
             return belief;
         }
+        // A session with no groups to read says nothing about length, and is
+        // not one more session for what came before it to fade behind.
         let mut sessions: Vec<&SessionResult> = history
             .iter()
-            .filter(|session| session.char_set_mode == mode)
+            .filter(|session| session.char_set_mode == mode && !session.groups.is_empty())
             .collect();
         sessions.sort_by_key(|session| session.timestamp);
         for session in sessions {
@@ -204,10 +235,15 @@ impl SpanBelief {
         if length == 0 || whole + missed == 0 {
             return;
         }
-        let length = length as f64;
+        let (whole, missed) = (f64::from(whole), f64::from(missed));
+        // A length past the table, from a save older than today's limit, is
+        // worked out as it comes.
+        let row = log_chance_table().get((length - 1) * CELLS..length * CELLS);
         for (cell, evidence) in self.evidence.iter_mut().enumerate() {
-            let p = p_whole(length, span_of(cell), spread_of(cell)).clamp(1e-12, 1.0 - 1e-12);
-            *evidence += f64::from(whole) * p.ln() + f64::from(missed) * (1.0 - p).ln();
+            let [hit, miss] = row
+                .and_then(|row| row.get(cell).copied())
+                .unwrap_or_else(|| log_chances(length as f64, cell));
+            *evidence += whole * hit + missed * miss;
         }
     }
 
@@ -283,13 +319,20 @@ impl SpanBelief {
 
     /// Each length between `shortest` and `longest`: how likely it is to be
     /// drawn next, and how likely it is to be copied whole, over everything
-    /// the posterior allows.
-    pub fn forecast(&self, shortest: usize, longest: usize, target: f64) -> Vec<LengthForecast> {
+    /// the posterior allows. With no `target` the lengths are drawn evenly,
+    /// and the leaning is not worked out at all.
+    pub fn forecast(
+        &self,
+        shortest: usize,
+        longest: usize,
+        target: Option<f64>,
+    ) -> Vec<LengthForecast> {
         let (shortest, longest) = (shortest.min(longest), shortest.max(longest));
+        let even = 1.0 / (longest - shortest + 1) as f64;
         let mut rows: Vec<LengthForecast> = (shortest..=longest)
             .map(|length| LengthForecast {
                 length,
-                drawn: 0.0,
+                drawn: if target.is_some() { 0.0 } else { even },
                 whole: 0.0,
             })
             .collect();
@@ -297,9 +340,13 @@ impl SpanBelief {
             if p < 1e-12 {
                 continue;
             }
-            let weights = length_weights(shortest, longest, target, cell);
-            for (row, weight) in rows.iter_mut().zip(weights) {
-                row.drawn += p * weight;
+            if let Some(target) = target {
+                let weights = length_weights(shortest, longest, target, cell);
+                for (row, weight) in rows.iter_mut().zip(weights) {
+                    row.drawn += p * weight;
+                }
+            }
+            for row in &mut rows {
                 row.whole += p * p_whole(row.length as f64, span_of(cell), spread_of(cell));
             }
         }
@@ -323,13 +370,7 @@ fn length_weights(shortest: usize, longest: usize, target: f64, cell: usize) -> 
     let whole: Vec<f64> = (shortest..=longest)
         .map(|length| p_whole(length as f64, span, spread))
         .collect();
-    let expected = |aim: f64| -> f64 {
-        weights_around(shortest, longest, aim)
-            .iter()
-            .zip(&whole)
-            .map(|(weight, p)| weight * p)
-            .sum()
-    };
+    let expected = |aim: f64| expected_whole(shortest, longest, aim, &whole);
     let (mut low, mut high) = (shortest as f64 - AIM_REACH, longest as f64 + AIM_REACH);
     let aim = if expected(high) >= target {
         high
@@ -350,24 +391,33 @@ fn length_weights(shortest: usize, longest: usize, target: f64, cell: usize) -> 
     weights_around(shortest, longest, aim)
 }
 
+/// How strongly a length is drawn towards `aim`, before the weights are
+/// shared out.
+fn nearness(length: usize, aim: f64) -> f64 {
+    let off = length as f64 - aim;
+    (-off * off / (2.0 * AIM_WIDTH * AIM_WIDTH)).exp()
+}
+
+/// Which of `count` lengths, the last being `longest`, takes all of the
+/// leaning when every nearness has underflowed to nothing: the end nearest
+/// the aim.
+fn nearest_end(count: usize, longest: usize, aim: f64) -> usize {
+    if aim > longest as f64 {
+        count.saturating_sub(1)
+    } else {
+        0
+    }
+}
+
 /// The lengths from `shortest` to `longest`, leaning towards `aim`, with a
 /// share spread evenly over them all.
 fn weights_around(shortest: usize, longest: usize, aim: f64) -> Vec<f64> {
     let nearness: Vec<f64> = (shortest..=longest)
-        .map(|length| {
-            let off = length as f64 - aim;
-            (-off * off / (2.0 * AIM_WIDTH * AIM_WIDTH)).exp()
-        })
+        .map(|length| nearness(length, aim))
         .collect();
     let total: f64 = nearness.iter().sum();
     let even = VARIETY / nearness.len() as f64;
-    // Far past either end every weight can underflow to nothing: then the
-    // end nearest the aim takes all of the leaning.
-    let nearest_end = if aim > longest as f64 {
-        nearness.len() - 1
-    } else {
-        0
-    };
+    let end = nearest_end(nearness.len(), longest, aim);
     nearness
         .into_iter()
         .enumerate()
@@ -375,11 +425,33 @@ fn weights_around(shortest: usize, longest: usize, aim: f64) -> Vec<f64> {
             let leaning = if total > 0.0 {
                 weight / total
             } else {
-                f64::from(u8::from(index == nearest_end))
+                f64::from(u8::from(index == end))
             };
             even + (1.0 - VARIETY) * leaning
         })
         .collect()
+}
+
+/// How often a group is copied whole over the lengths [`weights_around`]
+/// gives for `aim`, `whole` holding each length's chance. Worked out without
+/// building the weights, since the aim is searched for.
+fn expected_whole(shortest: usize, longest: usize, aim: f64, whole: &[f64]) -> f64 {
+    let (mut total, mut leaning) = (0.0, 0.0);
+    for (length, p) in (shortest..=longest).zip(whole) {
+        let near = nearness(length, aim);
+        total += near;
+        leaning += near * p;
+    }
+    let leaning = if total > 0.0 {
+        leaning / total
+    } else {
+        whole
+            .get(nearest_end(whole.len(), longest, aim))
+            .copied()
+            .unwrap_or(0.0)
+    };
+    let even = whole.iter().sum::<f64>() / whole.len().max(1) as f64;
+    VARIETY * even + (1.0 - VARIETY) * leaning
 }
 
 #[cfg(test)]
@@ -410,6 +482,13 @@ mod tests {
                 })
                 .collect(),
             ..SessionResult::empty_for_test()
+        }
+    }
+
+    impl SpanBelief {
+        fn faded(mut self) -> Self {
+            self.fade();
+            self
         }
     }
 
@@ -523,6 +602,64 @@ mod tests {
     }
 
     #[test]
+    fn with_no_target_the_forecast_is_even_and_still_says_what_is_copied_whole() {
+        let mut belief = SpanBelief::new(5.0);
+        belief.learn(5, true);
+        let even = belief.forecast(2, 9, None);
+        let leaning = belief.forecast(2, 9, Some(0.7));
+        assert!(even.iter().all(|row| (row.drawn - 1.0 / 8.0).abs() < 1e-12));
+        for (even, leaning) in even.iter().zip(&leaning) {
+            assert!((even.whole - leaning.whole).abs() < 1e-12);
+        }
+    }
+
+    /// The table replaying a history reads from is the curve itself, and a
+    /// length past it, from an older save, is still learned from.
+    #[test]
+    fn the_table_of_chances_is_the_curve_and_lengths_past_it_still_count() {
+        for length in [1, 7, GROUP_SIZE_MAX as usize] {
+            for cell in [0, 333, CELLS - 1] {
+                let from_table = log_chance_table()[(length - 1) * CELLS + cell];
+                assert_eq!(from_table, log_chances(length as f64, cell));
+            }
+        }
+        let mut past = SpanBelief::new(5.0);
+        past.learn(GROUP_SIZE_MAX as usize + 5, true);
+        let mut by_hand = SpanBelief::new(5.0);
+        for (cell, evidence) in by_hand.evidence.iter_mut().enumerate() {
+            *evidence += log_chances(f64::from(GROUP_SIZE_MAX + 5), cell)[0];
+        }
+        assert_eq!(past, by_hand);
+        assert!(past.estimate().mean > SpanBelief::new(5.0).estimate().mean);
+    }
+
+    /// The session about to be sent counts for more than the last one, and
+    /// a session with no groups in it moves nothing.
+    #[test]
+    fn a_new_session_puts_the_history_one_session_further_back() {
+        let history = [session(1, &[("ABCDEFGH", true); 10])];
+        let mut current = SpanBelief::new(6.0);
+        for _ in 0..10 {
+            current.learn(8, true);
+        }
+        let stored = SpanBelief::for_session(&history, &koch());
+        assert!(stored.estimate().sd > current.estimate().sd);
+        assert_eq!(
+            stored.estimate(),
+            SpanBelief::from_history(&history, &koch())
+                .faded()
+                .estimate()
+        );
+
+        let with_empty = [session(1, &[("ABCDEFGH", true); 10]), session(2, &[])];
+        assert_eq!(
+            SpanBelief::from_history(&with_empty, &koch()),
+            SpanBelief::from_history(&history, &koch())
+        );
+        assert_eq!(SpanBelief::history(&with_empty, &koch()).len(), 1);
+    }
+
+    #[test]
     fn lengths_stay_inside_the_range_whatever_the_generator_does() {
         struct Stuck(f64);
         impl Rng for Stuck {
@@ -548,7 +685,7 @@ mod tests {
             belief.learn(5, true);
             belief.learn(7, false);
         }
-        let rows = belief.forecast(2, 9, 0.7);
+        let rows = belief.forecast(2, 9, Some(0.7));
         assert_eq!(rows.len(), 8);
         let drawn: f64 = rows.iter().map(|row| row.drawn).sum();
         assert!((drawn - 1.0).abs() < 1e-9, "{drawn}");

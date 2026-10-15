@@ -85,7 +85,7 @@ impl Sampler {
     pub fn new(history: &[SessionResult], settings: &TrainingSettings, seed: u64) -> Self {
         Self {
             state: CharSamplingState::from_history(history, settings),
-            span: SpanBelief::from_history(history, settings),
+            span: SpanBelief::for_session(history, settings),
             rng: SplitMix64::new(seed),
         }
     }
@@ -115,6 +115,12 @@ pub(crate) fn group_size_bounds(settings: &TrainingSettings) -> (usize, usize) {
     let shortest = settings.curriculum.min_group_size.max(1) as usize;
     let longest = (settings.curriculum.max_group_size as usize).max(shortest);
     (shortest, longest)
+}
+
+/// Whether `settings` have group lengths drawn by adaptive group size: what
+/// the screens say about it, read off the same rule the sampler follows.
+pub fn adapts_group_size(settings: &TrainingSettings) -> bool {
+    adaptive_bounds(settings).is_some()
 }
 
 /// The range adaptive group size draws within, when it has one to draw in:

@@ -397,15 +397,9 @@ pub fn group_length_forecast(
         return Vec::new();
     }
     let (shortest, longest) = group_size_bounds(settings);
-    let target = settings.curriculum.group_size_target.success_rate();
-    let mut rows = SpanBelief::from_history(sessions, settings).forecast(shortest, longest, target);
-    if adaptive_bounds(settings).is_none() {
-        let even = 1.0 / rows.len() as f64;
-        for row in &mut rows {
-            row.drawn = even;
-        }
-    }
-    rows
+    let target =
+        adaptive_bounds(settings).map(|_| settings.curriculum.group_size_target.success_rate());
+    SpanBelief::from_history(sessions, settings).forecast(shortest, longest, target)
 }
 
 #[cfg(test)]

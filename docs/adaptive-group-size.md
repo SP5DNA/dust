@@ -53,13 +53,16 @@ $$
   multiplied by $0.5^{1/10}$, so a session ten sessions back counts half as
   much. Groups in the current session count 1. The estimate follows you as
   you improve instead of being anchored by your first week.
-- **Which sessions count:** only sessions in the same character-set mode.
-  Callsign mode is excluded, because a callsign's length comes from its
-  structure, not a draw.
+- **Which sessions count:** only sessions in the same character-set mode
+  that have groups to read. Callsign mode is excluded, because a callsign's
+  length comes from its structure, not a draw. A session with no groups
+  neither adds evidence nor fades what came before it.
 
 Nothing new is stored. The belief is rebuilt from the session history when a
-session starts, the same way the character sampler's is, and updated after
-every answer during the session.
+session starts, the same way the character sampler's is, and faded once more
+so the last stored session counts as one session back. It is then updated
+after every answer during the session, a timed-out answer counting as a
+miss.
 
 **Choosing the next length.**
 
@@ -94,9 +97,14 @@ For reference, Wilson et al. 2019 (*The Eighty Five Percent Rule for optimal
 learning*) put the best training accuracy near 85%. Counting a whole group
 as one item, that is Comfortable.
 
-**Cost.** One update is 1,005 logistic evaluations. When rebuilding from
-history, each session's groups are first counted per length, so a session
-costs one update per distinct length, not one per group.
+**Cost.** $\ln P$ and $\ln(1 - P)$ for every cell and every length up to the
+longest group the settings allow are computed once into a table, so an
+update is 1,005 multiply-adds. When rebuilding from history, each session's
+groups are first counted per length, so a session costs one update per
+distinct length, not one per group. With adaptive length off, the Sampling
+tab skips working out the draw chances, since every length is equally
+likely. On 500 sessions in a native release build, replaying the history
+takes about 4 ms, and so does the Sampling tab.
 
 ## Simulation
 

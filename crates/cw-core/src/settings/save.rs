@@ -89,7 +89,7 @@ impl<'de> Deserialize<'de> for TrainingSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::settings::CharSetMode;
+    use crate::settings::{CharSetMode, GroupSizeTarget};
 
     fn load(json: serde_json::Value) -> TrainingSettings {
         serde_json::from_value(json).expect("a save should load")
@@ -114,6 +114,29 @@ mod tests {
         assert_eq!(save(6, 4), PracticeWindow::Last3);
         // Bounds that match no named window fall back to everything.
         assert_eq!(save(3, 5), PracticeWindow::All);
+    }
+
+    /// A save from before adaptive group size has it off, and keeps the
+    /// range it had; one written since reads back what it said.
+    #[test]
+    fn adaptive_group_size_is_off_in_a_save_from_before_it() {
+        let old = load(serde_json::json!({
+            "charSetMode": "koch", "minGroupSize": 3, "maxGroupSize": 7,
+        }));
+        assert!(!old.curriculum.adaptive_group_size);
+        assert_eq!(old.curriculum.group_size_target, GroupSizeTarget::Balanced);
+        assert_eq!(
+            (old.curriculum.min_group_size, old.curriculum.max_group_size),
+            (3, 7)
+        );
+
+        let mut new = TrainingSettings::default();
+        new.curriculum.adaptive_group_size = true;
+        new.curriculum.group_size_target = GroupSizeTarget::Comfortable;
+        let json = serde_json::to_value(&new).expect("serialize");
+        assert_eq!(json["adaptiveGroupSize"], true);
+        assert_eq!(json["groupSizeTarget"], "comfortable");
+        assert_eq!(load(json), new);
     }
 
     #[test]

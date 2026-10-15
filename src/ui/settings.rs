@@ -10,7 +10,7 @@ use cw_core::{
     EXTRA_WORD_SPACE_MIN, GROUP_PAUSE_MAX_SEC, GROUP_REPEAT_MAX, GROUP_REPEAT_MIN, GROUP_SIZE_MAX,
     GROUP_SIZE_MIN, GROUP_TIMEOUT_MAX_SEC, GroupSizeTarget, KeyerMode, NUM_GROUPS_MAX,
     NUM_GROUPS_MIN, RangeSetting, SIDE_TONE_MAX_HZ, SIDE_TONE_MIN_HZ, SettingsSection,
-    TrainingSettings, VOLUME_MAX, VOLUME_MIN, WPM_MAX, WPM_MIN,
+    TrainingSettings, VOLUME_MAX, VOLUME_MIN, WPM_MAX, WPM_MIN, adapts_group_size,
 };
 use dioxus::prelude::*;
 
@@ -23,13 +23,14 @@ use crate::ui::widgets::{
     control_id,
 };
 
-/// What adaptive group size can aim for, in the order the control offers
-/// them.
-pub(crate) const GROUP_SIZE_TARGETS: [(GroupSizeTarget, &str); 3] = [
-    (GroupSizeTarget::Comfortable, "Comfortable"),
-    (GroupSizeTarget::Balanced, "Balanced"),
-    (GroupSizeTarget::Stretch, "Stretch"),
-];
+/// What a target for adaptive group size is called on screen.
+pub(crate) fn target_label(target: GroupSizeTarget) -> &'static str {
+    match target {
+        GroupSizeTarget::Comfortable => "Comfortable",
+        GroupSizeTarget::Balanced => "Balanced",
+        GroupSizeTarget::Stretch => "Stretch",
+    }
+}
 
 /// The keyer modes, in the order the control offers them.
 const KEYER_MODES: [(KeyerMode, &str); 4] = [
@@ -122,6 +123,9 @@ struct SessionShape {
     /// The group size is one length, so there is nothing to adapt.
     one_size: bool,
     adaptive: bool,
+    /// Adaptive group size is on and has lengths to choose between: what the
+    /// sampler itself goes by.
+    adapts: bool,
     target: GroupSizeTarget,
     num_groups: u32,
     group_timeout: f64,
@@ -139,6 +143,7 @@ impl SessionShape {
             callsigns: settings.curriculum.char_set_mode == CharSetMode::Callsign,
             one_size: settings.curriculum.min_group_size >= settings.curriculum.max_group_size,
             adaptive: settings.curriculum.adaptive_group_size,
+            adapts: adapts_group_size(settings),
             target: settings.curriculum.group_size_target,
             num_groups: settings.curriculum.num_groups,
             group_timeout: p.group_timeout,
@@ -153,12 +158,9 @@ impl SessionShape {
 
 /// What a target asks of you, in a sentence.
 fn target_note(target: GroupSizeTarget) -> String {
-    let label = GROUP_SIZE_TARGETS
-        .iter()
-        .find(|(each, _)| *each == target)
-        .map_or("", |(_, label)| label);
     format!(
-        "{label} aims for {:.0}% of groups copied whole.",
+        "{} aims for {:.0}% of groups copied whole.",
+        target_label(target),
         target.success_rate() * 100.0
     )
 }
@@ -228,13 +230,13 @@ fn SessionShapeCard(settings: Signal<TrainingSettings>) -> Element {
                     checked: s.adaptive,
                     onchange: move |on| settings.write().curriculum.adaptive_group_size = on,
                 }
-                if s.adaptive && !s.one_size {
+                if s.adapts {
                     div { class: "field",
                         span { class: "field-label", "Aim for" }
                         div { class: "segmented",
-                            for (target, label) in GROUP_SIZE_TARGETS {
+                            for target in GroupSizeTarget::ALL {
                                 Seg {
-                                    label,
+                                    label: target_label(target),
                                     active: s.target == target,
                                     onclick: move |_| settings.write().curriculum.group_size_target = target,
                                 }

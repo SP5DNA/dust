@@ -109,15 +109,17 @@ pub fn MistakesTab(sessions: Vec<SessionResult>) -> Element {
 pub fn SamplingTab(settings: TrainingSettings, sessions: Vec<SessionResult>) -> Element {
     rsx! {
         div { class: "stack",
-            CharacterSamplingCard { settings: settings.clone(), sessions: sessions.clone() }
-            GroupLengthCard { settings, sessions }
+            {character_sampling_card(&settings, &sessions)}
+            {group_length_card(&settings, &sessions)}
         }
     }
 }
 
-#[component]
-fn CharacterSamplingCard(settings: TrainingSettings, sessions: Vec<SessionResult>) -> Element {
-    let rows = sampling_rows(&settings, &sessions);
+/// What the sampler makes of each character. A plain function rather than a
+/// component: it holds no state, and is drawn from the tab's own settings and
+/// history without copying them.
+fn character_sampling_card(settings: &TrainingSettings, sessions: &[SessionResult]) -> Element {
+    let rows = sampling_rows(settings, sessions);
     let max_p = rows
         .iter()
         .map(|r| r.sampling_prob)
@@ -152,10 +154,9 @@ fn CharacterSamplingCard(settings: TrainingSettings, sessions: Vec<SessionResult
 
 /// The group lengths the next session can send: how likely each is, and how
 /// often a group that long is copied whole. Nothing for callsigns, which are
-/// as long as they are.
-#[component]
-fn GroupLengthCard(settings: TrainingSettings, sessions: Vec<SessionResult>) -> Element {
-    let rows = group_length_forecast(&settings, &sessions);
+/// as long as they are. A plain function, like the character card.
+fn group_length_card(settings: &TrainingSettings, sessions: &[SessionResult]) -> Element {
+    let rows = group_length_forecast(settings, sessions);
     if rows.is_empty() {
         return rsx! {};
     }

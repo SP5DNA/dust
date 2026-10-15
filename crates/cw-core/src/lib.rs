@@ -47,7 +47,7 @@ pub use pool::{
     compute_char_pool, current_practice_window, newest_unlocked, unlocked_practice_count,
 };
 pub use rng::{Rng, SplitMix64};
-pub use sampling::{CharSamplingState, Sampler, generate_training_group};
+pub use sampling::{CharSamplingState, Sampler, adapts_group_size, generate_training_group};
 pub use sequences::{PresetId, SEQUENCE_PRESETS, SequenceChoice, SequencePreset};
 pub use session::{
     Group, GroupResult, GroupSession, MonoMs, SessionId, SessionPhase, SessionResult,
