@@ -404,14 +404,7 @@ fn finish_session(ctx: AppCtx) {
 
     // The history grows by one where it is, and is stored from there.
     sessions.write().push(done.result.clone());
-    let saved = store.save_sessions(&sessions.peek());
-    // What the screens show is what the store has.
-    if let Some(kept) = saved.kept() {
-        let extra = sessions.peek().len().saturating_sub(kept);
-        if extra > 0 {
-            sessions.write().drain(..extra);
-        }
-    }
+    let saved = ctx.store_history();
     if let Some(problem) = saved.problem() {
         toasts.show(problem);
     }

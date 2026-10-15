@@ -1,8 +1,13 @@
+use std::collections::BTreeSet;
+
 use cw_core::{
     GROUP_START_BIGRAM_TOKEN, MasteryStatus, SessionResult, TrainingSettings,
-    character_diagnostics, mistake_stats, sampling_rows, session_history,
+    character_diagnostics, group_length_forecast, mistake_stats, sampling_rows, session_history,
 };
 use dioxus::prelude::*;
+
+use crate::state::SessionPick;
+use crate::ui::widgets::{CardHead, Icon, IconName, control_id, html_bool};
 
 #[component]
 pub fn LettersTab(sessions: Vec<SessionResult>) -> Element {
@@ -107,7 +112,19 @@ pub fn MistakesTab(sessions: Vec<SessionResult>) -> Element {
 
 #[component]
 pub fn SamplingTab(settings: TrainingSettings, sessions: Vec<SessionResult>) -> Element {
-    let rows = sampling_rows(&settings, &sessions);
+    rsx! {
+        div { class: "stack",
+            {character_sampling_card(&settings, &sessions)}
+            {group_length_card(&settings, &sessions)}
+        }
+    }
+}
+
+/// What the sampler makes of each character. A plain function rather than a
+/// component: it holds no state, and is drawn from the tab's own settings and
+/// history without copying them.
+fn character_sampling_card(settings: &TrainingSettings, sessions: &[SessionResult]) -> Element {
+    let rows = sampling_rows(settings, sessions);
     let max_p = rows
         .iter()
         .map(|r| r.sampling_prob)
@@ -140,24 +157,245 @@ pub fn SamplingTab(settings: TrainingSettings, sessions: Vec<SessionResult>) -> 
     }
 }
 
-#[component]
-pub fn HistoryTab(sessions: Vec<SessionResult>) -> Element {
-    let rows = session_history(&sessions);
+/// The group lengths the next session can send: how likely each is, and how
+/// often a group that long is copied whole. Nothing for callsigns, which are
+/// as long as they are. A plain function, like the character card.
+fn group_length_card(settings: &TrainingSettings, sessions: &[SessionResult]) -> Element {
+    let rows = group_length_forecast(settings, sessions);
+    if rows.is_empty() {
+        return rsx! {};
+    }
+    let max_drawn = rows
+        .iter()
+        .map(|row| row.drawn)
+        .fold(0.0_f64, f64::max)
+        .max(0.0001);
+    let curriculum = &settings.curriculum;
+    let note = if !curriculum.adaptive_group_size {
+        "Adaptive group size is off, so every length is as likely as the next. Whole is how often you copy a group that long without a mistake."
+    } else if rows.len() == 1 {
+        "The group size is fixed, so there is no length to choose. Whole is how often you copy a group that long without a mistake."
+    } else {
+        "Chance of each length in the next group, and how often you copy a group that long without a mistake."
+    };
     rsx! {
         div { class: "card stack",
-            div { class: "tiny", "Session history" }
-            if rows.is_empty() {
-                p { class: "muted", "No sessions stored yet." }
-            } else {
-                for row in rows.iter().take(40) {
-                    div { class: "history-row",
-                        div {
-                            div { class: "mono", "{row.date}" }
-                            div { class: "tiny", style: "text-transform: none; letter-spacing: 0;", "{row.correct_groups}/{row.groups} groups · {row.total_chars} chars" }
+            div { class: "tiny", "Group length" }
+            p { class: "muted", "{note}" }
+            for row in rows.iter() {
+                {
+                    let width = (row.drawn / max_drawn * 100.0).clamp(4.0, 100.0);
+                    rsx! {
+                        div { class: "letter-row",
+                            span { class: "letter-key mono", "{row.length}" }
+                            div { class: "bar-track",
+                                span { class: "bar-fill sample", style: "width: {width}%;" }
+                            }
+                            span { class: "mono muted", "{(row.drawn * 100.0).round()}%" }
+                            span { class: "tiny", style: "text-transform: none; letter-spacing: 0;", "whole {(row.whole * 100.0).round()}%" }
                         }
-                        div { class: "history-acc",
-                            span { class: "value", "{row.accuracy_pct.round()}%" }
-                            span { class: "muted", "{row.score.round()}" }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// How many sessions the history lists before it offers more.
+const HISTORY_PAGE: usize = 40;
+
+/// Every session kept on this device, newest first.
+///
+/// Given `on_delete`, sessions can be deleted: one from its own row, or
+/// several chosen together in select mode, all of them included. Deleting
+/// everything asks once more; anything else is put right with the Undo the
+/// app offers after.
+#[component]
+pub fn HistoryTab(
+    sessions: Vec<SessionResult>,
+    on_delete: Option<EventHandler<Vec<SessionPick>>>,
+) -> Element {
+    let rows = session_history(&sessions);
+    let mut selecting = use_signal(|| false);
+    let mut chosen = use_signal(BTreeSet::<SessionPick>::new);
+    let mut confirming = use_signal(|| false);
+    let mut shown = use_signal(|| HISTORY_PAGE);
+
+    let every: Vec<SessionPick> = rows
+        .iter()
+        .map(|row| SessionPick {
+            index: row.index,
+            timestamp: row.timestamp,
+        })
+        .collect();
+    let total = every.len();
+    let selecting_now = selecting() && on_delete.is_some() && total > 0;
+    // Only what is still in the history counts as chosen.
+    let picked: Vec<SessionPick> = every
+        .iter()
+        .filter(|pick| chosen.read().contains(pick))
+        .copied()
+        .collect();
+    let count = picked.len();
+    let everything = count == total;
+    let noun = if total == 1 { "session" } else { "sessions" };
+    let mut finish = move || {
+        selecting.set(false);
+        chosen.write().clear();
+        confirming.set(false);
+    };
+    let more = total.saturating_sub(shown()).min(HISTORY_PAGE);
+
+    rsx! {
+        div { class: if selecting_now { "card stack-sm history-card selecting" } else { "card stack-sm history-card" },
+            CardHead {
+                icon: IconName::Repeat,
+                title: "Session history",
+                note: format!("{total} {noun} on this device"),
+                if on_delete.is_some() && total > 0 {
+                    if selecting_now {
+                        button {
+                            id: control_id("history", "done"),
+                            class: "btn btn-sm btn-secondary",
+                            onclick: move |_| finish(),
+                            "Done"
+                        }
+                    } else {
+                        button {
+                            id: control_id("history", "select"),
+                            class: "btn btn-sm btn-secondary",
+                            onclick: move |_| selecting.set(true),
+                            "Select"
+                        }
+                    }
+                }
+            }
+            if rows.is_empty() {
+                div { class: "history-empty",
+                    span { class: "card-icon", Icon { name: IconName::Repeat } }
+                    p { "No sessions stored yet." }
+                    p { class: "muted", "Finish a session and it is kept here." }
+                }
+            } else {
+                div { class: "history-list",
+                    for row in rows.iter().take(shown()) {
+                        {
+                            let pick = SessionPick { index: row.index, timestamp: row.timestamp };
+                            let is_chosen = chosen.read().contains(&pick);
+                            let key = row.index.to_string();
+                            let when = rsx! {
+                                div { class: "history-when",
+                                    div { class: "mono", "{row.date}" }
+                                    div { class: "history-sub", "{row.correct_groups}/{row.groups} groups · {row.total_chars} chars" }
+                                }
+                                div { class: "history-acc",
+                                    span { class: "value", "{row.accuracy_pct.round()}%" }
+                                    span { class: "muted", "{row.score.round()}" }
+                                }
+                            };
+                            if selecting_now {
+                                rsx! {
+                                    button {
+                                        id: control_id("history-pick", &key),
+                                        class: if is_chosen { "history-item selectable chosen" } else { "history-item selectable" },
+                                        role: "checkbox",
+                                        aria_checked: "{is_chosen}",
+                                        onclick: move |_| {
+                                            let mut set = chosen.write();
+                                            if !set.remove(&pick) {
+                                                set.insert(pick);
+                                            }
+                                            confirming.set(false);
+                                        },
+                                        span { class: "history-check", Icon { name: IconName::Check } }
+                                        {when}
+                                    }
+                                }
+                            } else {
+                                rsx! {
+                                    div { class: "history-item",
+                                        {when}
+                                        if let Some(on_delete) = on_delete {
+                                            button {
+                                                id: control_id("history-delete", &key),
+                                                class: "history-delete",
+                                                title: "Delete this session",
+                                                aria_label: "Delete the session of {row.date}",
+                                                onclick: move |_| on_delete.call(vec![pick]),
+                                                Icon { name: IconName::Trash }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if more > 0 {
+                    button {
+                        id: control_id("history", "more"),
+                        class: "btn btn-sm btn-secondary history-more",
+                        onclick: move |_| shown += HISTORY_PAGE,
+                        "Show {more} more"
+                    }
+                }
+            }
+        }
+        if selecting_now {
+            div { class: "select-dock",
+                div { class: if confirming() { "select-bar confirming" } else { "select-bar" },
+                    role: "toolbar",
+                    aria_label: "Chosen sessions",
+                    if confirming() {
+                        span { class: "select-count", "Delete all {total}?" }
+                        button {
+                            id: control_id("history", "keep"),
+                            class: "select-btn",
+                            onclick: move |_| confirming.set(false),
+                            "Keep"
+                        }
+                        button {
+                            id: control_id("history", "delete-all"),
+                            class: "select-btn danger",
+                            onclick: move |_| {
+                                if let Some(on_delete) = on_delete {
+                                    on_delete.call(every.clone());
+                                }
+                                finish();
+                            },
+                            "Delete all"
+                        }
+                    } else {
+                        button {
+                            id: control_id("history", "choose-all"),
+                            class: "select-btn",
+                            onclick: move |_| {
+                                let mut set = chosen.write();
+                                if everything {
+                                    set.clear();
+                                } else {
+                                    set.extend(every.iter().copied());
+                                }
+                            },
+                            if everything { "Select none" } else { "Select all" }
+                        }
+                        span { class: "select-count", "{count} selected" }
+                        button {
+                            id: control_id("history", "delete-chosen"),
+                            class: "select-btn danger",
+                            disabled: html_bool(count == 0),
+                            onclick: move |_| {
+                                if everything {
+                                    confirming.set(true);
+                                } else {
+                                    if let Some(on_delete) = on_delete {
+                                        on_delete.call(picked.clone());
+                                    }
+                                    finish();
+                                }
+                            },
+                            Icon { name: IconName::Trash }
+                            "Delete"
                         }
                     }
                 }

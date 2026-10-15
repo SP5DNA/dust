@@ -12,6 +12,11 @@ Two ways to practise: Koch-style **character groups**, unlocked one letter at a
 time, or **callsigns** — real prefixes in realistic shapes, from `W1AW` up to
 `DL1ABC/P`, the drill MorseRunner and Morse Walker are built around.
 
+Opt in to **adaptive group size** and the trainer learns your copy span, the
+group length you copy whole about half the time, and draws lengths near its
+edge: longer while you copy groups whole, shorter when you don't
+([how it works](docs/adaptive-group-size.md)).
+
 **[Try it in the browser →](https://mashu.github.io/dust/)**
 
 ## Platforms

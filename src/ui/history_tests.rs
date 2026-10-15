@@ -1,0 +1,247 @@
+//! The history on the Stats screen, in the whole app: deleting one session,
+//! choosing several, deleting them all, and putting them back.
+//!
+//! What the store holds is read alongside the page, since a deletion that
+//! only reached the screen would come back at the next launch.
+
+use cw_core::{SessionResult, TrainingSettings};
+use dioxus::prelude::*;
+
+use crate::persist::Store;
+use crate::testing::{Ui, run, stored_session, test_settings};
+use crate::ui::stats::StatsView;
+
+/// Five sessions a day apart, oldest first, the way the store keeps them.
+fn history() -> Vec<SessionResult> {
+    (1..=5u64)
+        .map(|day| {
+            let mut session = stored_session(&format!("2026-10-0{day}"), &[("KM", "KM")]);
+            session.timestamp = day * 86_400_000;
+            session
+        })
+        .collect()
+}
+
+fn stored_dates(ui: &Ui) -> Vec<String> {
+    ui.store
+        .load_sessions()
+        .into_iter()
+        .map(|session| session.date)
+        .collect()
+}
+
+/// The app on the History tab of the Stats screen, over `sessions`.
+fn open_history(sessions: &[SessionResult]) -> (Ui, std::rc::Rc<crate::audio::fake::Recorder>) {
+    let (mut ui, recorder) = Ui::app_with_history(test_settings(), sessions);
+    ui.click("nav-stats");
+    ui.click("seg-history");
+    (ui, recorder)
+}
+
+#[test]
+fn a_session_is_deleted_from_its_row_and_undo_puts_it_back() {
+    run(|| async {
+        let (mut ui, _recorder) = open_history(&history());
+        assert!(ui.has("5 sessions on this device"));
+
+        // The 2nd of October is the second session stored.
+        ui.click("history-delete-1");
+        assert!(!ui.has("2026-10-02"));
+        assert!(ui.has("4 sessions on this device"));
+        assert_eq!(
+            stored_dates(&ui),
+            ["2026-10-01", "2026-10-03", "2026-10-04", "2026-10-05"]
+        );
+        assert!(ui.has("1 session deleted"));
+
+        ui.click("toast-undo");
+        assert!(ui.has("2026-10-02"));
+        assert_eq!(ui.store.load_sessions(), history(), "back where it was");
+        assert!(!ui.has("class=\"toast\""), "the undo toast goes once used");
+    });
+}
+
+#[test]
+fn several_sessions_are_chosen_and_deleted_together() {
+    run(|| async {
+        let (mut ui, _recorder) = open_history(&history());
+        assert!(
+            !ui.shows("history-delete-chosen"),
+            "no bar until select mode"
+        );
+        ui.click("history-select");
+        assert!(ui.has("0 selected"));
+        assert!(
+            ui.input_tag("history-delete-chosen").contains("disabled"),
+            "nothing chosen, nothing to delete"
+        );
+        assert!(!ui.shows("history-delete-0"), "rows are for choosing now");
+
+        ui.click("history-pick-0");
+        ui.click("history-pick-3");
+        assert!(ui.has("2 selected"));
+        assert!(
+            ui.input_tag("history-pick-3")
+                .contains("aria-checked=\"true\"")
+        );
+        // A second tap lets it go again.
+        ui.click("history-pick-3");
+        assert!(ui.has("1 selected"));
+        assert!(
+            ui.input_tag("history-pick-3")
+                .contains("aria-checked=\"false\"")
+        );
+
+        ui.click("history-pick-4");
+        ui.click("history-delete-chosen");
+        assert_eq!(
+            stored_dates(&ui),
+            ["2026-10-02", "2026-10-03", "2026-10-04"]
+        );
+        assert!(ui.has("2 sessions deleted"));
+        assert!(
+            !ui.shows("history-delete-chosen"),
+            "select mode ends with the delete"
+        );
+        assert!(ui.shows("history-delete-1"));
+
+        ui.click("toast-undo");
+        assert_eq!(ui.store.load_sessions(), history());
+    });
+}
+
+#[test]
+fn deleting_everything_asks_once_more_and_can_be_undone() {
+    run(|| async {
+        let (mut ui, _recorder) = open_history(&history());
+        ui.click("history-select");
+        ui.click("history-choose-all");
+        assert!(ui.has("5 selected"));
+        assert!(ui.has("Select none"));
+
+        ui.click("history-delete-chosen");
+        assert!(ui.has("Delete all 5?"));
+        assert_eq!(
+            ui.store.load_sessions().len(),
+            5,
+            "nothing goes before the answer"
+        );
+        ui.click("history-keep");
+        assert!(ui.has("5 selected"));
+
+        ui.click("history-delete-chosen");
+        ui.click("history-delete-all");
+        assert!(ui.store.load_sessions().is_empty());
+        assert!(ui.has("No sessions stored yet."));
+        assert!(ui.has("5 sessions deleted"));
+        assert!(!ui.shows("history-select"), "nothing left to choose from");
+
+        ui.click("toast-undo");
+        assert_eq!(ui.store.load_sessions(), history());
+        assert!(ui.has("5 sessions on this device"));
+    });
+}
+
+#[test]
+fn choosing_all_and_none_toggles_every_session() {
+    run(|| async {
+        let (mut ui, _recorder) = open_history(&history());
+        ui.click("history-select");
+        ui.click("history-choose-all");
+        ui.click("history-choose-all");
+        assert!(ui.has("0 selected"));
+        ui.click("history-pick-2");
+        ui.click("history-done");
+        assert!(!ui.shows("history-delete-chosen"));
+        // Coming back starts with nothing chosen.
+        ui.click("history-select");
+        assert!(ui.has("0 selected"));
+        assert_eq!(ui.store.load_sessions(), history(), "Done deletes nothing");
+    });
+}
+
+/// The undo toast stays up longer than a plain one, then goes, and the
+/// deletion stands.
+#[test]
+fn the_undo_toast_waits_then_the_deletion_stands() {
+    run(|| async {
+        let (mut ui, _recorder) = open_history(&history());
+        ui.click("history-delete-0");
+        ui.advance(5_000).await;
+        assert!(ui.shows("toast-undo"), "still time to undo");
+        assert!(ui.run_until(5_000, |ui| !ui.has("class=\"toast\"")).await);
+        assert_eq!(ui.store.load_sessions().len(), 4);
+    });
+}
+
+/// A store that cannot take the change leaves the history as it was, on
+/// screen as well as on disk, and says so.
+#[test]
+fn a_store_that_cannot_take_the_change_keeps_every_session() {
+    run(|| async {
+        let (mut ui, _recorder) = open_history(&history());
+        ui.store.held.set(true);
+        ui.click("history-delete-0");
+        assert!(ui.has("Nothing was deleted"));
+        assert!(ui.has("2026-10-01"));
+        assert!(ui.has("5 sessions on this device"));
+        assert_eq!(ui.store.load_sessions(), history());
+        assert!(!ui.shows("toast-undo"), "nothing to undo");
+    });
+}
+
+/// Two sessions that finished in the same millisecond are still two rows,
+/// and deleting one leaves the other.
+#[test]
+fn sessions_that_finished_together_are_deleted_one_at_a_time() {
+    run(|| async {
+        let mut twins = history();
+        twins[1].timestamp = twins[0].timestamp;
+        let (mut ui, _recorder) = open_history(&twins);
+        ui.click("history-delete-0");
+        assert_eq!(
+            stored_dates(&ui),
+            ["2026-10-02", "2026-10-03", "2026-10-04", "2026-10-05"]
+        );
+    });
+}
+
+#[test]
+fn a_long_history_is_listed_a_page_at_a_time() {
+    run(|| async {
+        let long: Vec<SessionResult> = (0..45u64)
+            .map(|i| {
+                let mut session = stored_session("2026-09-01", &[("KM", "KM")]);
+                session.timestamp = 1_000 + i;
+                session
+            })
+            .collect();
+        let (mut ui, _recorder) = open_history(&long);
+        assert_eq!(ui.controls("history-delete-").len(), 40);
+        assert!(ui.has("Show 5 more"));
+        ui.click("history-more");
+        assert_eq!(ui.controls("history-delete-").len(), 45);
+        assert!(!ui.shows("history-more"));
+        // Choosing all takes the whole history, listed or not.
+        ui.click("history-select");
+        ui.click("history-choose-all");
+        assert!(ui.has("45 selected"));
+    });
+}
+
+#[component]
+fn ReadOnlyStats() -> Element {
+    rsx! {
+        StatsView { settings: TrainingSettings::default(), sessions: history() }
+    }
+}
+
+/// Without anywhere for deletions to go, the history is only shown.
+#[test]
+fn without_a_place_to_delete_to_the_history_is_only_shown() {
+    let mut ui = Ui::new(ReadOnlyStats, ());
+    ui.click("seg-history");
+    assert!(ui.has("5 sessions on this device"));
+    assert!(ui.controls("history-delete-").is_empty());
+    assert!(!ui.shows("history-select"));
+}

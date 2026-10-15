@@ -1367,14 +1367,14 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value {
 
 .chart-card { padding-bottom: 0.8rem; }
 .sparkline { width: 100%; height: auto; display: block; }
-.letter-row, .confuse-row, .history-row {
+.letter-row, .confuse-row {
   display: grid;
   gap: 0.4rem 0.7rem;
   align-items: center;
   padding: 0.45rem 0;
   border-bottom: 1px solid var(--line-soft);
 }
-.letter-row:last-child, .confuse-row:last-child, .history-row:last-child { border-bottom: 0; }
+.letter-row:last-child, .confuse-row:last-child { border-bottom: 0; }
 .letter-row { grid-template-columns: 1.7rem 1fr auto; }
 .letter-row .tiny { grid-column: 2 / -1; text-transform: none; letter-spacing: 0.02em; }
 .letter-key {
@@ -1399,9 +1399,112 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value {
   background: linear-gradient(90deg, var(--copper), var(--copper-lift));
 }
 .bar-fill.sample { background: linear-gradient(90deg, var(--info), var(--purple-700)); }
-.confuse-row, .history-row { grid-template-columns: 1fr auto; }
+.confuse-row { grid-template-columns: 1fr auto; }
 .history-acc { text-align: right; }
 .history-acc .value { font-family: Fraunces, Georgia, serif; font-weight: 700; display: block; }
+
+/* History: a row per session, with its own delete. In select mode each row
+   is a checkbox, and a bar floats above the nav with what to do with the
+   chosen ones — where the Undo toast then takes its place. */
+.history-list { display: grid; gap: 0.2rem; }
+.history-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 0.75rem;
+  width: 100%;
+  padding: 0.6rem 0.65rem;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  text-align: left;
+  transition: background 0.15s var(--ease), border-color 0.15s var(--ease);
+}
+.history-item:hover { background: var(--surface-2); }
+.history-item.selectable { grid-template-columns: auto minmax(0, 1fr) auto; }
+.history-item.chosen { background: var(--copper-soft); border-color: var(--copper); }
+.history-when { display: grid; gap: 0.1rem; min-width: 0; }
+.history-sub { font-size: 0.78rem; color: var(--ink-dim); }
+.history-check {
+  display: grid;
+  place-items: center;
+  width: 1.4rem;
+  height: 1.4rem;
+  border: 2px solid var(--line-strong);
+  border-radius: 50%;
+  color: transparent;
+  transition: background 0.15s var(--ease), border-color 0.15s var(--ease), color 0.15s var(--ease);
+}
+.history-check .icon { width: 0.85rem; height: 0.85rem; stroke-width: 2.6; }
+.history-item.chosen .history-check { background: var(--copper); border-color: var(--copper); color: #fff; }
+.history-delete {
+  display: grid;
+  place-items: center;
+  width: 2.2rem;
+  height: 2.2rem;
+  border-radius: 10px;
+  color: var(--ink-dim);
+  transition: background 0.15s var(--ease), color 0.15s var(--ease);
+}
+.history-delete:hover, .history-delete:focus-visible { background: var(--bad-soft); color: var(--bad); }
+.history-more { justify-self: center; }
+.history-card.selecting { margin-bottom: 4.5rem; }
+.history-empty { display: grid; justify-items: center; gap: 0.35rem; padding: 1.4rem 0 0.8rem; text-align: center; }
+.history-empty p { margin: 0; }
+.select-dock {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: calc(6rem + env(safe-area-inset-bottom));
+  z-index: 41;
+  display: flex;
+  justify-content: center;
+  pointer-events: none;
+}
+.select-bar {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  max-width: calc(100% - 2rem);
+  padding: 0.35rem;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: var(--pill);
+  background: var(--navy);
+  color: var(--cream);
+  box-shadow: var(--shadow-lg);
+  animation: select-bar-in 0.18s var(--ease);
+}
+.select-count {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  padding: 0 0.55rem;
+  font-size: 0.9rem;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.select-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-height: 2.5rem;
+  padding: 0 0.95rem;
+  border-radius: var(--pill);
+  color: var(--cream);
+  font-size: 0.88rem;
+  font-weight: 700;
+  white-space: nowrap;
+  transition: background 0.15s var(--ease), opacity 0.15s var(--ease);
+}
+.select-btn:hover { background: rgba(255, 255, 255, 0.1); }
+.select-btn.danger { background: var(--bad); color: #fff; }
+.select-btn.danger:hover { background: var(--bad); opacity: 0.9; }
+.select-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+@keyframes select-bar-in {
+  from { opacity: 0; transform: translateY(0.5rem); }
+  to { opacity: 1; transform: none; }
+}
 .bigram-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
 .bigram-grid { display: grid; gap: 2px; min-width: min-content; }
 .bigram-head { font-size: 0.65rem; text-align: center; color: var(--ink-dim); font-weight: 700; }
@@ -1528,7 +1631,19 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value {
   box-shadow: var(--shadow-lg);
   max-width: calc(100% - 2rem);
   font-size: 0.92rem;
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
 }
+.toast-action {
+  margin: -0.35rem -0.55rem -0.35rem 0;
+  padding: 0.35rem 0.65rem;
+  border-radius: 9px;
+  color: var(--copper-lift);
+  font-weight: 700;
+  transition: background 0.15s var(--ease);
+}
+.toast-action:hover { background: rgba(255, 255, 255, 0.1); }
 
 .icon { width: 1rem; height: 1rem; flex: 0 0 auto; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 

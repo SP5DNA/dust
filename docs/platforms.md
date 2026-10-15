@@ -182,6 +182,13 @@ The history keeps your newest 500 sessions. A browser also gives each site only
 a few megabytes; should the history outgrow that — hundreds of sessions of
 hundreds of groups — the newest that fit are kept, and the app says so.
 
+Sessions can be deleted under **Stats → History**: one from its own row, or
+several with **Select**, all of them included. Deleting everything asks once
+more. Every deletion can be undone from the message that follows it, for a
+few seconds. Deleting a session takes it out of every stat, the calendar and
+the streak, and out of what the sampler learns from; the level you have
+reached stays where it is.
+
 Stats are computed across your whole history. Changing course — Koch to Mixed,
 a new sequence, a custom alphabet — does not hide what you already did:
 accuracy over time, letter mastery, mistakes, the calendar and the streak all

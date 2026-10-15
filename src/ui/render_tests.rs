@@ -284,6 +284,7 @@ fn stats_count_sessions_from_every_character_set() {
         StatsViewProps {
             settings: TrainingSettings::default(),
             sessions: vec![digits, koch],
+            on_delete: None,
         },
     );
     assert!(
@@ -845,6 +846,50 @@ mod interactions {
                 today: "2026-09-09".to_string(),
             }
         }
+    }
+
+    #[component]
+    fn StatsHarness(adaptive: bool, mode: CharSetMode) -> Element {
+        let mut settings = TrainingSettings::default();
+        settings.curriculum.adaptive_group_size = adaptive;
+        settings.curriculum.char_set_mode = mode;
+        rsx! {
+            StatsView { settings, sessions: history() }
+        }
+    }
+
+    fn stats(adaptive: bool, mode: CharSetMode) -> Ui {
+        Ui::new(StatsHarness, StatsHarnessProps { adaptive, mode })
+    }
+
+    #[test]
+    fn the_overview_shows_the_copy_span_and_whether_it_steers() {
+        let ui = stats(false, CharSetMode::Mixed);
+        assert!(ui.has("Copy span"));
+        assert!(ui.has("chars · up") || ui.has("chars · down") || ui.has("chars · steady"));
+        assert!(ui.has("Adaptive length off"));
+        assert!(stats(true, CharSetMode::Mixed).has("Adapting · Balanced"));
+        // A callsign is as long as it is: there is no span to show.
+        assert!(!stats(true, CharSetMode::Callsign).has("Copy span"));
+    }
+
+    #[test]
+    fn the_sampling_tab_shows_each_group_length() {
+        let mut ui = stats(false, CharSetMode::Mixed);
+        ui.click("seg-sampling");
+        assert!(ui.has("Group length"));
+        assert!(ui.has("every length is as likely as the next"));
+        // The default range is 3 to 5 characters: a third each.
+        assert_eq!(ui.html().matches(">33%<").count(), 3);
+
+        let mut ui = stats(true, CharSetMode::Mixed);
+        ui.click("seg-sampling");
+        assert!(ui.has("Chance of each length in the next group"));
+        assert!(ui.has("whole "));
+
+        let mut ui = stats(true, CharSetMode::Callsign);
+        ui.click("seg-sampling");
+        assert!(!ui.has("Group length"));
     }
 
     #[test]

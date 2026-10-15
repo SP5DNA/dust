@@ -20,6 +20,8 @@ pub mod widgets;
 mod window_menu;
 
 #[cfg(test)]
+mod history_tests;
+#[cfg(test)]
 mod render_tests;
 #[cfg(test)]
 mod settings_tests;

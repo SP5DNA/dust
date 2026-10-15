@@ -135,6 +135,34 @@ pub enum PracticeWindow {
     Last5,
 }
 
+/// How hard adaptive group size pushes: the share of groups it aims to have
+/// copied whole.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GroupSizeTarget {
+    /// Mostly clean copy.
+    Comfortable,
+    /// About a third of the groups trip you up.
+    #[default]
+    Balanced,
+    /// Right at your span.
+    Stretch,
+}
+
+impl GroupSizeTarget {
+    /// Every target, in the order the settings screen offers them.
+    pub const ALL: [Self; 3] = [Self::Comfortable, Self::Balanced, Self::Stretch];
+
+    /// The share of groups to copy whole, from 0 to 1.
+    pub fn success_rate(self) -> f64 {
+        match self {
+            Self::Comfortable => 0.85,
+            Self::Balanced => 0.70,
+            Self::Stretch => 0.50,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct CurriculumSettings {
@@ -159,6 +187,12 @@ pub struct CurriculumSettings {
     pub min_group_size: u32,
     pub max_group_size: u32,
     pub link_group_size: bool,
+    /// Draw each group's length from what the history says you copy whole,
+    /// inside the group size range, rather than evenly across it. Off unless
+    /// asked for; older saves have no field and load with it off.
+    pub adaptive_group_size: bool,
+    /// What adaptive group size aims for.
+    pub group_size_target: GroupSizeTarget,
 }
 
 impl Default for CurriculumSettings {
@@ -177,6 +211,8 @@ impl Default for CurriculumSettings {
             min_group_size: 3,
             max_group_size: 5,
             link_group_size: false,
+            adaptive_group_size: false,
+            group_size_target: GroupSizeTarget::Balanced,
         }
     }
 }
@@ -1270,6 +1306,8 @@ mod tests {
         s.curriculum.min_group_size = 2;
         s.curriculum.max_group_size = 9;
         s.curriculum.link_group_size = true;
+        s.curriculum.adaptive_group_size = true;
+        s.curriculum.group_size_target = GroupSizeTarget::Stretch;
         s.curriculum.char_set_mode = CharSetMode::Koch;
         s.curriculum.mixed_letters_percent = 33;
         s.curriculum.custom_set = vec!['Q', 'Z'];

@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use cw_core::{GroupSession, SessionResult, TrainingSettings};
 use dioxus::prelude::*;
 
-use crate::persist::Store;
+use crate::persist::{HistorySaved, Store};
 use crate::playback::Preview;
 use crate::player::{AudioError, BackendFactory, Player};
 use crate::session_runtime::{AnswerOutbox, LiveSession};
@@ -76,6 +76,15 @@ impl AppState {
     }
 }
 
+/// One session of the history, as a screen names it to delete it: where it
+/// sits, and when it finished, so that a list drawn before the history
+/// changed can never take the wrong one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SessionPick {
+    pub index: usize,
+    pub timestamp: u64,
+}
+
 /// Everything a screen can read, and the moves every screen shares. Copy, so
 /// each screen takes it from context and each callback carries its own.
 ///
@@ -99,6 +108,9 @@ pub struct AppCtx {
     pub stream_heard: Signal<Vec<crate::playback::HeardGroup>>,
     /// The open answer box's text, on its way to the session.
     pub answer: AnswerOutbox,
+    /// The sessions deleted last, each with where it sat, for Undo to put
+    /// back.
+    trash: Signal<Vec<(usize, SessionResult)>>,
     app: CopyValue<AppState>,
 }
 
@@ -117,6 +129,7 @@ impl AppCtx {
             preview: Signal::new(Preview::Idle),
             stream_heard: Signal::new(Vec::new()),
             answer: AnswerOutbox::new(),
+            trash: Signal::new(Vec::new()),
             app: CopyValue::new(app),
         }
     }
@@ -139,6 +152,97 @@ impl AppCtx {
         self.preview.set(Preview::Idle);
     }
 
+    /// Store the history as it is now. What the screens show is what the
+    /// store has: when it has room for only the newest, the rest go from
+    /// here too.
+    pub fn store_history(self) -> HistorySaved {
+        let mut sessions = self.sessions;
+        let saved = self.app().store.save_sessions(&sessions.peek());
+        if let Some(kept) = saved.kept() {
+            let extra = sessions.peek().len().saturating_sub(kept);
+            if extra > 0 {
+                sessions.write().drain(..extra);
+            }
+        }
+        saved
+    }
+
+    /// Take `picked` out of the history, and out of the store. Until another
+    /// deletion, Undo puts them back. A pick that no longer names the
+    /// session it was made for is passed over, and a store that cannot take
+    /// the change leaves the history as it was and says why.
+    pub fn delete_sessions(self, picked: &[SessionPick]) {
+        let mut picked = picked.to_vec();
+        picked.sort_unstable_by_key(|pick| pick.index);
+        picked.dedup_by_key(|pick| pick.index);
+        let mut taken = Vec::new();
+        {
+            let mut sessions = self.sessions;
+            let mut history = sessions.write();
+            // From the back, so the places still to come stay where they are.
+            for pick in picked.iter().rev() {
+                if history
+                    .get(pick.index)
+                    .is_some_and(|session| session.timestamp == pick.timestamp)
+                {
+                    taken.push((pick.index, history.remove(pick.index)));
+                }
+            }
+        }
+        if taken.is_empty() {
+            return;
+        }
+        taken.reverse();
+        let count = taken.len();
+        let saved = self.store_history();
+        if let Some(why) = why_not_stored(&saved) {
+            self.put_back(taken);
+            self.toasts.show(format!("Nothing was deleted: {why}."));
+            return;
+        }
+        let mut trash = self.trash;
+        trash.set(taken);
+        match saved.problem() {
+            Some(problem) => self.toasts.show(problem),
+            None => {
+                let noun = if count == 1 { "session" } else { "sessions" };
+                self.toasts
+                    .show_with(format!("{count} {noun} deleted"), ToastAction::UndoDelete);
+            }
+        }
+    }
+
+    /// Put back the sessions deleted last, and store them again.
+    pub fn undo_delete(self) {
+        let mut trash = self.trash;
+        let taken = std::mem::take(&mut *trash.write());
+        if taken.is_empty() {
+            return;
+        }
+        let mut sessions = self.sessions;
+        let before = sessions.peek().clone();
+        self.put_back(taken.clone());
+        let saved = self.store_history();
+        if let Some(why) = why_not_stored(&saved) {
+            sessions.set(before);
+            trash.set(taken);
+            self.toasts
+                .show(format!("The sessions could not be put back: {why}."));
+        } else if let Some(problem) = saved.problem() {
+            self.toasts.show(problem);
+        }
+    }
+
+    /// Put each of `taken` back where it sat, in the order they sat in.
+    fn put_back(self, taken: Vec<(usize, SessionResult)>) {
+        let mut sessions = self.sessions;
+        let mut history = sessions.write();
+        for (index, session) in taken {
+            let at = index.min(history.len());
+            history.insert(at, session);
+        }
+    }
+
     /// Leave for another screen. A session in progress holds you; otherwise
     /// whatever was sounding stops before the screen changes, wherever you
     /// are going.
@@ -153,16 +257,58 @@ impl AppCtx {
     }
 }
 
+/// Why a history was not stored at all, in words that fit after "Nothing was
+/// deleted:". `None` when it was stored.
+fn why_not_stored(saved: &HistorySaved) -> Option<String> {
+    match saved {
+        HistorySaved::Stored { .. } | HistorySaved::Squeezed { .. } => None,
+        HistorySaved::Held => {
+            Some("your saved history could not be read, so it was left as it is".into())
+        }
+        HistorySaved::Failed(reason) => Some(reason.clone()),
+    }
+}
+
 /// How long a message stays up.
 pub const TOAST_MS: u32 = 4_000;
+/// How long a message that offers to undo something stays up: long enough
+/// to read it and change your mind.
+pub const ACTION_TOAST_MS: u32 = 8_000;
+
+/// Something a message offers to do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToastAction {
+    /// Put back the sessions just deleted.
+    UndoDelete,
+}
+
+impl ToastAction {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::UndoDelete => "Undo",
+        }
+    }
+}
 
 /// A message at the foot of the screen.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Toast {
     pub text: String,
+    pub action: Option<ToastAction>,
     /// Which raise this was. The same words raised twice are two toasts,
     /// each up for its own full time.
     serial: u64,
+}
+
+impl Toast {
+    /// How long this one stays up.
+    pub fn lasts_ms(&self) -> u32 {
+        if self.action.is_some() {
+            ACTION_TOAST_MS
+        } else {
+            TOAST_MS
+        }
+    }
 }
 
 /// Where messages are raised and shown: one at a time, the newest in place
@@ -177,10 +323,20 @@ impl Toasts {
     }
 
     pub fn show(self, text: impl Into<String>) {
+        self.raise(text.into(), None);
+    }
+
+    /// A message with something to do about it.
+    pub fn show_with(self, text: impl Into<String>, action: ToastAction) {
+        self.raise(text.into(), Some(action));
+    }
+
+    fn raise(self, text: String, action: Option<ToastAction>) {
         static RAISED: AtomicU64 = AtomicU64::new(0);
         let mut shown = self.0;
         shown.set(Some(Toast {
-            text: text.into(),
+            text,
+            action,
             serial: RAISED.fetch_add(1, Ordering::Relaxed),
         }));
     }

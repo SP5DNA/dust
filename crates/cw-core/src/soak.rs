@@ -10,16 +10,16 @@
 use crate::auto_level::apply_auto_level;
 use crate::callsign::{CALLSIGN_TIER_MIN, parse_callsign};
 use crate::level::LEVEL_MIN;
-use crate::machine::{SessionEffect, SessionEvent, SessionMachine};
+use crate::machine::{GroupSource, SessionEffect, SessionEvent, SessionMachine};
 use crate::session::MIN_RESPONSE_MS_PER_CHAR;
 use crate::timing::resolve_pileup;
 use crate::{
     AutoLevelCounters, CALLSIGN_TIER_MAX, CharSamplingState, CharSetMode, CopyTally,
-    FILTER_WIDTH_MAX, FILTER_WIDTH_MIN, MonoMs, PILEUP_LEVEL_MAX_DB, PILEUP_LEVEL_MIN_DB,
-    PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN, Rng, STATIONS_MAX, STATIONS_MIN, Sampler, SessionId,
-    SessionPhase, SplitMix64, TrainingSettings, Transmission, align_group, compute_char_pool,
-    evaluate_auto_level, generate_training_group, plan_morse_playback_for, plan_transmission,
-    resolve_station,
+    FILTER_WIDTH_MAX, FILTER_WIDTH_MIN, GroupSizeTarget, MonoMs, PILEUP_LEVEL_MAX_DB,
+    PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN, Rng, STATIONS_MAX, STATIONS_MIN,
+    Sampler, SessionId, SessionPhase, SplitMix64, TrainingSettings, Transmission, align_group,
+    compute_char_pool, evaluate_auto_level, generate_training_group, plan_morse_playback_for,
+    plan_transmission, resolve_station,
 };
 
 /// Enough seeds to be worth running on every commit, and cheap enough to.
@@ -37,6 +37,8 @@ fn wild_settings(rng: &mut SplitMix64) -> TrainingSettings {
     s.curriculum.min_group_size = rng.usize_in(0, 20) as u32;
     s.curriculum.max_group_size = rng.usize_in(0, 20) as u32;
     s.curriculum.link_group_size = rng.f64() < 0.5;
+    s.curriculum.adaptive_group_size = rng.f64() < 0.5;
+    s.curriculum.group_size_target = GroupSizeTarget::ALL[rng.usize_in(0, 2)];
     s.curriculum.char_set_mode = match rng.usize_in(0, 4) {
         0 => CharSetMode::Koch,
         1 => CharSetMode::Digits,
@@ -290,6 +292,35 @@ fn random_event(rng: &mut SplitMix64, groups: usize, timers: &[u64]) -> SessionE
             id: timers.last().copied().unwrap_or(0),
         },
         _ => SessionEvent::Abort,
+    }
+}
+
+/// Adaptive group size draws every length inside the range the settings
+/// allow, whatever has been copied before it and however badly.
+#[test]
+fn adaptive_lengths_never_leave_the_range() {
+    for seed in 0..SEEDS / 4 {
+        let mut rng = SplitMix64::new(seed.wrapping_mul(0x9E37_79B9).wrapping_add(3));
+        let mut settings = wild_settings(&mut rng).clamp();
+        settings.curriculum.adaptive_group_size = true;
+        let shortest = settings.curriculum.min_group_size as usize;
+        let longest = settings.curriculum.max_group_size as usize;
+        let mut sampler = Sampler::new(&[], &settings, seed);
+        for _ in 0..30 {
+            let (group, _) = sampler.next_group(&settings);
+            if settings.curriculum.char_set_mode != CharSetMode::Callsign {
+                let length = group.chars().count();
+                assert!(
+                    (shortest..=longest).contains(&length),
+                    "seed {seed}: {length} outside {shortest}..={longest}"
+                );
+            }
+            let mut answer: String = group.chars().filter(|_| rng.f64() < 0.8).collect();
+            if rng.f64() < 0.1 {
+                answer.push('X');
+            }
+            sampler.learn(&CopyTally::of(&group, &answer));
+        }
     }
 }
 

@@ -107,12 +107,13 @@ pub enum IconName {
     Volume,
     Sparkle,
     Flag,
+    Trash,
 }
 
 impl IconName {
     /// Every icon, for the test that draws them all.
     #[cfg(test)]
-    pub const ALL: [Self; 24] = [
+    pub const ALL: [Self; 25] = [
         Self::Signal,
         Self::Chart,
         Self::Sliders,
@@ -137,6 +138,7 @@ impl IconName {
         Self::Volume,
         Self::Sparkle,
         Self::Flag,
+        Self::Trash,
     ];
 
     /// The strokes, on a 24×24 grid.
@@ -159,6 +161,13 @@ impl IconName {
             Self::Stop => &["M6.5 6.5h11v11h-11z"],
             Self::Headphones => &["M4 14v-2a8 8 0 0116 0v2", "M4 14h3v6H4z", "M17 14h3v6h-3z"],
             Self::Check => &["M4.5 12.5l5 5 10-11"],
+            Self::Trash => &[
+                "M4 7h16",
+                "M9.5 7V4.5h5V7",
+                "M6.5 7l1 12.5h9l1-12.5",
+                "M10.2 11v5",
+                "M13.8 11v5",
+            ],
             Self::X => &["M6 6l12 12", "M18 6L6 18"],
             Self::Back => &["M15 5l-7 7 7 7"],
             Self::Sun => &[
