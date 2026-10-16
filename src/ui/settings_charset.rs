@@ -25,7 +25,7 @@ fn AlphabetField(label: &'static str, value: String, on_commit: EventHandler<Str
             label { r#for: "{id}", "{label}" }
             input {
                 id,
-                class: "mono",
+                class: "group-text",
                 value: "{shown}",
                 autocapitalize: "characters",
                 spellcheck: false,

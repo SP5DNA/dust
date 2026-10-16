@@ -30,7 +30,7 @@ pub fn LettersTab(sessions: Vec<SessionResult>) -> Element {
                     let slow = if row.is_slow { " · slow" } else { "" };
                     rsx! {
                         div { class: "letter-row",
-                            span { class: "letter-key mono", "{row.letter}" }
+                            span { class: "letter-key group-text", "{row.letter}" }
                             div { class: "bar-track",
                                 span { class: "bar-fill", style: "width: {row.accuracy_pct.clamp(0.0, 100.0)}%;" }
                             }
@@ -61,7 +61,7 @@ pub fn MistakesTab(sessions: Vec<SessionResult>) -> Element {
                             let typed = row.typed.map(|c| c.to_string()).unwrap_or_else(|| "—".into());
                             rsx! {
                                 div { class: "confuse-row",
-                                    span { class: "mono", "{row.sent} → {typed}" }
+                                    span { class: "group-text", "{row.sent} → {typed}" }
                                     span { class: "muted", "{row.count}× · {row.percentage.round()}%" }
                                 }
                             }
@@ -79,7 +79,7 @@ pub fn MistakesTab(sessions: Vec<SessionResult>) -> Element {
                             style: "grid-template-columns: repeat({n + 1}, minmax(1.35rem, 1fr));",
                             div { class: "bigram-head" }
                             for col in heat.letters.iter() {
-                                div { class: "bigram-head mono", "{col}" }
+                                div { class: "bigram-head group-text", "{col}" }
                             }
                             for (idx, cell) in heat.cells.iter().enumerate() {
                                 {
@@ -92,7 +92,7 @@ pub fn MistakesTab(sessions: Vec<SessionResult>) -> Element {
                                     let row_label = cell.row;
                                     rsx! {
                                         if show_row {
-                                            div { class: "bigram-head mono", "{row_label}" }
+                                            div { class: "bigram-head group-text", "{row_label}" }
                                         }
                                         div {
                                             class: "bigram-cell",
@@ -142,7 +142,7 @@ fn character_sampling_card(settings: &TrainingSettings, sessions: &[SessionResul
                         let width = (row.sampling_prob / max_p * 100.0).clamp(4.0, 100.0);
                         rsx! {
                             div { class: "letter-row",
-                                span { class: "letter-key mono", "{row.character}" }
+                                span { class: "letter-key group-text", "{row.character}" }
                                 div { class: "bar-track",
                                     span { class: "bar-fill sample", style: "width: {width}%;" }
                                 }

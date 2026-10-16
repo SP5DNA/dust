@@ -611,3 +611,62 @@ fn reduced_motion_stills_every_animation() {
         "reduced motion lets every animation run once"
     );
 }
+
+/// Group characters slash their zero, so it never reads as O, and nothing
+/// else does: the face that draws the slash holds the one digit, and sits
+/// first in the stack of exactly the rules for sent and copied characters.
+/// Anywhere else it would turn every zero of a speed, a score or a date.
+#[test]
+fn only_group_characters_slash_their_zero() {
+    let css = without_comments(CSS);
+    let rules = rules(&css);
+    let faces: Vec<_> = rules
+        .iter()
+        .filter(|(selector, _)| *selector == "@font-face")
+        .map(|(_, declarations)| declarations)
+        .collect();
+    assert_eq!(faces.len(), 2, "the zero comes in a medium and a bold face");
+    for face in faces {
+        assert!(
+            face.contains(&("font-family", "\"Dust Zero\"")),
+            "a face that is not the zero's: {face:?}"
+        );
+        assert!(
+            face.contains(&("unicode-range", "U+0030")),
+            "the zero's face has to take the digit and nothing else: {face:?}"
+        );
+    }
+
+    let stack = "\"Dust Zero\", \"IBM Plex Mono\", ui-monospace, monospace";
+    let mut slashed = Vec::new();
+    for (selector, declarations) in rules
+        .iter()
+        .filter(|(selector, _)| *selector != "@font-face")
+    {
+        for (property, value) in declarations {
+            if *property == "font-family" && value.contains("Dust Zero") {
+                assert_eq!(
+                    *value, stack,
+                    "{selector} puts the zero's face out of place"
+                );
+                slashed.push(*selector);
+            }
+        }
+    }
+    slashed.sort_unstable();
+    assert_eq!(
+        slashed,
+        [
+            ".answer",
+            ".call",
+            ".ch",
+            ".group-text",
+            ".letter-chip",
+            ".listen-heard-item",
+            ".paddle-heard",
+            ".pool-chip",
+            ".sent",
+        ],
+        "the slashed zero is for group characters only"
+    );
+}
