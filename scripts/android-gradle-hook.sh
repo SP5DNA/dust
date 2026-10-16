@@ -10,9 +10,10 @@
 #   version code is not above every one uploaded before it, so every build
 #   after the first would be refused.
 # - It asks for no native debug symbols, so Play has nothing to name the
-#   functions in a crash with. The release profile keeps the symbol table
-#   (Cargo.toml strips only the debug info), and the Android plugin can pack
-#   it into the bundle for Play, given the NDK to read it with.
+#   functions in a crash with. Asking the plugin for SYMBOL_TABLE is not
+#   enough: rustc already removed the debug info, the plugin's strip then
+#   changes nothing, and it packs no symbol file. The Play script writes
+#   that file itself, and refuses to finish without it.
 #
 # Source this and call install_android_gradle_hook before
 # `dx bundle --platform android`. The caller removes $ANDROID_GRADLE_HOOK
@@ -58,17 +59,34 @@ install_android_gradle_hook() {
   local version code
   version="$(dust_version "$root")"
   code="$(dust_version_code "$version")" || return 1
-  # The NDK the Rust code is built with. Left alone, the Android plugin looks
-  # only for its own pinned NDK version, and without that one it can neither
-  # read the symbols out nor strip the libraries it packages.
+  # The NDK the Rust code was built with. A path whose revision disagrees
+  # with ndkVersion is ignored, and the plugin resolves the NDK when the
+  # plugin is applied, so both are set then.
   local ndk_path='// No ANDROID_NDK_HOME: the Android plugin looks for its own NDK.'
+  local ndk_version='// No NDK revision: the Android plugin keeps its pinned version.'
   if [[ -n "${ANDROID_NDK_HOME:-}" && -d "$ANDROID_NDK_HOME" ]]; then
     ndk_path="android.ndkPath = \"${ANDROID_NDK_HOME}\""
+    local revision
+    revision="$(awk -F' = ' '/^Pkg\.Revision/ { print $2; exit }' "$ANDROID_NDK_HOME/source.properties")"
+    if [[ -z "$revision" ]]; then
+      echo "No Pkg.Revision in $ANDROID_NDK_HOME/source.properties" >&2
+      return 1
+    fi
+    ndk_version="android.ndkVersion = \"${revision}\""
   fi
   mkdir -p "$gradle_init"
   ANDROID_GRADLE_HOOK="$gradle_init/dust-android.gradle"
   cat > "$ANDROID_GRADLE_HOOK" << EOF
 gradle.beforeProject { project ->
+    // As the plugin is applied, before variants exist. The NDK the strip
+    // tool is taken from is chosen then.
+    project.pluginManager.withPlugin("com.android.application") {
+        def android = project.extensions.findByName("android")
+        if (android != null) {
+            ${ndk_path}
+            ${ndk_version}
+        }
+    }
     // Registered before the project's build script runs, so it runs before
     // the Android plugin's own afterEvaluate, the one that makes the
     // variants from the DSL: the DSL can still be changed here, and what is
@@ -88,7 +106,6 @@ gradle.beforeProject { project ->
         // it: crashes and ANRs in the Rust code then name their functions.
         // The libraries shipped in the app are stripped of it.
         android.defaultConfig.ndk.debugSymbolLevel = "SYMBOL_TABLE"
-        ${ndk_path}
 
         def iconRes = new File("${root}/assets/android")
         if (!iconRes.isDirectory()) {
@@ -120,6 +137,84 @@ android_bundle_symbols() {
   local listing
   listing="$(jar tf "$1")" || return 1
   grep '^BUNDLE-METADATA/com.android.tools.build.debugsymbols/.' <<< "$listing" || true
+}
+
+# Put a symbol table for every native library into `aab`, where Play reads
+# it, and strip that table out of the library the app ships. The Android
+# plugin skips both when rustc has already removed the debug info. No-op
+# when the bundle already has the symbols. Rewrites the bundle, so call it
+# before signing.
+pack_android_native_symbols() {
+  local aab=$1
+  local existing bin objcopy strip
+  existing="$(android_bundle_symbols "$aab")"
+  if [[ -n "$existing" ]]; then
+    return 0
+  fi
+  bin="${ANDROID_NDK_HOME:?ANDROID_NDK_HOME is not set}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+  objcopy="$bin/llvm-objcopy"
+  strip="$bin/llvm-strip"
+  if [[ ! -x "$objcopy" || ! -x "$strip" ]]; then
+    echo "NDK llvm-objcopy or llvm-strip missing in $bin" >&2
+    return 1
+  fi
+  python3 - "$aab" "$objcopy" "$strip" << 'PY'
+import subprocess
+import sys
+import tempfile
+import zipfile
+from pathlib import Path
+
+aab = Path(sys.argv[1])
+objcopy = sys.argv[2]
+strip = sys.argv[3]
+prefix = "BUNDLE-METADATA/com.android.tools.build.debugsymbols/"
+
+def is_signature(name: str) -> bool:
+    if not name.startswith("META-INF/"):
+        return False
+    upper = name.upper()
+    return upper.endswith((".SF", ".RSA", ".DSA", ".EC")) or name == "META-INF/MANIFEST.MF"
+
+with zipfile.ZipFile(aab, "r") as src:
+    libraries = [
+        info
+        for info in src.infolist()
+        if info.filename.startswith("base/lib/") and info.filename.endswith(".so")
+    ]
+    if not libraries:
+        sys.exit("No native libraries in " + str(aab))
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        replacements = {}
+        for info in libraries:
+            parts = info.filename.split("/")
+            # base/lib/<abi>/<name>.so
+            if len(parts) != 4:
+                sys.exit("Unexpected native library path " + info.filename)
+            abi, name = parts[2], parts[3]
+            raw = tmp_path / name
+            raw.write_bytes(src.read(info.filename))
+            sym = tmp_path / f"{name}.sym"
+            stripped = tmp_path / f"{name}.stripped"
+            subprocess.run([objcopy, "--strip-debug", str(raw), str(sym)], check=True)
+            subprocess.run([strip, "--strip-unneeded", "-o", str(stripped), str(raw)], check=True)
+            if sym.stat().st_size == 0:
+                sys.exit("Empty symbol file for " + info.filename)
+            replacements[info.filename] = stripped.read_bytes()
+            replacements[f"{prefix}{abi}/{name}.sym"] = sym.read_bytes()
+        # Beside the bundle: /tmp can be another filesystem, and replace
+        # cannot cross it.
+        out = aab.with_suffix(".aab.repacked")
+        with zipfile.ZipFile(out, "w") as dst:
+            for info in src.infolist():
+                if is_signature(info.filename) or info.filename in replacements:
+                    continue
+                dst.writestr(info, src.read(info.filename))
+            for name, data in replacements.items():
+                dst.writestr(name, data, compress_type=zipfile.ZIP_DEFLATED)
+        out.replace(aab)
+PY
 }
 
 # Fail unless the APK at `apk` carries the version and version code the

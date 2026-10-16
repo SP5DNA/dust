@@ -127,6 +127,9 @@ mkdir -p dist
 out="dist/dust-${VERSION}-android-arm64.aab"
 cp "$aab" "$out"
 
+echo "Packing native debug symbols into $out"
+pack_android_native_symbols "$out"
+
 echo "Signing $out"
 jarsigner -sigalg SHA256withRSA -digestalg SHA256 \
   -keystore "$KEYSTORE" \
@@ -144,6 +147,7 @@ if [[ -n "$symbols" ]]; then
   done <<< "$symbols"
 else
   echo "No native debug symbols in $out: Play will show native crashes as bare addresses." >&2
+  exit 1
 fi
 
 cert_out="dist/dust-upload-certificate.pem"
