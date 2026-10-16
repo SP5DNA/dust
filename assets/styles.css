@@ -274,7 +274,36 @@ html {
 
 button, input, select, textarea { font: inherit; color: inherit; }
 button { cursor: pointer; touch-action: manipulation; background: none; border: 0; }
+
+/* Group characters — what is sent, what is copied, and the letters they are
+   drawn from — slash their zero, so it never reads as O. Plex dots its zero,
+   and the dot is lost at the size of an alignment cell; its slashed zero is
+   behind the `zero` feature, which Google Fonts strips. "Dust Zero" is that
+   one glyph on plain U+0030 and nothing else, so it goes first in the stack
+   of every group-character rule and the rest falls through to Plex. The rest
+   of the UI keeps the dotted zero. Built by scripts/build-dust-zero.py, from
+   IBM Plex Mono (SIL OFL 1.1, the licence inside each face). */
+/* dust-zero:begin */
+@font-face {
+  font-family: "Dust Zero";
+  font-style: normal;
+  font-weight: 100 599;
+  font-display: swap;
+  unicode-range: U+0030;
+  src: url("data:font/woff2;base64,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") format("woff2");
+}
+@font-face {
+  font-family: "Dust Zero";
+  font-style: normal;
+  font-weight: 600 900;
+  font-display: swap;
+  unicode-range: U+0030;
+  src: url("data:font/woff2;base64,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") format("woff2");
+}
+/* dust-zero:end */
+
 code, .mono { font-family: "IBM Plex Mono", ui-monospace, monospace; }
+.group-text { font-family: "Dust Zero", "IBM Plex Mono", ui-monospace, monospace; }
 
 h1, h2, h3, .page-title, .listen-glyph, .kpi .value {
   font-family: Fraunces, Georgia, serif;
@@ -581,7 +610,7 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value {
   border-radius: 8px;
   background: var(--hero-chip);
   border: 1px solid var(--hero-chip-line);
-  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-family: "Dust Zero", "IBM Plex Mono", ui-monospace, monospace;
   font-size: 0.9rem;
   font-weight: 700;
   color: var(--hero-chip-ink);
@@ -1141,7 +1170,7 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value {
 .badge.good { background: var(--good-soft); color: var(--good); }
 .badge.bad { background: var(--bad-soft); color: var(--bad); }
 .sent {
-  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-family: "Dust Zero", "IBM Plex Mono", ui-monospace, monospace;
   font-size: 0.85rem;
   letter-spacing: 0.1em;
   padding: 0.14rem 0.5rem;
@@ -1158,7 +1187,7 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value {
   padding: 0.7rem 0.8rem;
   min-height: 2.75rem;
   line-height: 1.4;
-  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-family: "Dust Zero", "IBM Plex Mono", ui-monospace, monospace;
   font-size: 1rem;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -1181,7 +1210,7 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value {
   background: var(--good-soft);
   color: var(--good);
   font-weight: 700;
-  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-family: "Dust Zero", "IBM Plex Mono", ui-monospace, monospace;
 }
 .ch.bad { background: var(--bad-soft); color: var(--bad); border-color: var(--bad); }
 .ch.miss { background: transparent; color: var(--ink-dim); border-color: var(--line-strong); border-style: dashed; }
@@ -1200,7 +1229,7 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value {
   font-size: 0.78rem;
   line-height: 1.5;
   font-weight: 700;
-  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-family: "Dust Zero", "IBM Plex Mono", ui-monospace, monospace;
   letter-spacing: 0.04em;
   white-space: nowrap;
 }
@@ -1273,7 +1302,7 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value {
   border-radius: 12px;
   border: 1px solid var(--line);
   background: var(--surface);
-  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-family: "Dust Zero", "IBM Plex Mono", ui-monospace, monospace;
   font-weight: 700;
   font-size: 1.02rem;
   color: var(--ink);
@@ -1321,7 +1350,7 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value {
   margin: 1rem 0 0;
 }
 .listen-heard-item {
-  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-family: "Dust Zero", "IBM Plex Mono", ui-monospace, monospace;
   font-size: 0.85rem;
   letter-spacing: 0.08em;
   padding: 0.25rem 0.55rem;
@@ -1353,7 +1382,7 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value {
 .paddle-heard {
   margin: 0;
   min-height: 1.5em;
-  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-family: "Dust Zero", "IBM Plex Mono", ui-monospace, monospace;
   font-size: 1.2rem;
   letter-spacing: 0.14em;
   color: var(--ink);
