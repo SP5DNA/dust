@@ -93,6 +93,14 @@ git tag v0.14.4 && git push origin v0.14.4
 CI then builds and attaches every bundle in the table above. Mobile jobs cannot
 hold the desktop bundles back: if one fails, the release publishes without it.
 
+## Credits
+
+Dust was created by Mateusz K, SO5KM, who leads its development and builds
+every release. The app credits everyone who works on it — maintainers who
+publish it in a store under their own account, contributors, and the closed
+testing group — under **Settings → Credits**. People are listed in `CREDITS`,
+and testers in `TESTERS`, both in [src/ui/credits.rs](src/ui/credits.rs).
+
 ## Layout
 
 ```

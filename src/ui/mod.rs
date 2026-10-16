@@ -1,5 +1,6 @@
 pub mod auto_level;
 pub mod band;
+pub mod credits;
 pub mod envelope;
 #[cfg(feature = "desktop")]
 pub mod floating;

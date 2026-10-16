@@ -305,7 +305,7 @@ button { cursor: pointer; touch-action: manipulation; background: none; border: 
 code, .mono { font-family: "IBM Plex Mono", ui-monospace, monospace; }
 .group-text { font-family: "Dust Zero", "IBM Plex Mono", ui-monospace, monospace; }
 
-h1, h2, h3, .page-title, .listen-glyph, .kpi .value {
+h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title {
   font-family: Fraunces, Georgia, serif;
   font-optical-sizing: auto;
 }
@@ -529,7 +529,40 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value {
 .card-title { margin: 0; font-size: 0.98rem; font-weight: 700; letter-spacing: -0.01em; }
 .card-note { margin: 0.1rem 0 0; font-size: 0.78rem; color: var(--ink-dim); }
 .legal .muted { margin: 0; }
-.privacy-link { color: var(--copper-deep); font-weight: 600; }
+.privacy-link, .credit-link { color: var(--copper-deep); font-weight: 600; }
+/* Credits: a group per role, a line per person, the callsign beside them.
+   The card folds to its head, which is the button that opens it. */
+.credits-toggle { width: 100%; padding: 0; text-align: left; }
+.credits-toggle:not(.open) { margin-bottom: 0; }
+.credits-toggle .card-title, .credits-toggle .card-note { display: block; }
+.credits-toggle .icon {
+  width: 1.1rem;
+  height: 1.1rem;
+  color: var(--ink-dim);
+  transition: transform 0.2s var(--ease);
+}
+.credits-toggle:hover .icon { color: var(--copper); }
+.credits-toggle.open .icon { transform: rotate(180deg); }
+.credit-group { display: grid; gap: 0.5rem; }
+.credit { display: grid; gap: 0.1rem; }
+.credit-name {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.5rem;
+  margin: 0;
+  font-weight: 700;
+}
+.tester-list { display: flex; flex-wrap: wrap; gap: 0.45rem 1rem; }
+.tester { display: inline-flex; align-items: baseline; gap: 0.4rem; font-weight: 600; }
+.credit-call {
+  padding: 0.05rem 0.45rem;
+  border-radius: var(--pill);
+  background: var(--copper-soft);
+  color: var(--copper-deep);
+  font-size: 0.78rem;
+  letter-spacing: 0.06em;
+}
 .card-tools { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; }
 
 /* KPI tiles */

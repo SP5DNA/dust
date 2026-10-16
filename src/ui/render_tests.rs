@@ -452,6 +452,9 @@ fn settings_renders_every_card() {
         "Band conditions",
         "Privacy policy",
         "https://mashu.github.io/dust/privacy/",
+        "Credits",
+        "The people who make Dust",
+        "disclosure-credits",
     ] {
         assert!(html.contains(needle), "settings should render {needle}");
     }

@@ -112,6 +112,7 @@ pub fn SettingsView(
                 on_stop: on_stop_band,
             }
             crate::ui::privacy::PrivacyCard {}
+            crate::ui::credits::CreditsCard {}
         }
     }
 }
