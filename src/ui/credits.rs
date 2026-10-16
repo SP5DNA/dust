@@ -94,6 +94,18 @@ pub const TESTERS: &[Tester] = &[
         name: "Krzysztof",
         callsign: Some("SP8BFG"),
     },
+    Tester {
+        name: "Mariusz",
+        callsign: Some("SP7UDB"),
+    },
+    Tester {
+        name: "Dariusz",
+        callsign: Some("SQ5VDR"),
+    },
+    Tester {
+        name: "Ryszard",
+        callsign: Some("M0RPA"),
+    },
 ];
 
 /// The people in `credits`, by role, in the card's order, leaving out the
