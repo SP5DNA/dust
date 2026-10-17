@@ -463,7 +463,7 @@ fn generate_group(
     match settings.curriculum.char_set_mode {
         CharSetMode::Callsign => return generate_callsign_group(settings, state, &config, rng),
         CharSetMode::Words => return generate_word_group(settings, state, &config, rng),
-        CharSetMode::Koch | CharSetMode::Digits | CharSetMode::Custom | CharSetMode::Mixed => {}
+        CharSetMode::Koch | CharSetMode::Digits | CharSetMode::Mixed => {}
     }
     let pool = compute_char_pool(settings);
     let group_size = length.unwrap_or_else(|| {

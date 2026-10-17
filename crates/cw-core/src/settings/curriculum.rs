@@ -51,7 +51,7 @@ impl CharSetMode {
             Self::Digits => LevelAxis::Digits,
             Self::Callsign => LevelAxis::Callsign,
             Self::Words => LevelAxis::Words,
-            Self::Koch | Self::Custom | Self::Mixed => LevelAxis::Letters,
+            Self::Koch | Self::Mixed => LevelAxis::Letters,
         }
     }
 }
@@ -84,15 +84,12 @@ impl TrainingSettings {
         }
     }
 
-    /// The alphabet the letter level unlocks, in order. Custom uses its own
-    /// set when it has one; Mixed leaves the digits to their own level. A
-    /// sequence with nothing sendable in it is LCWO's, so this is never empty
-    /// except in Mixed, whose digits then carry the pool.
+    /// The alphabet the letter level unlocks, in order. Mixed leaves the
+    /// digits to their own level. A sequence with nothing sendable in it is
+    /// LCWO's, so this is never empty except in Mixed, whose digits then
+    /// carry the pool.
     pub fn progress_alphabet(&self) -> Vec<char> {
-        let custom = (self.curriculum.char_set_mode == CharSetMode::Custom)
-            .then(|| Self::unique_alphabet(&self.curriculum.custom_set))
-            .filter(|set| !set.is_empty());
-        let mut base = custom.unwrap_or_else(|| Self::unique_alphabet(self.sequence()));
+        let mut base = Self::unique_alphabet(self.sequence());
         if base.is_empty() {
             base = LCWO_SEQUENCE.to_vec();
         }

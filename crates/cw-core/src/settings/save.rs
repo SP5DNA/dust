@@ -3,20 +3,23 @@
 use serde::Deserialize;
 
 use super::{
-    AutoLevelSettings, BandSettings, CurriculumSettings, PlaybackSettings, PracticeWindow,
-    TrainingSettings,
+    AutoLevelSettings, BandSettings, CharSetMode, CurriculumSettings, PlaybackSettings,
+    PracticeWindow, TrainingSettings,
 };
 
-/// A save as it is read: today's settings, and the practice window as older
-/// saves kept it.
+/// A save as it is read: today's settings, and the practice window and
+/// character set as older saves kept them.
 ///
 /// The legacy keys come first. A flattened section takes the keys it knows
-/// as it reads them, so `practiceWindow` is read here, as an option, before
-/// the curriculum's own non-optional field could see it.
+/// as it reads them, so `practiceWindow` and `charSetMode` are read here,
+/// as options, before the curriculum's own non-optional fields could see
+/// them.
 #[derive(Deserialize)]
 struct SettingsSave {
     #[serde(flatten)]
     window: WindowSave,
+    #[serde(flatten)]
+    char_set: CharSetSave,
     #[serde(flatten)]
     curriculum: CurriculumSettings,
     #[serde(flatten)]
@@ -37,6 +40,24 @@ struct WindowSave {
     sliding_window_end: Option<u32>,
 }
 
+/// Before an unlock order could be the learner's own, a list of their own
+/// was a character set of its own, Custom, unlocked from the left like any
+/// order. Its list is that order now, under Koch.
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct CharSetSave {
+    char_set_mode: Option<ModeSave>,
+    custom_set: Vec<char>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum ModeSave {
+    Custom,
+    #[serde(untagged)]
+    Today(CharSetMode),
+}
+
 impl From<SettingsSave> for TrainingSettings {
     fn from(save: SettingsSave) -> Self {
         let mut settings = Self {
@@ -45,6 +66,19 @@ impl From<SettingsSave> for TrainingSettings {
             band: save.band,
             auto_level: save.auto_level,
         };
+        match save.char_set.char_set_mode {
+            Some(ModeSave::Today(mode)) => settings.curriculum.char_set_mode = mode,
+            Some(ModeSave::Custom) => {
+                settings.curriculum.char_set_mode = CharSetMode::Koch;
+                // An empty list unlocked the order already there, so that
+                // order stays.
+                if !Self::unique_alphabet(&save.char_set.custom_set).is_empty() {
+                    let list: String = save.char_set.custom_set.iter().collect();
+                    settings.type_sequence(&list);
+                }
+            }
+            None => {}
+        }
         let window = &save.window;
         settings.curriculum.practice_window = match (
             window.practice_window,
@@ -89,7 +123,8 @@ impl<'de> Deserialize<'de> for TrainingSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::settings::{CharSetMode, GroupSizeTarget};
+    use crate::sequences::{PresetId, SequenceChoice};
+    use crate::settings::GroupSizeTarget;
 
     fn load(json: serde_json::Value) -> TrainingSettings {
         serde_json::from_value(json).expect("a save should load")
@@ -168,6 +203,59 @@ mod tests {
     #[test]
     fn an_empty_save_is_the_defaults() {
         assert_eq!(load(serde_json::json!({})), TrainingSettings::default());
+    }
+
+    /// A save on the old Custom character set comes back on Koch, its list
+    /// the unlock order: the same characters, unlocked the same way, so the
+    /// level and what was learned of each character carry over.
+    #[test]
+    fn a_save_on_custom_comes_back_as_its_own_unlock_order() {
+        let custom = load(serde_json::json!({
+            "charSetMode": "custom", "level": 4,
+            "customSet": ["q", "R", "S", "T", "#", "R"],
+            "customSequence": ["U", "V"], "practiceWindow": "last3",
+        }));
+        assert_eq!(custom.curriculum.char_set_mode, CharSetMode::Koch);
+        assert_eq!(custom.curriculum.custom_sequence, ['Q', 'R', 'S', 'T']);
+        assert_eq!(custom.sequence_choice(), SequenceChoice::Custom);
+        assert_eq!(custom.curriculum.level, 4);
+        assert_eq!(custom.curriculum.practice_window, PracticeWindow::Last3);
+        assert_eq!(custom.alphabet_fingerprint(), "QRST");
+        let json = serde_json::to_value(&custom).expect("settings serialize");
+        assert_eq!(json["charSetMode"], "koch");
+        assert!(json.get("customSet").is_none(), "not written back");
+
+        // A list that is a preset is that preset.
+        let mania: Vec<char> = crate::sequences::TRADITIONAL_KOCH_SEQUENCE.to_vec();
+        let preset = load(serde_json::json!({ "charSetMode": "custom", "customSet": mania }));
+        assert_eq!(
+            preset.sequence_choice(),
+            SequenceChoice::Preset(PresetId::MorseMania)
+        );
+
+        // An empty list unlocked the order already chosen, and still does.
+        let empty = load(serde_json::json!({
+            "charSetMode": "custom", "customSet": [], "customSequence": ["U", "V"],
+        }));
+        assert_eq!(empty.curriculum.char_set_mode, CharSetMode::Koch);
+        assert_eq!(empty.curriculum.custom_sequence, ['U', 'V']);
+
+        // A list left over from a visit to Custom is no order on Koch.
+        let koch = load(serde_json::json!({
+            "charSetMode": "koch", "customSet": ["Q", "R"],
+        }));
+        assert_eq!(
+            koch.sequence_choice(),
+            SequenceChoice::Preset(PresetId::Lcwo)
+        );
+        // Every other character set reads as it was saved.
+        for mode in ["koch", "digits", "mixed", "callsign", "words"] {
+            let json = serde_json::json!({ "charSetMode": mode });
+            assert_eq!(
+                serde_json::to_value(load(json.clone())).unwrap()["charSetMode"],
+                json["charSetMode"]
+            );
+        }
     }
 
     /// The first versions named two settings after the Koch method. Their

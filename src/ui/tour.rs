@@ -110,7 +110,7 @@ enum Move {
 fn has_unlock_order(settings: &TrainingSettings) -> bool {
     matches!(
         settings.curriculum.char_set_mode,
-        CharSetMode::Koch | CharSetMode::Mixed | CharSetMode::Custom
+        CharSetMode::Koch | CharSetMode::Mixed
     )
 }
 

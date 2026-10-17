@@ -208,8 +208,8 @@ fn a_step_to_the_top_shows_the_top_over_text_never_committed() {
     });
 }
 
-/// One click to look at another character set must not cost the level the
-/// learner had reached in this one.
+/// One click to look at another character set, or a short order of one's
+/// own, must not cost the level the learner had reached.
 #[test]
 fn trying_another_character_set_costs_no_level() {
     run(|| async {
@@ -224,12 +224,11 @@ fn trying_another_character_set_costs_no_level() {
 
         let mut settings = test_settings();
         settings.curriculum.level = 20;
-        settings.curriculum.custom_set = vec!['A', 'B', 'C'];
         let (mut ui, _recorder) = Ui::app_with_settings(settings);
         ui.click("nav-settings");
-        ui.click("seg-custom");
+        ui.commit("field-sequence-order", "ABC");
         assert_eq!(value_of(&ui, "field-level"), "2");
-        ui.click("seg-koch");
+        ui.click("pill-lcwo");
         ui.advance(50).await;
         assert_eq!(value_of(&ui, "field-level"), "20");
         ui.click("nav-practice");
@@ -260,26 +259,47 @@ fn the_unlock_order_can_be_cleared_and_typed_again() {
         assert_eq!(value_of(&ui, "field-sequence-order"), lcwo);
         assert_eq!(value_of(&ui, "field-level"), "20");
         assert!(ui.input_tag("pill-lcwo").contains("active"));
-        assert!(!ui.input_tag("pill-custom").contains("active"));
+        assert!(!ui.input_tag("pill-your-own").contains("active"));
 
         // Committed with stray characters, it is cleaned once, on commit.
         ui.commit("field-sequence-order", "km k?");
         assert_eq!(value_of(&ui, "field-sequence-order"), "KM?");
-        assert!(ui.input_tag("pill-custom").contains("active"));
+        assert!(ui.input_tag("pill-your-own").contains("active"));
     });
 }
 
+/// A list of one's own is an unlock order of one's own: typed into the
+/// order's box, or started from a preset with "Your own". There is no
+/// character set beside it called Custom to do the same.
 #[test]
-fn a_custom_alphabet_is_cleaned_when_it_is_committed() {
+fn a_list_of_ones_own_is_an_unlock_order() {
     run(|| async {
         let mut settings = test_settings();
-        settings.curriculum.char_set_mode = cw_core::CharSetMode::Custom;
+        settings.curriculum.char_set_mode = CharSetMode::Koch;
+        settings.curriculum.level = 6;
         let (mut ui, _recorder) = Ui::app_with_settings(settings);
         ui.click("nav-settings");
-        ui.type_into("field-custom-alphabet", "abca");
-        assert_eq!(value_of(&ui, "field-custom-alphabet"), "abca");
-        ui.commit("field-custom-alphabet", "abca");
-        assert_eq!(value_of(&ui, "field-custom-alphabet"), "ABC");
+        assert!(!ui.shows("seg-custom"));
+
+        ui.click("pill-morsemania");
+        assert!(ui.has("Unlocked in MorseMania order · 7 in play"));
+        ui.click("pill-your-own");
+        assert!(ui.input_tag("pill-your-own").contains("active"));
+        assert_eq!(
+            value_of(&ui, "field-sequence-order"),
+            "KMRSUAPTLOWINJEF0YVG5Q9ZH38B?427C16DX/=+",
+            "starts from the order showing"
+        );
+
+        ui.commit("field-sequence-order", "qrstuvwxyz");
+        ui.advance(50).await;
+        assert_eq!(value_of(&ui, "field-sequence-order"), "QRSTUVWXYZ");
+        assert_eq!(value_of(&ui, "field-level"), "6");
+        assert!(ui.has("Unlocked in your own order · 7 in play"));
+        assert_eq!(
+            ui.stored_settings().await.curriculum.custom_sequence,
+            "QRSTUVWXYZ".chars().collect::<Vec<_>>()
+        );
     });
 }
 

@@ -46,11 +46,10 @@ fn AlphabetField(label: &'static str, value: String, on_commit: EventHandler<Str
 }
 
 /// The character sets, in the order the control offers them.
-const CHAR_SET_MODES: [(CharSetMode, &str); 6] = [
+const CHAR_SET_MODES: [(CharSetMode, &str); 5] = [
     (CharSetMode::Koch, "Koch"),
     (CharSetMode::Digits, "Digits"),
     (CharSetMode::Mixed, "Mixed"),
-    (CharSetMode::Custom, "Custom"),
     (CharSetMode::Callsign, "Callsigns"),
     (CharSetMode::Words, "Words"),
 ];
@@ -70,7 +69,6 @@ const PRACTICE_WINDOWS: [(PracticeWindow, &str, usize); 3] = [
 struct Charset {
     mode: CharSetMode,
     sequence: String,
-    custom_set: String,
     choice: SequenceChoice,
     level: u32,
     level_max: u32,
@@ -92,7 +90,6 @@ impl Charset {
         Self {
             mode: c.char_set_mode,
             sequence: settings.sequence().iter().collect(),
-            custom_set: c.custom_set.iter().collect(),
             choice: settings.sequence_choice(),
             level: settings.active_level(),
             level_max: settings.max_active_level(),
@@ -113,13 +110,15 @@ impl Charset {
 
     fn note(&self) -> String {
         let what = match self.mode {
-            CharSetMode::Koch => "Letters unlocked in Koch order",
-            CharSetMode::Digits => "Digits only",
-            CharSetMode::Mixed => "Letters and digits together",
-            CharSetMode::Custom => "Your own character list",
-            CharSetMode::Callsign => "Real callsigns, off the air",
-            CharSetMode::Words if self.own_words => "Your own words, sent whole",
-            CharSetMode::Words => "Starter words, sent whole",
+            CharSetMode::Koch => match self.choice {
+                SequenceChoice::Preset(id) => format!("Unlocked in {} order", id.preset().name),
+                SequenceChoice::Custom => "Unlocked in your own order".to_string(),
+            },
+            CharSetMode::Digits => "Digits only".to_string(),
+            CharSetMode::Mixed => "Letters and digits together".to_string(),
+            CharSetMode::Callsign => "Real callsigns, off the air".to_string(),
+            CharSetMode::Words if self.own_words => "Your own words, sent whole".to_string(),
+            CharSetMode::Words => "Starter words, sent whole".to_string(),
         };
         if self.mode == CharSetMode::Callsign {
             format!("{what} · tier {} of {CALLSIGN_TIER_MAX}", self.level)
@@ -137,10 +136,7 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
     let c = charset.read();
     let callsigns = c.mode == CharSetMode::Callsign;
     let words = c.mode == CharSetMode::Words;
-    let has_unlock_order = matches!(
-        c.mode,
-        CharSetMode::Koch | CharSetMode::Mixed | CharSetMode::Custom
-    );
+    let has_unlock_order = matches!(c.mode, CharSetMode::Koch | CharSetMode::Mixed);
     rsx! {
         div { class: "card stack-sm",
             CardHead { icon: IconName::Letters, title: "Character set", note: c.note(),
@@ -166,7 +162,7 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
                     for choice in SEQUENCE_PRESETS
                         .iter()
                         .map(|preset| (SequenceChoice::Preset(preset.id), preset.name))
-                        .chain([(SequenceChoice::Custom, "Custom")])
+                        .chain([(SequenceChoice::Custom, "Your own")])
                     {
                         Seg {
                             label: choice.1,
@@ -221,17 +217,6 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
                     unit: "%",
                     onchange: move |v| settings.write().curriculum.mixed_letters_percent = v as u32,
                 }
-            }
-            if c.mode == CharSetMode::Custom {
-                AlphabetField {
-                    label: "Custom alphabet",
-                    value: c.custom_set.clone(),
-                    on_commit: move |typed: String| {
-                        settings.write().curriculum.custom_set =
-                            TrainingSettings::unique_alphabet(&typed.chars().collect::<Vec<_>>());
-                    },
-                }
-                p { class: "muted", style: "margin: 0;", "Level unlocks this list from the start. Leave it empty to use the sequence above." }
             }
             if words {
                 WordListEditor {

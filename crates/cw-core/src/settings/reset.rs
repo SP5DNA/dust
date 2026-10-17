@@ -47,7 +47,6 @@ impl TrainingSettings {
             SettingsSection::CharacterSet => {
                 self.curriculum.char_set_mode = d.curriculum.char_set_mode;
                 self.curriculum.mixed_letters_percent = d.curriculum.mixed_letters_percent;
-                self.curriculum.custom_set = d.curriculum.custom_set.clone();
                 self.curriculum.custom_sequence = d.curriculum.custom_sequence.clone();
                 self.curriculum.sequence_is_custom = d.curriculum.sequence_is_custom;
                 self.curriculum.practice_window = d.curriculum.practice_window;
