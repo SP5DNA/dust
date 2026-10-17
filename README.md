@@ -25,8 +25,13 @@ control to press for each and ticks it off once you have, or press
 **Show me** and watch it done for you.
 
 Or start from a preset: **Settings → Experience** sets session length, group
-size, speed and starting level for a Novice, Intermediate, Advanced or Expert
-in one go, and shows Custom once you make them your own.
+size and speed for a Novice, Intermediate, Advanced or Expert in one go —
+your level stays yours — and shows Custom once you change any of them.
+
+Practise words of your own: pick **Words** under Character set and paste a
+list, one word to a line, or load it from a text file. Each word is sent
+whole, and the ones holding the characters you miss come round more often.
+Until you add a list, Words sends the abbreviations and Q-codes of a contact.
 
 **[Try it in the browser →](https://mashu.github.io/dust/)**
 

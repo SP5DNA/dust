@@ -119,16 +119,15 @@ pub fn SettingsView(
     }
 }
 
-/// What a preset sets, in a line: "20 groups of 2–3 · 15–25 WPM · from level 8".
+/// What a preset sets, in a line: "20 groups of 2–3 · 15–25 WPM".
 fn experience_summary(experience: Experience) -> String {
     let (fewest, most) = experience.group_size();
     let (slowest, fastest) = experience.char_wpm();
     format!(
-        "{} groups of {} · {} WPM · from level {}",
+        "{} groups of {} · {} WPM",
         experience.groups(),
         range_label(f64::from(fewest), f64::from(most)),
         range_label(slowest, fastest),
-        experience.level()
     )
 }
 
@@ -140,16 +139,12 @@ fn ExperienceCard(settings: Signal<TrainingSettings>) -> Element {
     let on = use_memo(move || Experience::of(&settings.read()))();
     let note = match on {
         Some(experience) => experience_summary(experience),
-        None => "Sets session length, group size, speed and level to start from.".to_string(),
+        None => "Sets session length, group size and speed to start from.".to_string(),
     };
     rsx! {
         div { class: "card experience",
             CardHead { icon: IconName::Sparkle, title: "Experience", note,
-                // Drawn afresh when the preset the settings are on changes:
-                // a select keeps the option last picked in it over a change
-                // to which one is marked.
                 ExperiencePicker {
-                    key: "{on:?}",
                     on,
                     on_pick: move |experience: Experience| experience.apply(&mut settings.write()),
                 }
@@ -159,6 +154,10 @@ fn ExperienceCard(settings: Signal<TrainingSettings>) -> Element {
 }
 
 /// The presets as a dropdown: the platform's own picker, dressed as a pill.
+///
+/// The option marked is the one shown, even after another was picked by
+/// hand: the renderer sets `selected` on the option itself, not just in its
+/// markup, which a select stops reading once it has been picked from.
 #[component]
 fn ExperiencePicker(on: Option<Experience>, on_pick: EventHandler<Experience>) -> Element {
     rsx! {
@@ -192,6 +191,7 @@ fn ExperiencePicker(on: Option<Experience>, on_pick: EventHandler<Experience>) -
 #[derive(Clone, PartialEq)]
 struct SessionShape {
     callsigns: bool,
+    words: bool,
     /// The group size is one length, so there is nothing to adapt.
     one_size: bool,
     adaptive: bool,
@@ -213,6 +213,7 @@ impl SessionShape {
         let p = &settings.playback;
         Self {
             callsigns: settings.curriculum.char_set_mode == CharSetMode::Callsign,
+            words: settings.curriculum.char_set_mode == CharSetMode::Words,
             one_size: settings.curriculum.min_group_size >= settings.curriculum.max_group_size,
             adaptive: settings.curriculum.adaptive_group_size,
             adapts: adapts_group_size(settings),
@@ -252,7 +253,13 @@ fn SessionShapeCard(settings: Signal<TrainingSettings>) -> Element {
             }
             div { class: "field-grid",
                 NumberField {
-                    label: if s.callsigns { "Callsigns per session" } else { "Groups per session" },
+                    label: if s.callsigns {
+                        "Callsigns per session"
+                    } else if s.words {
+                        "Words per session"
+                    } else {
+                        "Groups per session"
+                    },
                     value: f64::from(s.num_groups),
                     min: f64::from(NUM_GROUPS_MIN),
                     max: f64::from(NUM_GROUPS_MAX),
@@ -281,8 +288,9 @@ fn SessionShapeCard(settings: Signal<TrainingSettings>) -> Element {
             p { class: "muted", style: "margin: 0; font-size: 0.8rem;",
                 "Time to read the last group before the next send. Zero keeps contest pace. Repeats of the same group stay a word space apart."
             }
-            // A callsign is as long as it is, so there is nothing to set.
-            if !s.callsigns {
+            // A callsign or a word is as long as it is, so there is nothing to
+            // set.
+            if !s.callsigns && !s.words {
                 SettingsRange {
                     settings,
                     which: RangeSetting::GroupSize,

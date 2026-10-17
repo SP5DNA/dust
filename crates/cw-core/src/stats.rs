@@ -7,8 +7,8 @@ use crate::morse::LCWO_SEQUENCE;
 use crate::pool::compute_char_pool;
 use crate::sampling::{
     CharSamplingConfig, CharSamplingState, adaptive_bounds, belief_for, beta_posterior_mean_error,
-    compute_raw_sampling_weights, config_from_settings, generate_callsign_group, group_size_bounds,
-    normalize_weights,
+    compute_raw_sampling_weights, config_from_settings, generate_callsign_group,
+    generate_word_group, group_size_bounds, normalize_weights,
 };
 use crate::session::SessionResult;
 use crate::settings::{CharSetMode, TrainingSettings};
@@ -308,7 +308,7 @@ fn bigram_grid(
 /// How often each character actually turns up, measured by running the real
 /// callsign generator rather than modelling it. Nothing else can answer this:
 /// the share of `Q` depends on the prefix tables and the tier, not on a weight.
-fn callsign_character_shares(
+fn whole_group_character_shares(
     settings: &TrainingSettings,
     state: &CharSamplingState,
     config: &CharSamplingConfig,
@@ -320,7 +320,11 @@ fn callsign_character_shares(
     let mut total = 0.0;
     let mut sampling = state.clone();
     for _ in 0..DRAWS {
-        let call = generate_callsign_group(settings, &mut sampling, config, rng);
+        let call = if settings.curriculum.char_set_mode == CharSetMode::Words {
+            generate_word_group(settings, &mut sampling, config, rng)
+        } else {
+            generate_callsign_group(settings, &mut sampling, config, rng)
+        };
         for ch in call.chars() {
             if let Some(count) = counts.get_mut(&ch) {
                 *count += 1.0;
@@ -343,10 +347,11 @@ pub fn sampling_rows(settings: &TrainingSettings, sessions: &[SessionResult]) ->
     let mut config = config_from_settings(settings);
     config.thompson_sampling = false;
     let mut rng = crate::rng::SplitMix64::default();
-    let probs = if settings.curriculum.char_set_mode == CharSetMode::Callsign {
-        // Callsigns are not drawn character by character, so a per-character
-        // weight would not describe them. Ask the real generator instead.
-        callsign_character_shares(settings, &state, &config, &pool, &mut rng)
+    let probs = if !settings.curriculum.char_set_mode.draws_characters() {
+        // Callsigns and words are not drawn character by character, so a
+        // per-character weight would not describe them. Ask the real
+        // generator instead.
+        whole_group_character_shares(settings, &state, &config, &pool, &mut rng)
     } else {
         let weights = compute_raw_sampling_weights(&pool, &state, &config, &mut rng);
         normalize_weights(&pool, &weights)
@@ -393,12 +398,13 @@ pub fn span_history(settings: &TrainingSettings, sessions: &[SessionResult]) -> 
 
 /// Each group length the next session can send: how likely it is to come
 /// next, and how often a group that long is copied whole. With adaptive group
-/// size off, every length is as likely as the next. Empty for callsigns.
+/// size off, every length is as likely as the next. Empty for callsigns and
+/// words, which are as long as they are.
 pub fn group_length_forecast(
     settings: &TrainingSettings,
     sessions: &[SessionResult],
 ) -> Vec<LengthForecast> {
-    if settings.curriculum.char_set_mode == CharSetMode::Callsign {
+    if !settings.curriculum.char_set_mode.draws_characters() {
         return Vec::new();
     }
     let (shortest, longest) = group_size_bounds(settings);

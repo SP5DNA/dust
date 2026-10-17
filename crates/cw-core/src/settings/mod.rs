@@ -122,6 +122,17 @@ pub enum CharSetMode {
     /// Realistic amateur callsigns instead of drawn groups. The characters are
     /// not what progresses here — the shape of the call is.
     Callsign,
+    /// Whole words from a list of the learner's own, each sent as a group.
+    /// There is no level to climb: the list is the curriculum.
+    Words,
+}
+
+impl CharSetMode {
+    /// Whether a group is drawn a character at a time, at a length the group
+    /// size gives it. Callsigns and words are not: each is as long as it is.
+    pub fn draws_characters(self) -> bool {
+        !matches!(self, Self::Callsign | Self::Words)
+    }
 }
 
 /// How much of what is unlocked a session draws from: all of it, or only
@@ -183,6 +194,9 @@ pub struct CurriculumSettings {
     /// field, the way digits have one, so switching modes never reinterprets a
     /// number that meant something else.
     pub callsign_level: u32,
+    /// The learner's own words, for Words: upper-cased, sendable, each once.
+    /// Empty sends the starter list.
+    pub word_list: Vec<String>,
     pub num_groups: u32,
     pub min_group_size: u32,
     pub max_group_size: u32,
@@ -207,6 +221,7 @@ impl Default for CurriculumSettings {
             sequence_is_custom: false,
             practice_window: PracticeWindow::All,
             callsign_level: LEVEL_MIN,
+            word_list: Vec::new(),
             num_groups: 20,
             min_group_size: 3,
             max_group_size: 5,

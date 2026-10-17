@@ -110,12 +110,13 @@ pub enum IconName {
     Trash,
     Chevron,
     Help,
+    Upload,
 }
 
 impl IconName {
     /// Every icon, for the test that draws them all.
     #[cfg(test)]
-    pub const ALL: [Self; 27] = [
+    pub const ALL: [Self; 28] = [
         Self::Signal,
         Self::Chart,
         Self::Sliders,
@@ -143,6 +144,7 @@ impl IconName {
         Self::Trash,
         Self::Chevron,
         Self::Help,
+        Self::Upload,
     ];
 
     /// The strokes, on a 24×24 grid.
@@ -229,6 +231,7 @@ impl IconName {
             Self::Flag => &["M5 21V4", "M5 5h13l-2.5 4L18 13H5"],
             // Points down, at what a closed disclosure holds.
             Self::Chevron => &["M6 9.5l6 6 6-6"],
+            Self::Upload => &["M12 15.5V4.5", "M7.5 9L12 4.5 16.5 9", "M4.5 15v4.5h15V15"],
             Self::Help => &[
                 "M21 12a9 9 0 11-18 0 9 9 0 0118 0z",
                 "M9.4 9.4a2.7 2.7 0 015.2 1c0 1.8-2.6 2.2-2.6 3.8",

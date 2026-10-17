@@ -1,10 +1,10 @@
 //! Starting points for four kinds of learner: how long a session is, how
-//! long its groups are, how fast they come, and the level to begin at.
+//! long its groups are, and how fast they come.
 //!
 //! A preset is applied once, through the same calls the settings screen
-//! makes, and leaves everything else as it was. The settings are on a preset
-//! for as long as its session, group size and speed are what it set: the
-//! level is where it starts, and the trainer moves it from there.
+//! makes, and leaves everything else as it was — the level among them, which
+//! is the learner's own. The settings are on a preset for exactly as long as
+//! everything it set is still what it set.
 
 use super::{RangeSetting, RangeValues, TrainingSettings};
 
@@ -78,17 +78,8 @@ impl Experience {
         }
     }
 
-    /// The level it starts at.
-    pub fn level(self) -> u32 {
-        match self {
-            Self::Novice => 1,
-            Self::Intermediate => 8,
-            Self::Advanced | Self::Expert => 14,
-        }
-    }
-
-    /// Put the settings on this preset: the session, the group size, the
-    /// speed and the level, the way the settings screen sets each.
+    /// Put the settings on this preset: the session, the group size and the
+    /// speed, the way the settings screen sets each.
     pub fn apply(self, settings: &mut TrainingSettings) {
         settings.curriculum.num_groups = GROUPS;
         let (fewest, most) = self.group_size();
@@ -100,10 +91,10 @@ impl Experience {
         );
         let (slowest, fastest) = self.char_wpm();
         put(settings, RangeSetting::CharWpm, slowest, fastest);
-        settings.set_active_level(self.level());
     }
 
-    /// The preset the settings are on, if they are on one.
+    /// The preset the settings are on: the one whose every setting they
+    /// still hold, if there is one.
     pub fn of(settings: &TrainingSettings) -> Option<Self> {
         Self::ALL.into_iter().find(|experience| {
             let (fewest, most) = experience.group_size();
@@ -144,6 +135,12 @@ mod tests {
     use super::Experience;
     use crate::settings::{CharSetMode, LevelAxis, RangeSetting, RangeValues, TrainingSettings};
 
+    /// One of each, as a learner would find them, to apply presets over.
+    fn levels_of(settings: &TrainingSettings) -> [u32; 3] {
+        [LevelAxis::Letters, LevelAxis::Digits, LevelAxis::Callsign]
+            .map(|axis| settings.level(axis))
+    }
+
     #[test]
     fn each_preset_sets_what_it_says() {
         let range = |min, max, linked| RangeValues { min, max, linked };
@@ -152,28 +149,24 @@ mod tests {
                 Experience::Novice,
                 range(2.0, 2.0, true),
                 range(15.0, 15.0, true),
-                1,
             ),
             (
                 Experience::Intermediate,
                 range(2.0, 3.0, false),
                 range(15.0, 25.0, false),
-                8,
             ),
             (
                 Experience::Advanced,
                 range(2.0, 5.0, false),
                 range(15.0, 25.0, false),
-                14,
             ),
             (
                 Experience::Expert,
                 range(3.0, 5.0, false),
                 range(15.0, 35.0, false),
-                14,
             ),
         ];
-        for (experience, size, speed, level) in cases {
+        for (experience, size, speed) in cases {
             let mut settings = TrainingSettings::default();
             experience.apply(&mut settings);
             assert_eq!(settings.curriculum.num_groups, 20, "{experience:?}");
@@ -187,7 +180,6 @@ mod tests {
                 speed,
                 "{experience:?}"
             );
-            assert_eq!(settings.active_level(), level, "{experience:?}");
             assert_eq!(Experience::of(&settings), Some(experience));
             assert_eq!(
                 settings.clone().clamp(),
@@ -207,40 +199,55 @@ mod tests {
                 from.apply(&mut settings);
                 to.apply(&mut settings);
                 assert_eq!(Experience::of(&settings), Some(to), "{from:?} to {to:?}");
-                assert_eq!(settings.active_level(), to.level(), "{from:?} to {to:?}");
             }
         }
     }
 
-    /// The rest of the settings are left as they were.
+    /// The rest of the settings are left as they were, and every level with
+    /// them: how far a learner has come is theirs, not a preset's.
     #[test]
     fn a_preset_leaves_everything_else_alone() {
         let mut settings = TrainingSettings::default();
         settings.curriculum.char_set_mode = CharSetMode::Koch;
+        settings.curriculum.level = 9;
         settings.curriculum.digits_level = 4;
+        settings.curriculum.callsign_level = 3;
         settings.band.side_tone_min = 550.0;
         settings.band.side_tone_max = 650.0;
         settings.auto_level.auto_adjust_above_threshold_count = 3;
         settings.playback.group_repeat_max = 2;
+        for experience in Experience::ALL {
+            let mut applied = settings.clone();
+            experience.apply(&mut applied);
+            assert_eq!(
+                levels_of(&applied),
+                [9, 4, 3],
+                "{experience:?} moved a level"
+            );
+        }
         let mut applied = settings.clone();
         Experience::Expert.apply(&mut applied);
         assert_eq!(applied.band, settings.band);
         assert_eq!(applied.auto_level, settings.auto_level);
         assert_eq!(applied.curriculum.char_set_mode, CharSetMode::Koch);
-        assert_eq!(applied.level(LevelAxis::Digits), 4);
         assert_eq!(applied.playback.group_repeat_max, 2);
         assert_eq!(applied.playback.keyer_wpm, settings.playback.keyer_wpm);
     }
 
-    /// The level is where a preset starts. The trainer moves it, and the
-    /// settings stay on the preset; a change to anything it set takes them
-    /// off it.
+    /// A change to anything a preset set takes the settings off it, however
+    /// small; a change to what it leaves alone, the level among them, does
+    /// not.
     #[test]
-    fn the_level_moving_keeps_the_preset_and_a_change_drops_it() {
+    fn a_change_to_what_a_preset_set_drops_it() {
         let mut settings = TrainingSettings::default();
         Experience::Novice.apply(&mut settings);
         settings.set_active_level(5);
+        settings.band.side_tone_max = 900.0;
         assert_eq!(Experience::of(&settings), Some(Experience::Novice));
+
+        let mut fixed_larger = settings.clone();
+        fixed_larger.set_range_min(RangeSetting::GroupSize, 3.0);
+        assert_eq!(Experience::of(&fixed_larger), None);
 
         let mut longer = settings.clone();
         longer.curriculum.num_groups = 30;

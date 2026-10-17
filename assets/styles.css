@@ -1287,6 +1287,40 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
 .ch.miss { background: transparent; color: var(--ink-dim); border-color: var(--line-strong); border-style: dashed; }
 .ch.sent-row { background: var(--surface-sunken); border-color: var(--line); color: var(--ink-soft); }
 
+/* A word list, one to a line, in the face the groups are drawn in. */
+.word-list {
+  width: 100%;
+  min-height: 9.5rem;
+  resize: vertical;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  padding: 0.6rem 0.75rem;
+  background: var(--surface-inset);
+  color: var(--ink);
+  font-size: 0.95rem;
+  line-height: 1.55;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  transition: border-color 0.15s var(--ease), box-shadow 0.15s var(--ease);
+}
+.word-list::placeholder { color: var(--ink-dim); letter-spacing: 0.02em; text-transform: none; }
+.word-list:focus { outline: none; border-color: var(--copper); box-shadow: 0 0 0 3px var(--copper-soft); }
+.word-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 0.45rem; }
+.word-report { margin: 0; font-size: 0.8rem; line-height: 1.4; color: var(--ink-dim); }
+.word-report:empty { display: none; }
+/* A file input looks different everywhere it is drawn, so it lies unseen
+   over a label dressed as a button: a press anywhere on it opens it. */
+.file-button { position: relative; overflow: hidden; cursor: pointer; }
+.file-button:focus-within { outline: 2px solid var(--copper); outline-offset: 2px; }
+.file-input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
+}
+
 /* Callsign examples. These are words, not single characters, so they size to
    their content — a `.ch` is a fixed 21px box and a call would spill out of it
    and across its neighbours. */
@@ -1838,6 +1872,7 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
   .pill, .seg { min-height: 38px; }
   .field input, .field select, .stepper input, .answer { font-size: 16px; min-height: 44px; }
   .select { font-size: 16px; min-height: 40px; }
+  .word-list { font-size: 16px; }
   .kpi .value { font-size: 1.35rem; }
   .heatmap-day-label { font-size: 10px; }
   .score-ring { width: 96px; height: 96px; }

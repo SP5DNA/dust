@@ -1576,6 +1576,16 @@ mod ui_tests {
     }
 
     #[test]
+    fn nothing_on_the_settings_screen_can_break_a_word_list() {
+        run(|| async {
+            let mut settings = test_settings();
+            settings.curriculum.char_set_mode = CharSetMode::Words;
+            settings.curriculum.word_list = vec!["PARIS".into(), "73".into()];
+            sweep("nav-settings", settings).await;
+        });
+    }
+
+    #[test]
     fn nothing_on_the_settings_screen_can_break_callsign_mode() {
         run(|| async {
             let mut settings = test_settings();
