@@ -401,14 +401,17 @@ fn chosen_experience(ui: &Ui) -> String {
 }
 
 /// Choosing an experience sets the trainer up for it, through the same
-/// controls the rest of the page shows: their values follow at once.
+/// controls the rest of the page shows: their values follow at once. The
+/// level is the learner's own, and stays where it was.
 #[test]
 fn choosing_an_experience_sets_the_trainer_up_for_it() {
     run(|| async {
-        let (mut ui, _recorder) = Ui::app_with_settings(test_settings());
+        let mut settings = test_settings();
+        settings.curriculum.level = 6;
+        let (mut ui, _recorder) = Ui::app_with_settings(settings);
         ui.click("nav-settings");
         assert_eq!(chosen_experience(&ui), "Custom");
-        assert!(ui.has("Sets session length, group size, speed and level to start from."));
+        assert!(ui.has("Sets session length, group size and speed to start from."));
 
         ui.commit("select-experience", "intermediate");
         assert_eq!(chosen_experience(&ui), "Intermediate");
@@ -416,29 +419,30 @@ fn choosing_an_experience_sets_the_trainer_up_for_it() {
             !experience_picker(&ui).contains(">Custom<"),
             "Custom is offered over a preset"
         );
-        assert!(
-            ui.has("20 groups of 2–3 · 15–25 WPM · from level 8"),
-            "{}",
-            ui.html()
-        );
+        assert!(ui.has("20 groups of 2–3 · 15–25 WPM"), "{}", ui.html());
         assert_eq!(value_of(&ui, "from-group-size"), "2");
         assert_eq!(value_of(&ui, "to-group-size"), "3");
         assert_eq!(value_of(&ui, "from-character-speed"), "15");
         assert_eq!(value_of(&ui, "to-character-speed"), "25");
         assert_eq!(value_of(&ui, "number-groups-per-session"), "20");
-        assert_eq!(value_of(&ui, "field-level"), "8");
+        assert_eq!(
+            value_of(&ui, "field-level"),
+            "6",
+            "a preset moved the level"
+        );
         let stored = ui.stored_settings().await;
         assert_eq!(Experience::of(&stored), Some(Experience::Intermediate));
 
         // A fixed size and speed show as one value each.
         ui.commit("select-experience", "novice");
-        assert!(
-            ui.has("20 groups of 2 · 15 WPM · from level 1"),
-            "{}",
-            ui.html()
-        );
+        assert!(ui.has("20 groups of 2 · 15 WPM"), "{}", ui.html());
         assert_eq!(value_of(&ui, "fixed-group-size"), "2");
         assert_eq!(value_of(&ui, "fixed-character-speed"), "15");
+        assert_eq!(
+            value_of(&ui, "field-level"),
+            "6",
+            "a preset moved the level"
+        );
         let stored = ui.stored_settings().await;
         assert_eq!(
             stored.range(RangeSetting::CharWpm),
@@ -451,25 +455,58 @@ fn choosing_an_experience_sets_the_trainer_up_for_it() {
     });
 }
 
-/// A change to anything a preset set makes the settings your own; the
-/// level moving does not, as a preset only starts it.
+/// Every way of changing what a preset set makes the settings your own:
+/// typing, stepping, fixing or opening a range, putting a card back to its
+/// defaults. Changing what it leaves alone, the level among them, does not.
 #[test]
-fn a_change_to_what_a_preset_set_shows_the_settings_as_your_own() {
+fn any_change_to_what_a_preset_set_shows_the_settings_as_your_own() {
     run(|| async {
+        let edits: [(&str, &str, Option<&str>); 11] = [
+            ("intermediate", "number-groups-per-session", Some("21")),
+            ("intermediate", "more-number-groups-per-session", None),
+            ("intermediate", "from-group-size", Some("1")),
+            ("intermediate", "to-group-size", Some("4")),
+            ("intermediate", "link-group-size", None),
+            ("intermediate", "from-character-speed", Some("16")),
+            ("expert", "to-character-speed", Some("30")),
+            ("expert", "less-to-character-speed", None),
+            ("expert", "link-character-speed", None),
+            ("novice", "link-group-size", None),
+            ("novice", "reset-speed", None),
+        ];
+        for (preset, control, typed) in edits {
+            let (mut ui, _recorder) = Ui::app_with_settings(test_settings());
+            ui.click("nav-settings");
+            ui.commit("select-experience", preset);
+            assert_ne!(chosen_experience(&ui), "Custom", "{preset}");
+            match typed {
+                Some(value) => ui.commit(control, value),
+                None => ui.click(control),
+            }
+            assert_eq!(
+                chosen_experience(&ui),
+                "Custom",
+                "{control} on {preset} left the preset chosen"
+            );
+            assert!(
+                ui.has("Sets session length, group size and speed to start from."),
+                "{control} on {preset}"
+            );
+        }
+
         let (mut ui, _recorder) = Ui::app_with_settings(test_settings());
         ui.click("nav-settings");
         ui.commit("select-experience", "expert");
-        assert_eq!(chosen_experience(&ui), "Expert");
         ui.commit("field-level", "20");
+        ui.commit("number-pause-after-each-group", "2");
         assert_eq!(
             chosen_experience(&ui),
             "Expert",
-            "the level took it off the preset"
+            "a setting it left alone took it off"
         );
+        // Picked again, it puts back what was changed.
         ui.commit("number-groups-per-session", "30");
         assert_eq!(chosen_experience(&ui), "Custom");
-        assert!(ui.has("Sets session length, group size, speed and level to start from."));
-        // And a preset picked again puts it back.
         ui.commit("select-experience", "expert");
         assert_eq!(chosen_experience(&ui), "Expert");
         assert_eq!(value_of(&ui, "number-groups-per-session"), "20");
