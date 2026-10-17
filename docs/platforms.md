@@ -162,6 +162,13 @@ and covers the audio-session code and cpal's CoreAudio backend.
 are unsigned (right-click → Open the first time). Windows needs WebView2,
 already present on typical Windows 10/11.
 
+**Launcher icon.** GNOME looks the icon up in the hicolor theme, and only in
+the sizes that theme lists. [`assets/icon.png`](../assets/icon.png) is scaled
+into those sizes under [`assets/linux/`](../assets/linux) by
+`scripts/render-linux-icons.py`, and `dx bundle` installs them as `dust` next
+to `dust.desktop`. Regenerate them after changing the master. The same master
+is the window icon.
+
 ### Copying while you work in other programs
 
 Listen → **Stream groups** keeps sending groups with the window minimised or
