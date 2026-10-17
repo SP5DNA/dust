@@ -47,6 +47,16 @@ fn level_reading(settings: &TrainingSettings) -> LevelReading {
         CharSetMode::Koch | CharSetMode::Custom => {
             ("Level", letters.to_string(), format!("Level {letters}"))
         }
+        // A word list has no level: what it has is words.
+        CharSetMode::Words => {
+            let count = settings.words().len();
+            let whose = if settings.has_own_words() {
+                "Your words"
+            } else {
+                "Starter words"
+            };
+            ("Words", count.to_string(), format!("{whose} · {count}"))
+        }
     };
     LevelReading {
         summary,
@@ -86,6 +96,7 @@ pub fn Home(
     let chars = compute_char_pool(&settings);
     let newest = newest_unlocked(&settings);
     let callsigns = settings.curriculum.char_set_mode == CharSetMode::Callsign;
+    let words = settings.curriculum.char_set_mode == CharSetMode::Words;
     let speed = range_label(
         settings.playback.char_wpm_min,
         settings.playback.char_wpm_max,
@@ -143,10 +154,10 @@ pub fn Home(
                         span { class: "spec-label", "WPM" }
                     }
                     // A callsign is as long as it is: there is no size to give.
-                    if callsigns {
+                    if callsigns || words {
                         div {
                             span { class: "spec-value", "{settings.curriculum.num_groups}" }
-                            span { class: "spec-label", "Calls" }
+                            span { class: "spec-label", if callsigns { "Calls" } else { "Words" } }
                         }
                     } else {
                         div {
@@ -199,7 +210,11 @@ pub fn Home(
                         note: format!("{pool_len} characters are in the pool right now."),
                     }
                     p { class: "muted", style: "margin: 0;",
-                        "Type what you hear — the trainer scores every character, then moves the level for you."
+                        if words {
+                            "Type the word you hear — the trainer scores every character of it."
+                        } else {
+                            "Type what you hear — the trainer scores every character, then moves the level for you."
+                        }
                     }
                 }
             }

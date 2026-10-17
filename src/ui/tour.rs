@@ -104,12 +104,13 @@ enum Move {
     DownAfter(u32),
 }
 
-/// Whether the character set is learnt in an unlock order. Digits and
-/// callsigns have none, and the settings screen offers none for them.
+/// Whether the character set is learnt in an unlock order. Digits,
+/// callsigns and words have none, and the settings screen offers none for
+/// them.
 fn has_unlock_order(settings: &TrainingSettings) -> bool {
-    !matches!(
+    matches!(
         settings.curriculum.char_set_mode,
-        CharSetMode::Digits | CharSetMode::Callsign
+        CharSetMode::Koch | CharSetMode::Mixed | CharSetMode::Custom
     )
 }
 

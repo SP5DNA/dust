@@ -26,6 +26,7 @@ impl CountersKey {
             ),
             CharSetMode::Digits => format!("digits_{level}_{fingerprint}"),
             CharSetMode::Callsign => format!("callsign_{level}"),
+            CharSetMode::Words => format!("words_{level}"),
             CharSetMode::Custom => format!("custom_{level}_{fingerprint}"),
             CharSetMode::Koch => format!("koch_{level}_{fingerprint}"),
         })
@@ -221,7 +222,10 @@ pub fn auto_level_progress(
     settings: &TrainingSettings,
     counters: AutoLevelCounters,
 ) -> Option<AutoLevelProgress> {
-    if !settings.auto_level.auto_adjust_level {
+    // Off, or a word list, which has no level to move.
+    if !settings.auto_level.auto_adjust_level
+        || settings.curriculum.char_set_mode == CharSetMode::Words
+    {
         return None;
     }
     let mixed = settings.curriculum.char_set_mode == CharSetMode::Mixed;
@@ -523,6 +527,23 @@ mod tests {
         apply_auto_level(&mut digits, &change);
         assert_eq!(digits.curriculum.digits_level, 4);
         assert_eq!(digits.curriculum.level, 1);
+    }
+
+    /// A word list has no level to climb: the best run there is moves
+    /// nothing, the worst neither, no other level is touched, and there is
+    /// no run to show.
+    #[test]
+    fn a_word_run_moves_no_level() {
+        let mut settings = koch(12);
+        settings.curriculum.char_set_mode = CharSetMode::Words;
+        for accuracy in [1.0, 0.0] {
+            let mut counters = Default::default();
+            for _ in 0..5 {
+                assert!(evaluate_auto_level(&after(accuracy), &settings, &mut counters).is_none());
+            }
+        }
+        assert_eq!(settings.curriculum.level, 12);
+        assert!(auto_level_progress(&settings, Default::default()).is_none());
     }
 
     #[test]

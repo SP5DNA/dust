@@ -19,13 +19,16 @@ pub enum LevelAxis {
     /// The callsign tier. Its characters do not unlock one by one; the shape
     /// of the call is what climbs.
     Callsign,
+    /// A word list. It has one level: every word is in from the start, and
+    /// nothing climbs.
+    Words,
 }
 
 impl LevelAxis {
     /// The bottom of the axis: where every alphabet and every tier starts.
     pub fn min_level(self) -> u32 {
         match self {
-            Self::Letters | Self::Digits => LEVEL_MIN,
+            Self::Letters | Self::Digits | Self::Words => LEVEL_MIN,
             Self::Callsign => CALLSIGN_TIER_MIN,
         }
     }
@@ -47,6 +50,7 @@ impl CharSetMode {
         match self {
             Self::Digits => LevelAxis::Digits,
             Self::Callsign => LevelAxis::Callsign,
+            Self::Words => LevelAxis::Words,
             Self::Koch | Self::Custom | Self::Mixed => LevelAxis::Letters,
         }
     }
@@ -105,6 +109,7 @@ impl TrainingSettings {
             LevelAxis::Letters => self.progress_alphabet(),
             LevelAxis::Digits => DIGITS.to_vec(),
             LevelAxis::Callsign => callsign_pool(self.level(LevelAxis::Callsign)),
+            LevelAxis::Words => self.word_characters(),
         }
     }
 
@@ -114,6 +119,7 @@ impl TrainingSettings {
             LevelAxis::Letters => max_level_for_len(self.progress_alphabet().len()),
             LevelAxis::Digits => MAX_DIGITS_LEVEL,
             LevelAxis::Callsign => CALLSIGN_TIER_MAX,
+            LevelAxis::Words => LEVEL_MIN,
         }
     }
 
@@ -125,6 +131,7 @@ impl TrainingSettings {
             LevelAxis::Letters => self.curriculum.level,
             LevelAxis::Digits => self.curriculum.digits_level,
             LevelAxis::Callsign => self.curriculum.callsign_level,
+            LevelAxis::Words => LEVEL_MIN,
         };
         let min = axis.min_level();
         stored.clamp(min, self.max_level(axis).max(min))
@@ -135,6 +142,8 @@ impl TrainingSettings {
             LevelAxis::Letters => self.curriculum.level = value,
             LevelAxis::Digits => self.curriculum.digits_level = value,
             LevelAxis::Callsign => self.curriculum.callsign_level = value,
+            // A word list has no level to keep.
+            LevelAxis::Words => {}
         }
     }
 
@@ -169,6 +178,9 @@ impl TrainingSettings {
             // One fingerprint for every tier: the characters do not change as
             // you climb, so what you learned at tier 1 still counts at tier 6.
             LevelAxis::Callsign => "callsign".to_string(),
+            // One for every list, the same way: what was learned of a
+            // character in one list still counts in the next.
+            LevelAxis::Words => "words".to_string(),
             axis => self.alphabet(axis).into_iter().collect(),
         }
     }

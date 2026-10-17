@@ -697,6 +697,28 @@ impl Ui {
         self.fire("change", id, Self::form(value));
     }
 
+    /// Choose a file called `name` in the file input with this id, the way
+    /// the platform's picker hands one over. `size` is what the file says it
+    /// is, which a test can make larger than what it holds.
+    pub fn choose_file(&mut self, id: &str, name: &str, contents: &str, size: u64) {
+        let file = dioxus::html::SerializedFileData {
+            path: std::path::PathBuf::from(name),
+            size,
+            last_modified: 0,
+            content_type: Some("text/plain".to_string()),
+            contents: Some(contents.as_bytes().to_vec().into()),
+        };
+        let form = dioxus::html::SerializedFormData::new(
+            String::new(),
+            vec![dioxus::html::SerializedFormObject {
+                key: "file".to_string(),
+                text: None,
+                file: Some(file),
+            }],
+        );
+        self.fire("change", id, Box::new(form));
+    }
+
     pub fn press_enter(&mut self, id: &str) {
         self.press_key(id, Key::Enter, dioxus::prelude::Code::Enter);
     }

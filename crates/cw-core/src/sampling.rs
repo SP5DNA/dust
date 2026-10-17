@@ -125,11 +125,12 @@ pub fn adapts_group_size(settings: &TrainingSettings) -> bool {
 
 /// The range adaptive group size draws within, when it has one to draw in:
 /// it is switched on, there is more than one length to choose from, and the
-/// groups are not callsigns, which are as long as they are.
+/// groups are drawn a character at a time: callsigns and words are as long as
+/// they are.
 pub(crate) fn adaptive_bounds(settings: &TrainingSettings) -> Option<(usize, usize)> {
     let (shortest, longest) = group_size_bounds(settings);
     (settings.curriculum.adaptive_group_size
-        && settings.curriculum.char_set_mode != CharSetMode::Callsign
+        && settings.curriculum.char_set_mode.draws_characters()
         && shortest < longest)
         .then_some((shortest, longest))
 }
@@ -358,30 +359,68 @@ pub(crate) fn generate_callsign_group(
     rng: &mut impl Rng,
 ) -> String {
     let tier = settings.level(LevelAxis::Callsign);
+    let best = most_wanted(settings, state, config, rng, CALLSIGN_CANDIDATES, |rng| {
+        generate_callsign(tier, rng)
+    });
+    state.count_sent(&best);
+    best
+}
+
+/// How many words of the list are weighed against each other before one is
+/// sent: the same balance as for callsigns, between leaning on the weak
+/// characters and keeping the draw from the whole list.
+const WORD_CANDIDATES: usize = 6;
+
+/// A word from the list, chosen the way a callsign is: of a few drawn at
+/// random, the one whose characters the sampler wants most.
+pub(crate) fn generate_word_group(
+    settings: &TrainingSettings,
+    state: &mut CharSamplingState,
+    config: &CharSamplingConfig,
+    rng: &mut impl Rng,
+) -> String {
+    let words = settings.words();
+    let best = most_wanted(settings, state, config, rng, WORD_CANDIDATES, |rng| {
+        words[rng.usize_in(0, words.len() - 1)].to_string()
+    });
+    state.count_sent(&best);
+    best
+}
+
+/// Of `candidates` groups `draw` makes, the one whose characters the sampler
+/// wants most, scored with [`compute_raw_sampling_weights`] so the
+/// error-weight and coverage settings mean what they mean everywhere else.
+/// When it wants them all alike, the first wins, and the draw is plainly
+/// random.
+fn most_wanted<R: Rng>(
+    settings: &TrainingSettings,
+    state: &CharSamplingState,
+    config: &CharSamplingConfig,
+    rng: &mut R,
+    candidates: usize,
+    mut draw: impl FnMut(&mut R) -> String,
+) -> String {
     let pool = compute_char_pool(settings);
     let weights = compute_raw_sampling_weights(&pool, state, config, rng);
-    let appetite = |call: &str| {
+    let appetite = |group: &str| {
         let mut total = 0.0;
         let mut count = 0.0;
-        for ch in call.chars() {
+        for ch in group.chars() {
             total += weights.get(&ch).copied().unwrap_or(1.0);
             count += 1.0;
         }
         if count > 0.0 { total / count } else { 0.0 }
     };
-
-    let mut best = generate_callsign(tier, rng);
+    let mut best = draw(rng);
     let mut best_appetite = appetite(&best);
-    for _ in 1..CALLSIGN_CANDIDATES {
-        let candidate = generate_callsign(tier, rng);
+    for _ in 1..candidates {
+        let candidate = draw(rng);
         let candidate_appetite = appetite(&candidate);
         if candidate_appetite > best_appetite {
             best = candidate;
             best_appetite = candidate_appetite;
         }
     }
-
-    state.count_sent(&best);
     best
 }
 
@@ -418,11 +457,13 @@ fn generate_group(
     length: Option<usize>,
     rng: &mut impl Rng,
 ) -> String {
-    // A callsign is a group like any other once it exists — it is only built
-    // differently. This is the single place the two modes part company.
+    // A callsign or a word is a group like any other once it exists — it is
+    // only built differently. This is the single place the modes part company.
     let config = config_from_settings(settings);
-    if settings.curriculum.char_set_mode == CharSetMode::Callsign {
-        return generate_callsign_group(settings, state, &config, rng);
+    match settings.curriculum.char_set_mode {
+        CharSetMode::Callsign => return generate_callsign_group(settings, state, &config, rng),
+        CharSetMode::Words => return generate_word_group(settings, state, &config, rng),
+        CharSetMode::Koch | CharSetMode::Digits | CharSetMode::Custom | CharSetMode::Mixed => {}
     }
     let pool = compute_char_pool(settings);
     let group_size = length.unwrap_or_else(|| {

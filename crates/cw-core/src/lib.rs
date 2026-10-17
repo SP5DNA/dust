@@ -28,6 +28,7 @@ mod span;
 mod stats;
 mod streak;
 mod timing;
+mod words;
 
 pub use alignment::{AlignmentPair, CopyTally, LetterAccuracy, align_group};
 pub use auto_level::{
@@ -78,3 +79,4 @@ pub use timing::{
     ToneEvent, Transmission, compute_after_group_gap_ms, compute_group_gap_for_wpm, envelope_shape,
     plan_morse_playback_for, plan_transmission, resolve_station,
 };
+pub use words::{STARTER_WORDS, WORD_LIST_MAX, WordList, clean_word};

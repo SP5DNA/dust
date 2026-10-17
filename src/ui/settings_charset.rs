@@ -1,11 +1,17 @@
 use cw_core::{
-    CALLSIGN_TIER_MAX, CharSetMode, LevelAxis, MAX_DIGITS_LEVEL, PracticeWindow, SEQUENCE_PRESETS,
-    SequenceChoice, SettingsSection, TrainingSettings, compute_char_pool, current_practice_window,
-    tier_examples, unlocked_practice_count,
+    CALLSIGN_TIER_MAX, CharSetMode, GROUP_SIZE_MAX, LevelAxis, MAX_DIGITS_LEVEL, PracticeWindow,
+    SEQUENCE_PRESETS, STARTER_WORDS, SequenceChoice, SettingsSection, TrainingSettings,
+    WORD_LIST_MAX, WordList, compute_char_pool, current_practice_window, tier_examples,
+    unlocked_practice_count,
 };
+use dioxus::html::FileData;
 use dioxus::prelude::*;
 
-use crate::ui::widgets::{CardHead, IconName, NumberField, SectionReset, Seg, control_id};
+use crate::ui::widgets::{CardHead, Icon, IconName, NumberField, SectionReset, Seg, control_id};
+
+/// The largest file read as a word list. The longest list kept is a few
+/// tens of kilobytes; anything near this is not a word list.
+const WORD_FILE_MAX_BYTES: u64 = 1_000_000;
 
 /// A list of characters, typed out.
 ///
@@ -40,12 +46,13 @@ fn AlphabetField(label: &'static str, value: String, on_commit: EventHandler<Str
 }
 
 /// The character sets, in the order the control offers them.
-const CHAR_SET_MODES: [(CharSetMode, &str); 5] = [
+const CHAR_SET_MODES: [(CharSetMode, &str); 6] = [
     (CharSetMode::Koch, "Koch"),
     (CharSetMode::Digits, "Digits"),
     (CharSetMode::Mixed, "Mixed"),
     (CharSetMode::Custom, "Custom"),
     (CharSetMode::Callsign, "Callsigns"),
+    (CharSetMode::Words, "Words"),
 ];
 
 /// The practice windows, and how many characters each needs unlocked before
@@ -73,6 +80,9 @@ struct Charset {
     window: PracticeWindow,
     pool: Vec<char>,
     tier_examples: Vec<String>,
+    /// The words Words sends, and whether they are the learner's own.
+    words: Vec<String>,
+    own_words: bool,
 }
 
 impl Charset {
@@ -96,6 +106,8 @@ impl Charset {
             } else {
                 Vec::new()
             },
+            words: settings.words().into_iter().map(str::to_string).collect(),
+            own_words: settings.has_own_words(),
         }
     }
 
@@ -106,9 +118,13 @@ impl Charset {
             CharSetMode::Mixed => "Letters and digits together",
             CharSetMode::Custom => "Your own character list",
             CharSetMode::Callsign => "Real callsigns, off the air",
+            CharSetMode::Words if self.own_words => "Your own words, sent whole",
+            CharSetMode::Words => "Starter words, sent whole",
         };
         if self.mode == CharSetMode::Callsign {
             format!("{what} · tier {} of {CALLSIGN_TIER_MAX}", self.level)
+        } else if self.mode == CharSetMode::Words {
+            format!("{what} · {}", count_words(self.words.len()))
         } else {
             format!("{what} · {} in play", self.unlocked)
         }
@@ -120,6 +136,11 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
     let charset = use_memo(move || Charset::of(&settings.read()));
     let c = charset.read();
     let callsigns = c.mode == CharSetMode::Callsign;
+    let words = c.mode == CharSetMode::Words;
+    let has_unlock_order = matches!(
+        c.mode,
+        CharSetMode::Koch | CharSetMode::Mixed | CharSetMode::Custom
+    );
     rsx! {
         div { class: "card stack-sm",
             CardHead { icon: IconName::Letters, title: "Character set", note: c.note(),
@@ -139,7 +160,7 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
                     }
                 }
             }
-            if c.mode != CharSetMode::Digits && !callsigns {
+            if has_unlock_order {
                 div { class: "eyebrow", "Unlock order" }
                 div { class: "mode-pills",
                     for choice in SEQUENCE_PRESETS
@@ -161,6 +182,8 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
                     on_commit: move |typed: String| settings.write().type_sequence(&typed),
                 }
             }
+            // A word list has no level: every word is in from the start.
+            if !words {
             div { class: "field-grid",
                 NumberField {
                     label: if callsigns {
@@ -187,6 +210,7 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
                     }
                 }
             }
+            }
             if c.mode == CharSetMode::Mixed {
                 NumberField {
                     label: "Share of letters",
@@ -209,7 +233,13 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
                 }
                 p { class: "muted", style: "margin: 0;", "Level unlocks this list from the start. Leave it empty to use the sequence above." }
             }
-            if callsigns {
+            if words {
+                WordListEditor {
+                    settings,
+                    words: c.words.clone(),
+                    own: c.own_words,
+                }
+            } else if callsigns {
                 div { class: "eyebrow", "What this tier sends" }
                 div { class: "calls",
                     for call in c.tier_examples.iter() {
@@ -240,5 +270,210 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
                 }
             }
         }
+    }
+}
+
+/// "1 word", "412 words".
+fn count_words(count: usize) -> String {
+    if count == 1 {
+        "1 word".to_string()
+    } else {
+        format!("{count} words")
+    }
+}
+
+/// What reading a list came to, in a line: how many words it holds, and why
+/// any were left out. `source` names the file it came from, if one did.
+fn list_report(list: &WordList, source: Option<&str>) -> String {
+    let mut parts = vec![count_words(list.words.len())];
+    if list.unsendable > 0 {
+        parts.push(format!(
+            "{} left out: a character Morse has no code for, or longer than {GROUP_SIZE_MAX}",
+            list.unsendable
+        ));
+    }
+    if list.repeated > 0 {
+        parts.push(format!("{} repeated", list.repeated));
+    }
+    if list.over > 0 {
+        parts.push(format!(
+            "{} past the {WORD_LIST_MAX} a list keeps",
+            list.over
+        ));
+    }
+    let report = parts.join(" · ");
+    match source {
+        Some(name) => format!("{name}: {report}"),
+        None => report,
+    }
+}
+
+/// Make `list` the words, and say what reading it came to. A list that kept
+/// nothing leaves the words as they were, unless it was meant to be empty:
+/// emptying the box goes back to the starter words.
+fn take_list(
+    mut settings: Signal<TrainingSettings>,
+    mut report: Signal<Option<String>>,
+    text: &str,
+    source: Option<&str>,
+) {
+    let list = WordList::read(text);
+    if list.words.is_empty() && list.left_out() == 0 {
+        settings.write().curriculum.word_list.clear();
+        report.set(Some("Back to the starter words.".to_string()));
+        return;
+    }
+    if list.words.is_empty() {
+        let what = source.unwrap_or("The list");
+        report.set(Some(format!(
+            "{what}: no word in it can be sent, so the words are as they were."
+        )));
+        return;
+    }
+    report.set(Some(list_report(&list, source)));
+    settings.write().curriculum.word_list = list.words;
+}
+
+/// Read a chosen file as a word list.
+async fn load_word_file(
+    settings: Signal<TrainingSettings>,
+    mut report: Signal<Option<String>>,
+    file: FileData,
+) {
+    let name = file.name();
+    if file.size() > WORD_FILE_MAX_BYTES {
+        report.set(Some(format!(
+            "{name} is over a megabyte, far more than a word list: nothing was read."
+        )));
+        return;
+    }
+    match file.read_string().await {
+        Ok(text) => take_list(settings, report, &text, Some(&name)),
+        Err(_) => report.set(Some(format!(
+            "{name} could not be read as text: is it a plain .txt file?"
+        ))),
+    }
+}
+
+/// The words Words sends: typed or pasted in, a word to a line, or loaded
+/// from a text file.
+///
+/// What is typed stays as typed until it is committed, on leaving the box,
+/// and is then read as a list: upper-cased, each word once, what cannot be
+/// sent left out and said. A key does not redraw the box — on the desktop
+/// and phone builds a redraw reaches it a frame late, over what was typed
+/// since — so the count of what is being typed is drawn beside it instead.
+#[component]
+fn WordListEditor(settings: Signal<TrainingSettings>, words: Vec<String>, own: bool) -> Element {
+    // The text being typed, until it is committed. Only the count reads it.
+    let mut draft = use_signal(|| None::<String>);
+    let report = use_signal(|| None::<String>);
+    // Moved on by every commit, so the box shows the list again afterwards
+    // even when the list did not change: text that kept nothing goes.
+    let mut repaint = use_signal(|| 0u64);
+    let _ = repaint.read();
+    let mut settle = move || {
+        draft.set(None);
+        repaint += 1;
+    };
+    // Moved on by every file chosen, to draw a fresh file input: the same
+    // file chosen again in the old one would change nothing, and not load.
+    let mut picked = use_signal(|| 0u64);
+    let shown = draft
+        .peek()
+        .clone()
+        .unwrap_or_else(|| if own { words.join("\n") } else { String::new() });
+    rsx! {
+        div { class: "eyebrow", "Your words" }
+        textarea {
+            id: control_id("field", "word list"),
+            class: "group-text word-list",
+            rows: "7",
+            value: "{shown}",
+            placeholder: "Paste or type your words here, one to a line",
+            aria_label: "Your words, one to a line",
+            autocapitalize: "characters",
+            spellcheck: false,
+            oninput: move |e| draft.set(Some(e.value())),
+            onchange: move |e| {
+                settle();
+                take_list(settings, report, &e.value(), None);
+            },
+        }
+        div { class: "word-tools",
+            label { class: "btn btn-secondary btn-sm file-button",
+                for fresh in [picked()] {
+                    input {
+                        key: "{fresh}",
+                        id: control_id("file", "word list"),
+                        class: "file-input",
+                        r#type: "file",
+                        accept: ".txt,text/plain",
+                        onchange: move |e| {
+                            if let Some(file) = e.files().into_iter().next() {
+                                settle();
+                                picked += 1;
+                                spawn(load_word_file(settings, report, file));
+                            }
+                        },
+                    }
+                }
+                Icon { name: IconName::Upload }
+                "Load a text file"
+            }
+            if own {
+                button {
+                    id: control_id("btn", "starter words"),
+                    class: "btn btn-secondary btn-sm",
+                    r#type: "button",
+                    title: "Send the starter words instead of yours",
+                    onclick: move |_| {
+                        settle();
+                        take_list(settings, report, "", None);
+                    },
+                    Icon { name: IconName::Reset }
+                    "Starter words"
+                }
+            }
+        }
+        WordCount { draft, report, count: words.len(), own }
+        if !own {
+            p { class: "muted", style: "margin: 0;",
+                "Until you add your own, Words sends a starter list of the abbreviations and Q-codes a contact is made of:"
+            }
+            div { class: "calls",
+                for word in STARTER_WORDS.iter() {
+                    span { class: "call", "{word}" }
+                }
+            }
+        }
+    }
+}
+
+/// The line under the word box: what is being typed comes to, while it is,
+/// and otherwise what the last list read came to, or how many words there
+/// are.
+#[component]
+fn WordCount(
+    draft: Signal<Option<String>>,
+    report: Signal<Option<String>>,
+    count: usize,
+    own: bool,
+) -> Element {
+    let line = match draft() {
+        Some(text) => format!(
+            "{} — taken when you leave the box",
+            list_report(&WordList::read(&text), None)
+        ),
+        None => report().unwrap_or_else(|| {
+            if own {
+                count_words(count)
+            } else {
+                String::new()
+            }
+        }),
+    };
+    rsx! {
+        p { class: "word-report", aria_live: "polite", "{line}" }
     }
 }

@@ -6,11 +6,11 @@ use crate::settings::{
 };
 
 /// What `axis` has unlocked so far. A callsign tier is all of its
-/// characters at once: there is no prefix to unlock.
+/// characters at once, and so is a word list: there is no prefix to unlock.
 fn unlocked(settings: &TrainingSettings, axis: LevelAxis) -> Vec<char> {
     let alphabet = settings.alphabet(axis);
     match axis {
-        LevelAxis::Callsign => alphabet,
+        LevelAxis::Callsign | LevelAxis::Words => alphabet,
         LevelAxis::Letters | LevelAxis::Digits => unlocked_prefix(&alphabet, settings.level(axis)),
     }
 }
@@ -56,13 +56,14 @@ fn window_len(unlocked: usize, window: PracticeWindow) -> usize {
 
 /// The characters a group is drawn from: what is unlocked, narrowed to the
 /// practice window — each axis by its own length, so Mixed's newest three are
-/// three letters and three digits. A callsign tier is never narrowed.
+/// three letters and three digits. A callsign tier is never narrowed, nor
+/// are the characters of a word list.
 pub fn compute_char_pool(settings: &TrainingSettings) -> Vec<char> {
-    let callsigns = settings.curriculum.char_set_mode == CharSetMode::Callsign;
+    let whole = !settings.curriculum.char_set_mode.draws_characters();
     let window = settings.curriculum.practice_window;
     let mut pool: Vec<char> = Vec::new();
     for chars in unlocked_axes(settings) {
-        let keep = if callsigns {
+        let keep = if whole {
             chars.len()
         } else {
             window_len(chars.len(), window)
@@ -100,12 +101,12 @@ pub fn current_practice_window(settings: &TrainingSettings) -> PracticeWindow {
 
 /// The character the latest level brought in: the one the learner has had
 /// least time with. Mixed answers for the axis that moved last, while it is
-/// being practised. A callsign tier brings in a shape, not a character, so
-/// it has none.
+/// being practised. A callsign tier brings in a shape, not a character, and
+/// a word list brings in nothing at all, so neither has one.
 pub fn newest_unlocked(settings: &TrainingSettings) -> Option<char> {
     let newest = |axis: LevelAxis| unlocked(settings, axis).last().copied();
     match settings.curriculum.char_set_mode {
-        CharSetMode::Callsign => None,
+        CharSetMode::Callsign | CharSetMode::Words => None,
         CharSetMode::Mixed => {
             let moved_last = settings.auto_level.mixed_auto_level_next_axis.flip();
             [moved_last, moved_last.flip()]

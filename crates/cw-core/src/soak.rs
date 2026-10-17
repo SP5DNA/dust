@@ -39,14 +39,32 @@ fn wild_settings(rng: &mut SplitMix64) -> TrainingSettings {
     s.curriculum.link_group_size = rng.f64() < 0.5;
     s.curriculum.adaptive_group_size = rng.f64() < 0.5;
     s.curriculum.group_size_target = GroupSizeTarget::ALL[rng.usize_in(0, 2)];
-    s.curriculum.char_set_mode = match rng.usize_in(0, 4) {
+    s.curriculum.char_set_mode = match rng.usize_in(0, 5) {
         0 => CharSetMode::Koch,
         1 => CharSetMode::Digits,
         2 => CharSetMode::Mixed,
         3 => CharSetMode::Custom,
+        4 => CharSetMode::Words,
         _ => CharSetMode::Callsign,
     };
     s.curriculum.callsign_level = rng.usize_in(0, 20) as u32;
+    // A list as it might be stored by hand: lower case, duplicates, words
+    // Morse cannot send, one too long for a group. Or none at all.
+    let words = [
+        "cq",
+        "CQ",
+        "",
+        "ÄRGER",
+        "73",
+        "R/P",
+        "AAAAAAAAAAAAAAAAAAAAAAAAA",
+        "qth",
+    ];
+    s.curriculum.word_list = words
+        .iter()
+        .filter(|_| rng.f64() < 0.5)
+        .map(|word| (*word).to_string())
+        .collect();
     if rng.f64() < 0.5 {
         let take = rng.usize_in(0, 10);
         s.curriculum.custom_set = "KMURESNAPTLWI0123456789".chars().take(take).collect();
@@ -202,6 +220,12 @@ fn any_settings_clamp_into_something_the_trainer_can_start_from() {
                 parse_callsign(&group).is_some(),
                 "seed {seed}: {group:?} is not a callsign"
             );
+        } else if settings.curriculum.char_set_mode == CharSetMode::Words {
+            // A word is sent whole, and only one the list kept.
+            assert!(
+                settings.words().contains(&group.as_str()),
+                "seed {seed}: {group:?} is not one of the words"
+            );
         } else {
             assert!(
                 group.chars().count() >= settings.curriculum.min_group_size as usize,
@@ -308,7 +332,7 @@ fn adaptive_lengths_never_leave_the_range() {
         let mut sampler = Sampler::new(&[], &settings, seed);
         for _ in 0..30 {
             let (group, _) = sampler.next_group(&settings);
-            if settings.curriculum.char_set_mode != CharSetMode::Callsign {
+            if settings.curriculum.char_set_mode.draws_characters() {
                 let length = group.chars().count();
                 assert!(
                     (shortest..=longest).contains(&length),

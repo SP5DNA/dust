@@ -6,6 +6,7 @@
 
 use cw_core::{CharSetMode, Experience, GroupSizeTarget, RangeSetting, RangeValues};
 
+use crate::persist::Store;
 use crate::testing::{Ui, run, test_settings};
 
 /// The value an input is showing.
@@ -510,5 +511,165 @@ fn any_change_to_what_a_preset_set_shows_the_settings_as_your_own() {
         ui.commit("select-experience", "expert");
         assert_eq!(chosen_experience(&ui), "Expert");
         assert_eq!(value_of(&ui, "number-groups-per-session"), "20");
+    });
+}
+
+/// The word box's line under it.
+fn word_report(ui: &Ui) -> String {
+    ui.html()
+        .split("class=\"word-report\"")
+        .nth(1)
+        .and_then(|rest| rest.split('>').nth(1))
+        .and_then(|text| text.split('<').next())
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// Settings on Words, on the settings screen.
+fn on_words() -> (Ui, std::rc::Rc<crate::audio::fake::Recorder>) {
+    let (mut ui, recorder) = Ui::app_with_settings(test_settings());
+    ui.click("nav-settings");
+    ui.click("seg-words");
+    (ui, recorder)
+}
+
+/// Words starts on the starter list, and says so; the level, the unlock
+/// order and the group size go, as a word has none of them.
+#[test]
+fn words_start_on_the_starter_list_and_drop_what_a_word_has_none_of() {
+    run(|| async {
+        let (ui, _recorder) = on_words();
+        assert!(
+            ui.has("Starter words, sent whole · 43 words"),
+            "{}",
+            ui.html()
+        );
+        assert!(ui.has("Until you add your own, Words sends a starter list"));
+        assert!(ui.has(">QTH<"));
+        assert_eq!(value_of(&ui, "field-word-list"), "");
+        for gone in [
+            "field-level",
+            "pill-lcwo",
+            "from-group-size",
+            "fixed-group-size",
+        ] {
+            assert!(!ui.shows(gone), "{gone} has no meaning for a word");
+        }
+        assert!(ui.shows("number-words-per-session"));
+        assert!(!ui.shows("btn-starter-words"), "nothing to go back from");
+    });
+}
+
+/// Words typed or pasted in are counted as they are typed, and taken on
+/// leaving the box: upper-cased, each once, what cannot be sent left out
+/// and said.
+#[test]
+fn pasted_words_are_counted_as_typed_and_taken_on_leaving_the_box() {
+    run(|| async {
+        let (mut ui, _recorder) = on_words();
+        let pasted = "paris\ncodex\n73\nCODEX\nmünchen\n";
+        let _ = ui.take_work();
+        ui.type_into("field-word-list", pasted);
+        assert_eq!(
+            word_report(&ui),
+            "3 words · 1 left out: a character Morse has no code for, or longer than 20 · 1 repeated — taken when you leave the box"
+        );
+        assert!(
+            !ui.input_tag("field-word-list").contains("value=\"paris"),
+            "a key redrew the box"
+        );
+        ui.commit("field-word-list", pasted);
+        assert_eq!(
+            word_report(&ui),
+            "3 words · 1 left out: a character Morse has no code for, or longer than 20 · 1 repeated"
+        );
+        assert_eq!(value_of(&ui, "field-word-list"), "PARIS\nCODEX\n73");
+        assert!(ui.has("Your own words, sent whole · 3 words"));
+        let stored = ui.stored_settings().await;
+        assert_eq!(stored.curriculum.word_list, ["PARIS", "CODEX", "73"]);
+
+        // Emptying the box goes back to the starter words.
+        ui.commit("field-word-list", "  \n");
+        assert_eq!(word_report(&ui), "Back to the starter words.");
+        assert!(ui.has("Starter words, sent whole · 43 words"));
+        assert!(ui.stored_settings().await.curriculum.word_list.is_empty());
+    });
+}
+
+/// A text file loads as the words, and says what it came to; Starter words
+/// puts the starter list back.
+#[test]
+fn a_text_file_loads_as_the_words() {
+    run(|| async {
+        let (mut ui, _recorder) = on_words();
+        let text = "cq\r\nde\r\ntest\r\n";
+        ui.choose_file("file-word-list", "contest.txt", text, text.len() as u64);
+        ui.advance(20).await;
+        assert_eq!(word_report(&ui), "contest.txt: 3 words");
+        assert_eq!(value_of(&ui, "field-word-list"), "CQ\nDE\nTEST");
+        assert_eq!(
+            ui.stored_settings().await.curriculum.word_list,
+            ["CQ", "DE", "TEST"]
+        );
+
+        ui.click("btn-starter-words");
+        assert_eq!(word_report(&ui), "Back to the starter words.");
+        assert!(ui.stored_settings().await.curriculum.word_list.is_empty());
+    });
+}
+
+/// A file with nothing in it that can be sent, or far too large to be a
+/// word list, leaves the words as they were, and says why.
+#[test]
+fn a_file_that_is_no_word_list_leaves_the_words_as_they_were() {
+    run(|| async {
+        let (mut ui, _recorder) = on_words();
+        ui.commit("field-word-list", "PARIS");
+        ui.choose_file("file-word-list", "umlauts.txt", "äöü ñé", 12);
+        ui.advance(20).await;
+        assert_eq!(
+            word_report(&ui),
+            "umlauts.txt: no word in it can be sent, so the words are as they were."
+        );
+        ui.choose_file("file-word-list", "film.mkv", "CQ", 50_000_000);
+        ui.advance(20).await;
+        assert_eq!(
+            word_report(&ui),
+            "film.mkv is over a megabyte, far more than a word list: nothing was read."
+        );
+        assert_eq!(ui.stored_settings().await.curriculum.word_list, ["PARIS"]);
+
+        // Typed text that keeps nothing goes, and the box shows the words.
+        ui.type_into("field-word-list", "äöü");
+        ui.commit("field-word-list", "äöü");
+        assert_eq!(
+            word_report(&ui),
+            "The list: no word in it can be sent, so the words are as they were."
+        );
+        assert_eq!(value_of(&ui, "field-word-list"), "PARIS");
+    });
+}
+
+/// A session on Words sends the words of the list, whole, and the practice
+/// screen counts words rather than groups of a size.
+#[test]
+fn a_session_on_words_sends_the_words_of_the_list() {
+    run(|| async {
+        let (mut ui, recorder) = on_words();
+        ui.commit("field-word-list", "PARIS CODEX QRL?");
+        ui.click("nav-practice");
+        assert!(ui.has("Your words · 3"), "{}", ui.html());
+        assert!(ui.has(">Words<"));
+        assert!(!ui.has("% to pass"), "a word list has no level run to show");
+        assert!(!ui.has("moves the level for you"));
+        ui.click("btn-start-training");
+        assert!(ui.run_until(5_000, |ui| ui.has("Your turn")).await);
+        let sent = recorder.texts().first().cloned().expect("a word was sent");
+        assert!(
+            ["PARIS", "CODEX", "QRL?"].contains(&sent.as_str()),
+            "{sent}"
+        );
+        let stored = ui.store.load_settings();
+        assert_eq!(stored.curriculum.char_set_mode, CharSetMode::Words);
     });
 }

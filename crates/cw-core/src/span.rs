@@ -25,7 +25,7 @@ use std::sync::OnceLock;
 use crate::alignment::CopyTally;
 use crate::rng::Rng;
 use crate::session::SessionResult;
-use crate::settings::{CharSetMode, GROUP_SIZE_MAX, TrainingSettings};
+use crate::settings::{GROUP_SIZE_MAX, TrainingSettings};
 
 /// The chance of fumbling a group however short it is.
 const LAPSE: f64 = 0.03;
@@ -186,7 +186,7 @@ impl SpanBelief {
         let (shortest, longest) = crate::sampling::group_size_bounds(settings);
         let mut belief = Self::new((shortest + longest) as f64 / 2.0);
         let mode = settings.curriculum.char_set_mode;
-        if mode == CharSetMode::Callsign {
+        if !mode.draws_characters() {
             return belief;
         }
         // A session with no groups to read says nothing about length, and is
@@ -459,6 +459,7 @@ mod tests {
     use super::*;
     use crate::rng::SplitMix64;
     use crate::session::GroupResult;
+    use crate::settings::CharSetMode;
 
     /// A learner whose span is `span`: copies a group whole with the model's
     /// own chance, so the estimate has a true value to find.
