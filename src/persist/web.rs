@@ -7,6 +7,7 @@ use cw_core::{AutoLevelCounters, CountersKey, SessionResult, TrainingSettings};
 use super::{HistorySaved, Store, load_settings_from, newest, newest_that_fit, parse_sessions};
 
 const THEME_KEY: &str = "dust_theme";
+const TUTORIAL_KEY: &str = "dust_tutorial_done";
 const SETTINGS_KEY: &str = "dust_settings";
 const SESSIONS_KEY: &str = "dust_sessions";
 const UNREADABLE_SESSIONS_KEY: &str = "dust_sessions_unreadable";
@@ -42,6 +43,18 @@ impl Store for WebStore {
     fn save_theme(&self, theme: &str) {
         if let Some(store) = storage() {
             let _ = store.set_item(THEME_KEY, theme);
+        }
+    }
+
+    /// A browser that keeps nothing counts it as done: the guide would
+    /// otherwise open on every visit.
+    fn tutorial_done(&self) -> bool {
+        storage().is_none_or(|store| store.get_item(TUTORIAL_KEY).ok().flatten().is_some())
+    }
+
+    fn mark_tutorial_done(&self) {
+        if let Some(store) = storage() {
+            let _ = store.set_item(TUTORIAL_KEY, "done");
         }
     }
 

@@ -11,6 +11,7 @@ use super::{HistorySaved, Store, newest};
 #[derive(Default)]
 pub struct MemoryStore {
     theme: RefCell<String>,
+    tutorial_done: Cell<bool>,
     settings: RefCell<Option<TrainingSettings>>,
     sessions: RefCell<Vec<SessionResult>>,
     counters: RefCell<BTreeMap<CountersKey, AutoLevelCounters>>,
@@ -30,6 +31,14 @@ impl Store for MemoryStore {
 
     fn save_theme(&self, theme: &str) {
         *self.theme.borrow_mut() = theme.to_string();
+    }
+
+    fn tutorial_done(&self) -> bool {
+        self.tutorial_done.get()
+    }
+
+    fn mark_tutorial_done(&self) {
+        self.tutorial_done.set(true);
     }
 
     fn load_settings(&self) -> TrainingSettings {

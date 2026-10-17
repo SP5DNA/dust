@@ -17,11 +17,12 @@ group length you copy whole about half the time, and draws lengths near its
 edge: longer while you copy groups whole, shorter when you don't
 ([how it works](docs/adaptive-group-size.md)).
 
-New here? The **?** in the header opens a guided setup. It takes you through
-a first session — start one, copy a group, discard it — and then the
-settings that matter most: unlock order, speed, group size, pitch and auto
-level. It points at the control to press for each and ticks it off once you
-have, or press **Show me** and watch it done for you.
+New here? A guided setup opens on the first launch, and the **?** in the
+header opens it again any time. It takes you through a first session — start
+one, copy a group, discard it — and then the settings that matter most:
+unlock order, speed, group size, pitch and auto level. It points at the
+control to press for each and ticks it off once you have, or press
+**Show me** and watch it done for you.
 
 **[Try it in the browser →](https://mashu.github.io/dust/)**
 

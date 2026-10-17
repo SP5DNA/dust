@@ -495,21 +495,36 @@ fn bring_into_sight(ids: &[String]) {
     let _ = ids;
 }
 
-/// Open the guide on the practice screen, where a first session starts, or
-/// close it if it is open.
-fn toggle(ctx: AppCtx) {
-    let mut tour = ctx.tour;
-    if tour.peek().is_some() {
-        tour.set(None);
-        return;
-    }
+/// Open the guide at its start, on the practice screen where a first session
+/// starts, and remember that it has been opened: it opens by itself only on
+/// a first launch.
+fn open(ctx: AppCtx) {
     if ctx.session_running() {
         return;
     }
     if *ctx.screen.peek() != Screen::Home {
         ctx.go_to(Screen::Home);
     }
+    ctx.app().store.mark_tutorial_done();
+    let mut tour = ctx.tour;
     tour.set(Some(Tour::default()));
+}
+
+/// Open the guide, or close it if it is open.
+fn toggle(ctx: AppCtx) {
+    let mut tour = ctx.tour;
+    if tour.peek().is_some() {
+        tour.set(None);
+    } else {
+        open(ctx);
+    }
+}
+
+/// Whether this launch is the app's first: the guide has never been opened,
+/// and nothing has been practised. An install from before the guide, with a
+/// history, is not new to the app, and is not shown it unasked.
+fn first_launch(ctx: AppCtx) -> bool {
+    !ctx.app().store.tutorial_done() && ctx.sessions.peek().is_empty()
 }
 
 /// Go to step `at`.
@@ -557,6 +572,14 @@ pub fn TourDock() -> Element {
     let at = use_memo(move || tour().map(|now| now.step));
     let group = use_memo(move || runtime.read().as_ref().map(GroupSession::current_group));
     let answered = use_memo(move || runtime.read().as_ref().is_some_and(any_answered));
+
+    // A first launch opens the guide by itself. After that it waits for the
+    // button in the header.
+    use_effect(move || {
+        if first_launch(ctx) {
+            open(ctx);
+        }
+    });
 
     // Show me stops wherever the guide goes: another step, or away.
     use_effect(move || {
@@ -786,8 +809,9 @@ mod tests {
     use super::{LETTER_MS, Move, POINT_MS, SHOWN_MS, STEPS, Seen, pointer_css, scroll_script};
     use crate::audio::fake::Recorder;
     use crate::persist::Store;
+    use crate::persist::memory::MemoryStore;
     use crate::state::{Screen, Tour};
-    use crate::testing::{Ui, run, test_settings};
+    use crate::testing::{Ui, run, stored_session, test_settings};
     use crate::ui::widgets::pretty_number;
 
     /// Settings on which every move the guide asks for is still to make: a
@@ -930,6 +954,43 @@ mod tests {
         assert!(ui.has("#nav-settings {"), "{}", ui.html());
         ui.click("nav-settings");
         assert!(on_step(ui, first_on_settings()), "{}", ui.html());
+    }
+
+    /// The first launch opens the guide by itself, and only the first: the
+    /// next launch waits for the button, which still opens it.
+    #[test]
+    fn a_first_launch_opens_the_guide_by_itself_and_no_later_one_does() {
+        run(|| async {
+            let store = std::rc::Rc::new(MemoryStore::default());
+            let (mut ui, _recorder) = Ui::launch(store.clone());
+            assert_eq!(ui.screen(), "home");
+            assert!(on_step(&ui, 0), "{}", ui.html());
+            assert!(store.tutorial_done(), "the first launch was not remembered");
+            ui.click("tour-close");
+            drop(ui);
+
+            let (mut ui, _recorder) = Ui::launch(store);
+            assert!(!ui.shows("tour-next"), "it opened by itself again");
+            ui.click("btn-guided-setup");
+            assert!(on_step(&ui, 0));
+        });
+    }
+
+    /// An install from before the guide has practised already, so it is not
+    /// new to the app: the guide waits to be asked, and once asked, it is
+    /// remembered as seen.
+    #[test]
+    fn an_install_with_a_history_is_not_shown_the_guide_unasked() {
+        run(|| async {
+            let store = std::rc::Rc::new(MemoryStore::default());
+            store.save_sessions(&[stored_session("2026-10-01", &[("KM", "KM")])]);
+            let (mut ui, _recorder) = Ui::launch(store.clone());
+            assert!(!ui.shows("tour-next"), "{}", ui.html());
+            assert!(!store.tutorial_done());
+            ui.click("btn-guided-setup");
+            assert!(on_step(&ui, 0));
+            assert!(store.tutorial_done());
+        });
     }
 
     #[test]

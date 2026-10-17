@@ -26,6 +26,10 @@ pub const MAX_SESSIONS: usize = 500;
 pub trait Store {
     fn load_theme(&self) -> String;
     fn save_theme(&self, theme: &str);
+    /// Whether the guided setup has been opened on this install: it opens by
+    /// itself on a first launch only.
+    fn tutorial_done(&self) -> bool;
+    fn mark_tutorial_done(&self);
     /// The stored settings, clamped; defaults for whatever could not be read.
     fn load_settings(&self) -> TrainingSettings;
     fn save_settings(&self, settings: &TrainingSettings);
