@@ -181,10 +181,8 @@ impl Move {
     async fn make(self, ctx: AppCtx, keys: PaddleKeys) {
         let mut settings = ctx.settings;
         match self {
-            Self::Start => start_session(ctx),
+            Self::Start | Self::Discard | Self::OpenSettings => self.take_there(ctx),
             Self::Answer => copy_group(ctx, keys).await,
-            Self::Discard => send_event(ctx, SessionEvent::Abort),
-            Self::OpenSettings => ctx.go_to(Screen::Settings),
             Self::Random(range) => settings.write().set_range_linked(range.which, false),
             Self::Min(range, value) => settings.write().set_range_min(range.which, value),
             Self::Max(range, value) => settings.write().set_range_max(range.which, value),
@@ -210,6 +208,19 @@ impl Move {
                     .auto_level
                     .auto_adjust_below_threshold_count = sessions;
             }
+        }
+    }
+
+    /// Make a move that takes the learner somewhere, at once: what Next does
+    /// for a step left undone, so the step after it is on the screen it
+    /// expects. A group copied would have to wait for its send, so Next
+    /// leaves that one to the learner, and nothing else needs doing.
+    fn take_there(self, ctx: AppCtx) {
+        match self {
+            Self::Start => start_session(ctx),
+            Self::Discard => send_event(ctx, SessionEvent::Abort),
+            Self::OpenSettings => ctx.go_to(Screen::Settings),
+            _ => {}
         }
     }
 
@@ -527,6 +538,20 @@ fn first_launch(ctx: AppCtx) -> bool {
     !ctx.app().store.tutorial_done() && ctx.sessions.peek().is_empty()
 }
 
+/// Move on from step `at`. A step that takes the learner somewhere, left
+/// undone, is done on the way: Next out of a session discards it, rather
+/// than leaving it running under a step that points at Settings.
+fn next(ctx: AppCtx, at: usize) {
+    if let Some(step) = STEPS.get(at).filter(|step| step.moves_on) {
+        for step_move in step.moves.iter().copied() {
+            if !made_now(ctx, step_move) {
+                step_move.take_there(ctx);
+            }
+        }
+    }
+    go_to_step(ctx.tour, at + 1);
+}
+
 /// Go to step `at`.
 fn go_to_step(mut tour: Signal<Option<Tour>>, at: usize) {
     if let Some(now) = tour.write().as_mut() {
@@ -787,7 +812,7 @@ pub fn TourDock() -> Element {
                             id: control_id("tour", "next"),
                             class: if all_made { "btn btn-primary btn-sm tour-next" } else { "btn btn-secondary btn-sm tour-next" },
                             r#type: "button",
-                            onclick: move |_| go_to_step(tour, at + 1),
+                            onclick: move |_| next(ctx, at),
                             "Next"
                         }
                     }
@@ -1130,6 +1155,48 @@ mod tests {
         });
     }
 
+    /// Next does a step that takes you somewhere on the way, so the next one
+    /// is on the screen it expects. Out of a session with nothing typed,
+    /// Next on Discard discards it: the guide used to point at a Settings
+    /// tab the session hides, with the group still waiting to be copied.
+    #[test]
+    fn next_out_of_a_session_discards_it_on_the_way() {
+        run(|| async {
+            let (mut ui, _recorder) = Ui::app_with_settings(needs_everything());
+            ui.click("btn-guided-setup");
+            ui.click("btn-start-training");
+            assert!(on_step(&ui, 1));
+            // Nothing typed: Next leaves the group to the session.
+            ui.click("tour-next");
+            assert!(on_step(&ui, 2), "{}", ui.html());
+            assert_eq!(ui.screen(), "training");
+            ui.click("tour-next");
+            assert_eq!(
+                ui.screen(),
+                "home",
+                "Next on Discard left the session running"
+            );
+            assert!(on_step(&ui, 3), "{}", ui.html());
+            assert!(ui.has("#nav-settings {"), "{}", ui.html());
+            assert!(ui.store.load_sessions().is_empty(), "the session was kept");
+            ui.click("tour-next");
+            assert_eq!(ui.screen(), "settings");
+            assert!(on_step(&ui, first_on_settings()), "{}", ui.html());
+        });
+    }
+
+    /// Next on Start training starts the session, as the step asks.
+    #[test]
+    fn next_on_the_first_step_starts_the_session() {
+        run(|| async {
+            let (mut ui, _recorder) = Ui::app_with_settings(needs_everything());
+            ui.click("btn-guided-setup");
+            ui.click("tour-next");
+            assert_eq!(ui.screen(), "training");
+            assert!(on_step(&ui, 1), "it moved on twice: {}", ui.html());
+        });
+    }
+
     /// Ending the session rather than discarding it leaves it too, and the
     /// guide moves on to Settings all the same, from the results.
     #[test]
@@ -1176,9 +1243,12 @@ mod tests {
             ui.click("btn-guided-setup");
             ui.click("nav-stats");
             assert!(ui.has("#nav-practice {"), "{}", ui.html());
+            // Next runs the first session on the way, and ends on Settings.
             for _ in 0..first_on_settings() {
                 ui.click("tour-next");
             }
+            assert_eq!(ui.screen(), "settings");
+            ui.click("nav-stats");
             assert!(ui.has("#nav-settings {"), "{}", ui.html());
             ui.click("nav-settings");
             assert!(
