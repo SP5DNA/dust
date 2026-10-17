@@ -4,7 +4,7 @@
 //! These read the page rather than the store, so they say what the learner
 //! sees; the store is written from the same settings the page shows.
 
-use cw_core::{CharSetMode, GroupSizeTarget};
+use cw_core::{CharSetMode, Experience, GroupSizeTarget, RangeSetting, RangeValues};
 
 use crate::testing::{Ui, run, test_settings};
 
@@ -376,5 +376,102 @@ fn callsigns_have_no_adaptive_group_size() {
         let (mut ui, _recorder) = Ui::app_with_settings(settings);
         ui.click("nav-settings");
         assert!(!ui.shows("switch-adapt-group-size-to-me"));
+    });
+}
+
+/// The experience dropdown's markup.
+fn experience_picker(ui: &Ui) -> String {
+    ui.html()
+        .split("id=\"select-experience\"")
+        .nth(1)
+        .and_then(|rest| rest.split("</select>").next())
+        .expect("the experience dropdown is on the page")
+        .to_string()
+}
+
+/// The option the experience dropdown shows as chosen.
+fn chosen_experience(ui: &Ui) -> String {
+    experience_picker(ui)
+        .split("<option")
+        .find(|option| option.contains("selected"))
+        .and_then(|option| option.split('>').nth(1))
+        .and_then(|text| text.split('<').next())
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// Choosing an experience sets the trainer up for it, through the same
+/// controls the rest of the page shows: their values follow at once.
+#[test]
+fn choosing_an_experience_sets_the_trainer_up_for_it() {
+    run(|| async {
+        let (mut ui, _recorder) = Ui::app_with_settings(test_settings());
+        ui.click("nav-settings");
+        assert_eq!(chosen_experience(&ui), "Custom");
+        assert!(ui.has("Sets session length, group size, speed and level to start from."));
+
+        ui.commit("select-experience", "intermediate");
+        assert_eq!(chosen_experience(&ui), "Intermediate");
+        assert!(
+            !experience_picker(&ui).contains(">Custom<"),
+            "Custom is offered over a preset"
+        );
+        assert!(
+            ui.has("20 groups of 2–3 · 15–25 WPM · from level 8"),
+            "{}",
+            ui.html()
+        );
+        assert_eq!(value_of(&ui, "from-group-size"), "2");
+        assert_eq!(value_of(&ui, "to-group-size"), "3");
+        assert_eq!(value_of(&ui, "from-character-speed"), "15");
+        assert_eq!(value_of(&ui, "to-character-speed"), "25");
+        assert_eq!(value_of(&ui, "number-groups-per-session"), "20");
+        assert_eq!(value_of(&ui, "field-level"), "8");
+        let stored = ui.stored_settings().await;
+        assert_eq!(Experience::of(&stored), Some(Experience::Intermediate));
+
+        // A fixed size and speed show as one value each.
+        ui.commit("select-experience", "novice");
+        assert!(
+            ui.has("20 groups of 2 · 15 WPM · from level 1"),
+            "{}",
+            ui.html()
+        );
+        assert_eq!(value_of(&ui, "fixed-group-size"), "2");
+        assert_eq!(value_of(&ui, "fixed-character-speed"), "15");
+        let stored = ui.stored_settings().await;
+        assert_eq!(
+            stored.range(RangeSetting::CharWpm),
+            RangeValues {
+                min: 15.0,
+                max: 15.0,
+                linked: true
+            }
+        );
+    });
+}
+
+/// A change to anything a preset set makes the settings your own; the
+/// level moving does not, as a preset only starts it.
+#[test]
+fn a_change_to_what_a_preset_set_shows_the_settings_as_your_own() {
+    run(|| async {
+        let (mut ui, _recorder) = Ui::app_with_settings(test_settings());
+        ui.click("nav-settings");
+        ui.commit("select-experience", "expert");
+        assert_eq!(chosen_experience(&ui), "Expert");
+        ui.commit("field-level", "20");
+        assert_eq!(
+            chosen_experience(&ui),
+            "Expert",
+            "the level took it off the preset"
+        );
+        ui.commit("number-groups-per-session", "30");
+        assert_eq!(chosen_experience(&ui), "Custom");
+        assert!(ui.has("Sets session length, group size, speed and level to start from."));
+        // And a preset picked again puts it back.
+        ui.commit("select-experience", "expert");
+        assert_eq!(chosen_experience(&ui), "Expert");
+        assert_eq!(value_of(&ui, "number-groups-per-session"), "20");
     });
 }

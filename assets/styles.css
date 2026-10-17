@@ -745,6 +745,40 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
   box-shadow: 0 6px 14px rgba(196, 92, 38, 0.24);
 }
 
+/* A choice among a few named presets: the platform's own select, so every
+   platform opens its own picker, dressed as a pill with a chevron. */
+.select-wrap { position: relative; display: inline-flex; flex: 0 0 auto; }
+.select {
+  appearance: none;
+  -webkit-appearance: none;
+  border: 1px solid var(--line);
+  border-radius: var(--pill);
+  background: var(--surface-2);
+  color: var(--ink-soft);
+  font-size: 0.84rem;
+  font-weight: 700;
+  padding: 0.42rem 2.1rem 0.42rem 0.95rem;
+  min-height: 2.25rem;
+  cursor: pointer;
+  transition: border-color 0.15s var(--ease), color 0.15s var(--ease), background 0.15s var(--ease);
+}
+.select:hover { border-color: var(--line-strong); color: var(--ink); }
+.select.chosen { border-color: var(--copper); background: var(--copper-soft); color: var(--copper-deep); }
+.select-wrap .icon {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: 0.75rem;
+  margin: auto 0;
+  width: 0.85rem;
+  height: 0.85rem;
+  color: var(--ink-dim);
+  pointer-events: none;
+}
+.select.chosen + .icon { color: var(--copper-deep); }
+/* The experience card is its head and nothing more. */
+.experience .card-head { margin-bottom: 0; }
+
 .segmented {
   display: flex;
   flex-wrap: wrap;
@@ -1803,6 +1837,7 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
   .btn { min-height: 44px; }
   .pill, .seg { min-height: 38px; }
   .field input, .field select, .stepper input, .answer { font-size: 16px; min-height: 44px; }
+  .select { font-size: 16px; min-height: 40px; }
   .kpi .value { font-size: 1.35rem; }
   .heatmap-day-label { font-size: 10px; }
   .score-ring { width: 96px; height: 96px; }

@@ -24,6 +24,10 @@ unlock order, speed, group size, pitch and auto level. It points at the
 control to press for each and ticks it off once you have, or press
 **Show me** and watch it done for you.
 
+Or start from a preset: **Settings → Experience** sets session length, group
+size, speed and starting level for a Novice, Intermediate, Advanced or Expert
+in one go, and shows Custom once you make them your own.
+
 **[Try it in the browser →](https://mashu.github.io/dust/)**
 
 ## Platforms
