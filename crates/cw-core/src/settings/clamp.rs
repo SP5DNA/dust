@@ -27,7 +27,6 @@ impl TrainingSettings {
         self.replace_non_finite();
         let c = &mut self.curriculum;
         c.custom_sequence = Self::unique_alphabet(&c.custom_sequence);
-        c.custom_set = Self::unique_alphabet(&c.custom_set);
         c.word_list =
             crate::words::WordList::from_words(c.word_list.iter().map(String::as_str)).words;
         c.level = c.level.clamp(LEVEL_MIN, LETTER_LEVEL_CEILING);

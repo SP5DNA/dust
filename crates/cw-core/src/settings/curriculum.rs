@@ -51,7 +51,7 @@ impl CharSetMode {
             Self::Digits => LevelAxis::Digits,
             Self::Callsign => LevelAxis::Callsign,
             Self::Words => LevelAxis::Words,
-            Self::Koch | Self::Custom | Self::Mixed => LevelAxis::Letters,
+            Self::Koch | Self::Mixed => LevelAxis::Letters,
         }
     }
 }
@@ -84,15 +84,12 @@ impl TrainingSettings {
         }
     }
 
-    /// The alphabet the letter level unlocks, in order. Custom uses its own
-    /// set when it has one; Mixed leaves the digits to their own level. A
-    /// sequence with nothing sendable in it is LCWO's, so this is never empty
-    /// except in Mixed, whose digits then carry the pool.
+    /// The alphabet the letter level unlocks, in order. Mixed leaves the
+    /// digits to their own level. A sequence with nothing sendable in it is
+    /// LCWO's, so this is never empty except in Mixed, whose digits then
+    /// carry the pool.
     pub fn progress_alphabet(&self) -> Vec<char> {
-        let custom = (self.curriculum.char_set_mode == CharSetMode::Custom)
-            .then(|| Self::unique_alphabet(&self.curriculum.custom_set))
-            .filter(|set| !set.is_empty());
-        let mut base = custom.unwrap_or_else(|| Self::unique_alphabet(self.sequence()));
+        let mut base = Self::unique_alphabet(self.sequence());
         if base.is_empty() {
             base = LCWO_SEQUENCE.to_vec();
         }
@@ -186,18 +183,8 @@ impl TrainingSettings {
     }
 
     /// Switch character set, starting it on its whole alphabet.
-    ///
-    /// Custom with no list of its own starts the list on the unlock order,
-    /// the one it would fall back to anyway: the list in its box is then
-    /// the list in use, to be edited from there, and the level means what
-    /// it meant.
     pub fn set_char_set_mode(&mut self, mode: CharSetMode) {
         self.curriculum.char_set_mode = mode;
         self.curriculum.practice_window = PracticeWindow::All;
-        if mode == CharSetMode::Custom
-            && Self::unique_alphabet(&self.curriculum.custom_set).is_empty()
-        {
-            self.curriculum.custom_set = Self::unique_alphabet(self.sequence());
-        }
     }
 }

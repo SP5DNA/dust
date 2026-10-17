@@ -227,20 +227,10 @@ mod tests {
     }
 
     #[test]
-    fn empty_custom_falls_back_to_koch() {
+    fn a_level_unlocks_the_start_of_an_order_of_ones_own() {
         let mut s = TrainingSettings::default();
-        s.curriculum.char_set_mode = CharSetMode::Custom;
-        s.curriculum.custom_set.clear();
-        let pool = compute_char_pool(&s);
-        assert!(pool.contains(&'K'));
-        assert!(pool.contains(&'M'));
-    }
-
-    #[test]
-    fn custom_level_unlocks_alphabet_prefix() {
-        let mut s = TrainingSettings::default();
-        s.curriculum.char_set_mode = CharSetMode::Custom;
-        s.curriculum.custom_set = vec!['Q', 'R', 'S', 'T', 'U'];
+        s.curriculum.char_set_mode = CharSetMode::Koch;
+        s.curriculum.custom_sequence = vec!['Q', 'R', 'S', 'T', 'U'];
         s.curriculum.level = 1;
         assert_eq!(compute_char_pool(&s), vec!['Q', 'R']);
         s.curriculum.level = 3;
@@ -325,10 +315,10 @@ mod tests {
     }
 
     #[test]
-    fn unknown_custom_chars_are_dropped() {
+    fn unknown_characters_in_an_order_are_dropped() {
         let mut s = TrainingSettings::default();
-        s.curriculum.char_set_mode = CharSetMode::Custom;
-        s.curriculum.custom_set = vec!['A', '*', 'B'];
+        s.curriculum.char_set_mode = CharSetMode::Koch;
+        s.curriculum.custom_sequence = vec!['A', '*', 'B'];
         s.curriculum.level = 1;
         s.curriculum.practice_window = PracticeWindow::All;
         assert_eq!(compute_char_pool(&s), vec!['A', 'B']);
@@ -451,15 +441,6 @@ mod tests {
         assert_eq!(compute_char_pool(&s), vec!['K']);
     }
 
-    #[test]
-    fn an_empty_custom_set_falls_back_to_the_sequence() {
-        let mut s = TrainingSettings::default();
-        s.curriculum.char_set_mode = CharSetMode::Custom;
-        s.curriculum.custom_set = Vec::new();
-        s.curriculum.level = 1;
-        assert_eq!(compute_char_pool(&s), vec!['K', 'M']);
-    }
-
     /// Mixed with a sequence of nothing but digits has no letters to give,
     /// and at 100% letters it used to give no digits either: an empty pool,
     /// and a session of silent groups.
@@ -483,7 +464,6 @@ mod tests {
             CharSetMode::Koch,
             CharSetMode::Digits,
             CharSetMode::Mixed,
-            CharSetMode::Custom,
             CharSetMode::Callsign,
         ] {
             for sequence in [vec![], vec!['#', '*'], vec!['0', '1'], vec!['K']] {
@@ -491,7 +471,6 @@ mod tests {
                     let mut s = TrainingSettings::default();
                     s.curriculum.char_set_mode = mode;
                     s.curriculum.custom_sequence = sequence.clone();
-                    s.curriculum.custom_set = sequence.clone();
                     s.curriculum.mixed_letters_percent = letters_percent;
                     assert!(
                         !compute_char_pool(&s).is_empty(),

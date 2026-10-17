@@ -39,12 +39,11 @@ fn wild_settings(rng: &mut SplitMix64) -> TrainingSettings {
     s.curriculum.link_group_size = rng.f64() < 0.5;
     s.curriculum.adaptive_group_size = rng.f64() < 0.5;
     s.curriculum.group_size_target = GroupSizeTarget::ALL[rng.usize_in(0, 2)];
-    s.curriculum.char_set_mode = match rng.usize_in(0, 5) {
+    s.curriculum.char_set_mode = match rng.usize_in(0, 4) {
         0 => CharSetMode::Koch,
         1 => CharSetMode::Digits,
         2 => CharSetMode::Mixed,
-        3 => CharSetMode::Custom,
-        4 => CharSetMode::Words,
+        3 => CharSetMode::Words,
         _ => CharSetMode::Callsign,
     };
     s.curriculum.callsign_level = rng.usize_in(0, 20) as u32;
@@ -67,8 +66,7 @@ fn wild_settings(rng: &mut SplitMix64) -> TrainingSettings {
         .collect();
     if rng.f64() < 0.5 {
         let take = rng.usize_in(0, 10);
-        s.curriculum.custom_set = "KMURESNAPTLWI0123456789".chars().take(take).collect();
-        s.curriculum.custom_sequence = s.curriculum.custom_set.clone();
+        s.curriculum.custom_sequence = "KMURESNAPTLWI0123456789".chars().take(take).collect();
         s.curriculum.sequence_is_custom = true;
     }
     s.playback.char_wpm_min = rng.pick_in_range(-10.0, 120.0);

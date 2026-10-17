@@ -27,7 +27,6 @@ impl CountersKey {
             CharSetMode::Digits => format!("digits_{level}_{fingerprint}"),
             CharSetMode::Callsign => format!("callsign_{level}"),
             CharSetMode::Words => format!("words_{level}"),
-            CharSetMode::Custom => format!("custom_{level}_{fingerprint}"),
             CharSetMode::Koch => format!("koch_{level}_{fingerprint}"),
         })
     }
@@ -509,12 +508,12 @@ mod tests {
 
     #[test]
     fn each_mode_moves_its_own_level() {
-        let mut custom = koch(1);
-        custom.curriculum.char_set_mode = CharSetMode::Custom;
-        custom.curriculum.custom_set = vec!['Q', 'R', 'S', 'T'];
-        let change = evaluate_auto_level(&after(1.0), &custom, &mut Default::default());
-        apply_auto_level(&mut custom, &change.expect("up"));
-        assert_eq!(custom.curriculum.level, 2);
+        let mut own = koch(1);
+        own.curriculum.custom_sequence = vec!['Q', 'R', 'S', 'T'];
+        own.curriculum.sequence_is_custom = true;
+        let change = evaluate_auto_level(&after(1.0), &own, &mut Default::default());
+        apply_auto_level(&mut own, &change.expect("up"));
+        assert_eq!(own.curriculum.level, 2);
 
         let mut digits = koch(1);
         digits.curriculum.char_set_mode = CharSetMode::Digits;
@@ -698,9 +697,8 @@ mod tests {
     #[test]
     fn counter_keys_separate_modes_levels_and_alphabets() {
         let koch = koch(1);
-        let mut custom = koch.clone();
-        custom.curriculum.char_set_mode = CharSetMode::Custom;
-        custom.curriculum.custom_set = vec!['K', 'M'];
+        let mut own = koch.clone();
+        own.curriculum.custom_sequence = vec!['K', 'M'];
         let mut mixed_settings = koch.clone();
         mixed_settings.curriculum.char_set_mode = CharSetMode::Mixed;
         let mut digits = koch.clone();
@@ -709,12 +707,12 @@ mod tests {
         callsigns.curriculum.char_set_mode = CharSetMode::Callsign;
         callsigns.curriculum.callsign_level = 3;
 
-        let keys = [&koch, &custom, &mixed_settings, &digits, &callsigns].map(CountersKey::of);
+        let keys = [&koch, &own, &mixed_settings, &digits, &callsigns].map(CountersKey::of);
         assert_eq!(
             keys[0].as_str(),
             format!("koch_1_{}", koch.alphabet_fingerprint())
         );
-        assert_eq!(keys[1].as_str(), "custom_1_KM");
+        assert_eq!(keys[1].as_str(), "koch_1_KM");
         assert!(keys[2].as_str().starts_with("mixed_1_1_"));
         assert_eq!(keys[3].as_str(), "digits_1_0123456789");
         assert_eq!(keys[4].as_str(), "callsign_3");

@@ -44,9 +44,7 @@ fn level_reading(settings: &TrainingSettings) -> LevelReading {
             format!("{letters} / {digits}"),
             format!("Level {letters} · digits {digits}"),
         ),
-        CharSetMode::Koch | CharSetMode::Custom => {
-            ("Level", letters.to_string(), format!("Level {letters}"))
-        }
+        CharSetMode::Koch => ("Level", letters.to_string(), format!("Level {letters}")),
         // A word list has no level: what it has is words.
         CharSetMode::Words => {
             let count = settings.words().len();

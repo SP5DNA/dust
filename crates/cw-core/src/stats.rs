@@ -541,9 +541,6 @@ mod tests {
     fn bigrams_rank_the_group_start_first_and_unknown_characters_last() {
         // `+` is a Morse character the LCWO sequence never teaches; it must not
         // overflow the sort key.
-        let mut settings = TrainingSettings::default();
-        settings.curriculum.char_set_mode = CharSetMode::Custom;
-        settings.curriculum.custom_set = vec!['K', '+'];
         let session = plain("2026-09-01", 1, &[("K+", "KM")]);
         let heat = mistake_stats(&[session], 8).bigrams;
         assert_eq!(heat.letters.first(), Some(&GROUP_START_BIGRAM_TOKEN));

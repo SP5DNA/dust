@@ -822,13 +822,8 @@ mod ui_tests {
             let (mut ui, _recorder) = Ui::app();
             ui.click("nav-settings");
             for (button, note, mode) in [
-                (
-                    "seg-koch",
-                    "Letters unlocked in Koch order",
-                    CharSetMode::Koch,
-                ),
+                ("seg-koch", "Unlocked in LCWO order", CharSetMode::Koch),
                 ("seg-digits", "Digits only", CharSetMode::Digits),
-                ("seg-custom", "Your own character list", CharSetMode::Custom),
                 (
                     "seg-mixed",
                     "Letters and digits together",
@@ -1565,11 +1560,12 @@ mod ui_tests {
     }
 
     #[test]
-    fn nothing_on_the_settings_screen_can_break_a_custom_alphabet() {
+    fn nothing_on_the_settings_screen_can_break_an_order_of_ones_own() {
         run(|| async {
             let mut settings = test_settings();
-            settings.curriculum.char_set_mode = CharSetMode::Custom;
-            settings.curriculum.custom_set = vec!['K', 'M', 'U', 'R', 'E'];
+            settings.curriculum.char_set_mode = CharSetMode::Koch;
+            settings.curriculum.custom_sequence = vec!['K', 'M', 'U', 'R', 'E'];
+            settings.curriculum.sequence_is_custom = true;
             settings.curriculum.level = 4;
             sweep("nav-settings", settings).await;
         });

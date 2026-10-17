@@ -367,7 +367,7 @@ fn every_icon_draws_something() {
 }
 
 #[test]
-fn settings_renders_the_digit_and_custom_modes() {
+fn settings_renders_digits_and_an_order_of_ones_own() {
     let digits = render(|| {
         let settings = use_signal(|| {
             let mut settings = TrainingSettings::default();
@@ -392,11 +392,12 @@ fn settings_renders_the_digit_and_custom_modes() {
     assert!(!digits.contains("Unlock order"));
     assert!(digits.contains("Looping"));
 
-    let custom = render(|| {
+    let own = render(|| {
         let settings = use_signal(|| {
             let mut settings = TrainingSettings::default();
-            settings.curriculum.char_set_mode = CharSetMode::Custom;
-            settings.curriculum.custom_set = vec!['K', 'M', 'R'];
+            settings.curriculum.char_set_mode = CharSetMode::Koch;
+            settings.curriculum.custom_sequence = vec!['K', 'M', 'R'];
+            settings.curriculum.sequence_is_custom = true;
             settings
         });
         rsx! {
@@ -412,10 +413,11 @@ fn settings_renders_the_digit_and_custom_modes() {
             }
         }
     });
-    assert!(custom.contains("Custom alphabet"));
-    assert!(
-        custom.contains("your own character list") || custom.contains("Your own character list")
-    );
+    assert!(own.contains("Unlocked in your own order"));
+    assert!(own.contains("value=\"KMR\""), "{own}");
+    // One list on the card, the unlock order: no character set beside it
+    // to hold a second.
+    assert!(!own.contains("id=\"seg-custom\""), "{own}");
 }
 
 #[test]

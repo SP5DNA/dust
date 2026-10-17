@@ -114,9 +114,13 @@ impl<'de> Deserialize<'de> for FilterShape {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CharSetMode {
+    /// Characters unlocked a level at a time, in the order chosen: one of
+    /// the presets, or the learner's own. Before an order could be their
+    /// own, a list of their own was a character set of its own, Custom;
+    /// sessions saved on it read back as this.
+    #[serde(alias = "custom")]
     Koch,
     Digits,
-    Custom,
     #[default]
     Mixed,
     /// Realistic amateur callsigns instead of drawn groups. The characters are
@@ -185,7 +189,6 @@ pub struct CurriculumSettings {
     pub digits_level: u32,
     /// When mixed: 0–100 percent of characters that are letters (rest digits).
     pub mixed_letters_percent: u32,
-    pub custom_set: Vec<char>,
     pub custom_sequence: Vec<char>,
     /// True when the user chose Unlock order → Your own, even if the order still matches a preset.
     pub sequence_is_custom: bool,
@@ -216,7 +219,6 @@ impl Default for CurriculumSettings {
             char_set_mode: CharSetMode::Mixed,
             digits_level: 1,
             mixed_letters_percent: 70,
-            custom_set: Vec::new(),
             custom_sequence: Vec::new(),
             sequence_is_custom: false,
             practice_window: PracticeWindow::All,
@@ -667,8 +669,8 @@ mod tests {
     #[test]
     fn a_level_is_read_inside_its_alphabet() {
         let mut s = TrainingSettings::default();
-        s.curriculum.char_set_mode = CharSetMode::Custom;
-        s.curriculum.custom_set = vec!['A', 'B', 'C', 'D'];
+        s.curriculum.char_set_mode = CharSetMode::Koch;
+        s.curriculum.custom_sequence = vec!['A', 'B', 'C', 'D'];
         s.curriculum.level = 99;
         let s = s.clamp();
         assert_eq!(s.active_level(), 3);
@@ -676,10 +678,10 @@ mod tests {
         assert_eq!(s.progress_alphabet(), vec!['A', 'B', 'C', 'D']);
     }
 
-    /// Koch, Custom and Mixed's letters share one level, and Mixed's
-    /// alphabet is shorter by its digits. Every switch used to clamp the
-    /// stored level to the alphabet of the moment, so one look at Mixed, or
-    /// at a short custom alphabet, cost the Koch level for good.
+    /// Koch and Mixed's letters share one level, and Mixed's alphabet is
+    /// shorter by its digits. Every switch used to clamp the stored level to
+    /// the alphabet of the moment, so one look at Mixed, or at a short
+    /// unlock order, cost the Koch level for good.
     #[test]
     fn a_shorter_alphabet_does_not_cost_the_level_a_longer_one_reached() {
         let mut s = TrainingSettings::default();
@@ -690,15 +692,8 @@ mod tests {
         let mut s = s.clamp();
         assert!(s.active_level() < 38, "Mixed has fewer letters to unlock");
         s.set_char_set_mode(CharSetMode::Koch);
-        let mut s = s.clamp();
+        let s = s.clamp();
         assert_eq!(s.active_level(), 38);
-
-        s.curriculum.custom_set = vec!['A', 'B', 'C'];
-        s.set_char_set_mode(CharSetMode::Custom);
-        let mut s = s.clamp();
-        assert_eq!(s.active_level(), 2);
-        s.set_char_set_mode(CharSetMode::Koch);
-        assert_eq!(s.clamp().active_level(), 38);
 
         // A sequence shortened while it is being typed keeps it too.
         let mut s = TrainingSettings::default();
@@ -707,34 +702,6 @@ mod tests {
         let s = s.clamp();
         assert_eq!(s.active_level(), 1);
         assert_eq!(s.curriculum.level, 9);
-    }
-
-    /// Custom with no list of its own starts its list on the unlock order
-    /// it would fall back to, so the box shows the list in use instead of
-    /// standing empty, and the level and what was learned of each
-    /// character carry over. A list of its own is kept.
-    #[test]
-    fn custom_starts_its_list_on_the_unlock_order() {
-        let mania = crate::sequences::TRADITIONAL_KOCH_SEQUENCE;
-        let mut s = TrainingSettings::default();
-        s.curriculum.char_set_mode = CharSetMode::Koch;
-        s.curriculum.custom_sequence = mania.to_vec();
-        s.curriculum.level = 12;
-        let mut s = s.clamp();
-        let fingerprint = s.alphabet_fingerprint();
-        s.set_char_set_mode(CharSetMode::Custom);
-        let s = s.clamp();
-        assert_eq!(
-            s.curriculum.custom_set,
-            TrainingSettings::unique_alphabet(mania)
-        );
-        assert_eq!(s.active_level(), 12);
-        assert_eq!(s.alphabet_fingerprint(), fingerprint);
-
-        let mut own = TrainingSettings::default();
-        own.curriculum.custom_set = vec!['K', 'M', 'R'];
-        own.set_char_set_mode(CharSetMode::Custom);
-        assert_eq!(own.curriculum.custom_set, vec!['K', 'M', 'R']);
     }
 
     /// Putting the character set back is clamped with it: a level stored
@@ -757,13 +724,11 @@ mod tests {
     #[test]
     fn clamping_cleans_the_alphabets_down_to_sendable_characters() {
         let mut s = TrainingSettings::default();
-        s.curriculum.char_set_mode = CharSetMode::Custom;
+        s.curriculum.char_set_mode = CharSetMode::Koch;
         // Duplicates, lower case, spaces and unsendable characters all go.
-        s.curriculum.custom_set = vec!['k', 'K', ' ', '#', 'm'];
-        s.curriculum.custom_sequence = vec!['u', 'u', 'r'];
+        s.curriculum.custom_sequence = vec!['u', 'U', ' ', '#', 'r'];
         s.curriculum.digits_level = 99;
         let s = s.clamp();
-        assert_eq!(s.curriculum.custom_set, vec!['K', 'M']);
         assert_eq!(s.curriculum.custom_sequence, vec!['U', 'R']);
         assert_eq!(s.curriculum.digits_level, crate::morse::MAX_DIGITS_LEVEL);
     }
@@ -826,7 +791,6 @@ mod tests {
         s.curriculum.min_group_size = 99;
         s.curriculum.max_group_size = 0;
         s.curriculum.custom_sequence = vec!['k', 'k', ' ', 'm'];
-        s.curriculum.custom_set = vec!['#'];
         s.curriculum.callsign_level = 999;
         s.playback.char_wpm_min = 900.0;
         s.playback.char_wpm_max = -5.0;
@@ -866,8 +830,8 @@ mod tests {
             CharSetMode::Koch,
             CharSetMode::Digits,
             CharSetMode::Mixed,
-            CharSetMode::Custom,
             CharSetMode::Callsign,
+            CharSetMode::Words,
         ] {
             for linked in [false, true] {
                 let mut first = wild();
@@ -1355,7 +1319,6 @@ mod tests {
         s.curriculum.group_size_target = GroupSizeTarget::Stretch;
         s.curriculum.char_set_mode = CharSetMode::Koch;
         s.curriculum.mixed_letters_percent = 33;
-        s.curriculum.custom_set = vec!['Q', 'Z'];
         s.curriculum.custom_sequence = vec!['Z', 'Q'];
         s.curriculum.sequence_is_custom = true;
         s.curriculum.practice_window = PracticeWindow::Last3;
