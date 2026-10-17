@@ -38,6 +38,20 @@ impl Screen {
     }
 }
 
+/// The guided setup (src/ui/tour.rs): the step on screen, and what the
+/// learner has done since it opened, which the steps on the practice side
+/// wait for.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Tour {
+    pub step: usize,
+    /// A session was started.
+    pub started: bool,
+    /// One of its groups was answered.
+    pub answered: bool,
+    /// And it was left again: discarded, or ended.
+    pub left: bool,
+}
+
 /// What the app holds outside the reactive tree: the audio player, the
 /// session being run on it, and where what it learns is kept. Cheap to
 /// clone; every clone is the same app.
@@ -108,8 +122,8 @@ pub struct AppCtx {
     pub stream_heard: Signal<Vec<crate::playback::HeardGroup>>,
     /// The open answer box's text, on its way to the session.
     pub answer: AnswerOutbox,
-    /// The guided setup's step, while it is open (src/ui/tour.rs).
-    pub tour: Signal<Option<usize>>,
+    /// The guided setup, while it is open.
+    pub tour: Signal<Option<Tour>>,
     /// The sessions deleted last, each with where it sat, for Undo to put
     /// back.
     trash: Signal<Vec<(usize, SessionResult)>>,
@@ -248,8 +262,7 @@ impl AppCtx {
 
     /// Leave for another screen. A session in progress holds you; otherwise
     /// whatever was sounding stops before the screen changes, wherever you
-    /// are going. The guided setup points at the settings screen's controls,
-    /// so it ends with that screen.
+    /// are going.
     pub fn go_to(mut self, to: Screen) {
         if self.session_running() {
             return;
@@ -257,9 +270,6 @@ impl AppCtx {
         self.app().player.release();
         self.preview.set(Preview::Idle);
         self.stream_heard.set(Vec::new());
-        if to != Screen::Settings {
-            self.tour.set(None);
-        }
         self.screen.set(to);
     }
 }

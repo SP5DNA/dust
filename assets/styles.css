@@ -1729,6 +1729,9 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
   justify-content: center;
   pointer-events: none;
 }
+/* A session has no nav, and the foot of the screen is its own: the answers
+   and the way out. The guide docks over its head instead. */
+.tour-dock.top { top: calc(0.75rem + env(safe-area-inset-top)); bottom: auto; }
 .tour {
   pointer-events: auto;
   width: min(560px, calc(100% - 1.5rem));
