@@ -1,10 +1,10 @@
-use cw_core::{KeyerMode, answer_length_matches};
+use cw_core::answer_length_matches;
 use dioxus::core::Runtime;
 use dioxus::prelude::*;
 
 use crate::session_runtime::AnswerOutbox;
 use crate::time::sleep_ms;
-use crate::ui::paddle::{PaddleKeys, paddle_hint};
+use crate::ui::paddle::PaddleKeys;
 use crate::ui::widgets::{
     CharacterComparison, Icon, IconName, ProgressHeader, control_id, html_bool,
 };
@@ -422,7 +422,6 @@ pub fn TrainingView(
     on_confirm: EventHandler<()>,
     on_submit: EventHandler<()>,
     on_stop: EventHandler<()>,
-    #[props(default)] keyer_mode: KeyerMode,
 ) -> Element {
     let send_index = (repeat_done + 1).min(repeat_total.max(1));
     let current_done = confirmed.get(current).copied().unwrap_or(false);
@@ -450,12 +449,14 @@ pub fn TrainingView(
         // A letter half keyed for one group is not the next one's.
         keys.stop();
     }));
+    // One short line. How to key with the paddles is the settings screen's to
+    // say, beside the paddles, not something to read with a group to copy.
     let hint = if playing && locked {
-        "Listen — the answer box unlocks when the group finishes.".to_string()
+        "Listen — the answer box unlocks when the group finishes."
     } else if playing {
-        "Listen, or type along — the box stays open while this group is sent.".to_string()
+        "Listen, or type along — the box stays open while this group is sent."
     } else {
-        format!("Type the letters, or key them. {}", paddle_hint(keyer_mode))
+        "Type what you heard."
     };
     rsx! {
         div { style: "display: contents;",
