@@ -187,7 +187,7 @@ pub struct CurriculumSettings {
     pub mixed_letters_percent: u32,
     pub custom_set: Vec<char>,
     pub custom_sequence: Vec<char>,
-    /// True when the user chose Sequence → Custom, even if the order still matches a preset.
+    /// True when the user chose Unlock order → Your own, even if the order still matches a preset.
     pub sequence_is_custom: bool,
     pub practice_window: PracticeWindow,
     /// Callsign structure tier, the level of the callsign character set. Its own
@@ -707,6 +707,34 @@ mod tests {
         let s = s.clamp();
         assert_eq!(s.active_level(), 1);
         assert_eq!(s.curriculum.level, 9);
+    }
+
+    /// Custom with no list of its own starts its list on the unlock order
+    /// it would fall back to, so the box shows the list in use instead of
+    /// standing empty, and the level and what was learned of each
+    /// character carry over. A list of its own is kept.
+    #[test]
+    fn custom_starts_its_list_on_the_unlock_order() {
+        let mania = crate::sequences::TRADITIONAL_KOCH_SEQUENCE;
+        let mut s = TrainingSettings::default();
+        s.curriculum.char_set_mode = CharSetMode::Koch;
+        s.curriculum.custom_sequence = mania.to_vec();
+        s.curriculum.level = 12;
+        let mut s = s.clamp();
+        let fingerprint = s.alphabet_fingerprint();
+        s.set_char_set_mode(CharSetMode::Custom);
+        let s = s.clamp();
+        assert_eq!(
+            s.curriculum.custom_set,
+            TrainingSettings::unique_alphabet(mania)
+        );
+        assert_eq!(s.active_level(), 12);
+        assert_eq!(s.alphabet_fingerprint(), fingerprint);
+
+        let mut own = TrainingSettings::default();
+        own.curriculum.custom_set = vec!['K', 'M', 'R'];
+        own.set_char_set_mode(CharSetMode::Custom);
+        assert_eq!(own.curriculum.custom_set, vec!['K', 'M', 'R']);
     }
 
     /// Putting the character set back is clamped with it: a level stored

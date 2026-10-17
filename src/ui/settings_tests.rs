@@ -260,12 +260,46 @@ fn the_unlock_order_can_be_cleared_and_typed_again() {
         assert_eq!(value_of(&ui, "field-sequence-order"), lcwo);
         assert_eq!(value_of(&ui, "field-level"), "20");
         assert!(ui.input_tag("pill-lcwo").contains("active"));
-        assert!(!ui.input_tag("pill-custom").contains("active"));
+        assert!(!ui.input_tag("pill-your-own").contains("active"));
 
         // Committed with stray characters, it is cleaned once, on commit.
         ui.commit("field-sequence-order", "km k?");
         assert_eq!(value_of(&ui, "field-sequence-order"), "KM?");
-        assert!(ui.input_tag("pill-custom").contains("active"));
+        assert!(ui.input_tag("pill-your-own").contains("active"));
+    });
+}
+
+/// Custom is its own unlock order, so it offers no other: its box starts on
+/// the order chosen before it, and that box is the one list in play. The
+/// order's own pill is "Your own", not a second "Custom".
+#[test]
+fn custom_shows_one_list_starting_on_the_unlock_order() {
+    run(|| async {
+        let mut settings = test_settings();
+        settings.curriculum.char_set_mode = CharSetMode::Koch;
+        settings.curriculum.level = 6;
+        let (mut ui, _recorder) = Ui::app_with_settings(settings);
+        ui.click("nav-settings");
+        ui.click("pill-morsemania");
+        let order = value_of(&ui, "field-sequence-order");
+        assert!(ui.shows("pill-your-own"));
+        assert!(!ui.shows("pill-custom"), "one Custom on the card");
+
+        ui.click("seg-custom");
+        assert_eq!(value_of(&ui, "field-custom-alphabet"), order);
+        assert_eq!(value_of(&ui, "field-level"), "6");
+        for gone in ["pill-morsemania", "pill-your-own", "field-sequence-order"] {
+            assert!(!ui.shows(gone), "{gone} beside a list of its own");
+        }
+
+        // Edited, the list is what the level unlocks: level 6 is seven of it.
+        ui.commit("field-custom-alphabet", "KMRSUAPTLOWI");
+        ui.advance(50).await;
+        assert!(
+            ui.has("Your own character list · 7 in play"),
+            "{}",
+            ui.html()
+        );
     });
 }
 

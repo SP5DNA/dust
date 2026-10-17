@@ -22,7 +22,14 @@ const WORD_FILE_MAX_BYTES: u64 = 1_000_000;
 /// again: an empty unlock order is LCWO's, so clearing it would fill it
 /// straight back up.
 #[component]
-fn AlphabetField(label: &'static str, value: String, on_commit: EventHandler<String>) -> Element {
+fn AlphabetField(
+    label: &'static str,
+    value: String,
+    /// What an empty box stands for.
+    #[props(into)]
+    placeholder: Option<String>,
+    on_commit: EventHandler<String>,
+) -> Element {
     let mut typed = use_signal(|| None::<String>);
     let shown = typed().unwrap_or(value);
     let id = control_id("field", label);
@@ -33,6 +40,7 @@ fn AlphabetField(label: &'static str, value: String, on_commit: EventHandler<Str
                 id,
                 class: "group-text",
                 value: "{shown}",
+                placeholder,
                 autocapitalize: "characters",
                 spellcheck: false,
                 oninput: move |e| typed.set(Some(e.value())),
@@ -137,10 +145,9 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
     let c = charset.read();
     let callsigns = c.mode == CharSetMode::Callsign;
     let words = c.mode == CharSetMode::Words;
-    let has_unlock_order = matches!(
-        c.mode,
-        CharSetMode::Koch | CharSetMode::Mixed | CharSetMode::Custom
-    );
+    // Custom's list is its own order, unlocked from the left, so it has no
+    // other to choose.
+    let has_unlock_order = matches!(c.mode, CharSetMode::Koch | CharSetMode::Mixed);
     rsx! {
         div { class: "card stack-sm",
             CardHead { icon: IconName::Letters, title: "Character set", note: c.note(),
@@ -166,7 +173,8 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
                     for choice in SEQUENCE_PRESETS
                         .iter()
                         .map(|preset| (SequenceChoice::Preset(preset.id), preset.name))
-                        .chain([(SequenceChoice::Custom, "Custom")])
+                        // Not "Custom": that is a character set, one row up.
+                        .chain([(SequenceChoice::Custom, "Your own")])
                     {
                         Seg {
                             label: choice.1,
@@ -180,6 +188,20 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
                     label: "Sequence order",
                     value: c.sequence.clone(),
                     on_commit: move |typed: String| settings.write().type_sequence(&typed),
+                }
+            }
+            if c.mode == CharSetMode::Custom {
+                AlphabetField {
+                    label: "Custom alphabet",
+                    value: c.custom_set.clone(),
+                    placeholder: c.sequence.clone(),
+                    on_commit: move |typed: String| {
+                        settings.write().curriculum.custom_set =
+                            TrainingSettings::unique_alphabet(&typed.chars().collect::<Vec<_>>());
+                    },
+                }
+                p { class: "muted", style: "margin: 0;",
+                    "The level unlocks these from the left, one at a time. Left empty, it falls back to the order shown faintly in the box."
                 }
             }
             // A word list has no level: every word is in from the start.
@@ -221,17 +243,6 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
                     unit: "%",
                     onchange: move |v| settings.write().curriculum.mixed_letters_percent = v as u32,
                 }
-            }
-            if c.mode == CharSetMode::Custom {
-                AlphabetField {
-                    label: "Custom alphabet",
-                    value: c.custom_set.clone(),
-                    on_commit: move |typed: String| {
-                        settings.write().curriculum.custom_set =
-                            TrainingSettings::unique_alphabet(&typed.chars().collect::<Vec<_>>());
-                    },
-                }
-                p { class: "muted", style: "margin: 0;", "Level unlocks this list from the start. Leave it empty to use the sequence above." }
             }
             if words {
                 WordListEditor {

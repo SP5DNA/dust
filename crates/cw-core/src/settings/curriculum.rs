@@ -186,8 +186,18 @@ impl TrainingSettings {
     }
 
     /// Switch character set, starting it on its whole alphabet.
+    ///
+    /// Custom with no list of its own starts the list on the unlock order,
+    /// the one it would fall back to anyway: the list in its box is then
+    /// the list in use, to be edited from there, and the level means what
+    /// it meant.
     pub fn set_char_set_mode(&mut self, mode: CharSetMode) {
         self.curriculum.char_set_mode = mode;
         self.curriculum.practice_window = PracticeWindow::All;
+        if mode == CharSetMode::Custom
+            && Self::unique_alphabet(&self.curriculum.custom_set).is_empty()
+        {
+            self.curriculum.custom_set = Self::unique_alphabet(self.sequence());
+        }
     }
 }
