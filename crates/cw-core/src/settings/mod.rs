@@ -508,12 +508,14 @@ pub struct TrainingSettings {
 
 mod clamp;
 mod curriculum;
+mod experience;
 mod ranges;
 mod reset;
 mod save;
 
 pub(crate) use curriculum::LETTER_LEVEL_CEILING;
 pub use curriculum::LevelAxis;
+pub use experience::Experience;
 
 #[cfg(test)]
 mod tests {

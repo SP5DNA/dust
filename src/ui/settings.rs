@@ -7,20 +7,21 @@
 use cw_core::{
     ADJUST_COUNT_MAX, ADJUST_THRESHOLD_MAX_PCT, ADJUST_THRESHOLD_MIN_PCT, AutoLevelSettings,
     COVERAGE_STRENGTH_MAX, CharSetMode, ERROR_WEIGHT_MAX, EXTRA_WORD_SPACE_MAX,
-    EXTRA_WORD_SPACE_MIN, GROUP_PAUSE_MAX_SEC, GROUP_REPEAT_MAX, GROUP_REPEAT_MIN, GROUP_SIZE_MAX,
-    GROUP_SIZE_MIN, GROUP_TIMEOUT_MAX_SEC, GroupSizeTarget, KeyerMode, NUM_GROUPS_MAX,
-    NUM_GROUPS_MIN, RangeSetting, SIDE_TONE_MAX_HZ, SIDE_TONE_MIN_HZ, SettingsSection,
-    TrainingSettings, VOLUME_MAX, VOLUME_MIN, WPM_MAX, WPM_MIN, adapts_group_size,
+    EXTRA_WORD_SPACE_MIN, Experience, GROUP_PAUSE_MAX_SEC, GROUP_REPEAT_MAX, GROUP_REPEAT_MIN,
+    GROUP_SIZE_MAX, GROUP_SIZE_MIN, GROUP_TIMEOUT_MAX_SEC, GroupSizeTarget, KeyerMode,
+    NUM_GROUPS_MAX, NUM_GROUPS_MIN, RangeSetting, SIDE_TONE_MAX_HZ, SIDE_TONE_MIN_HZ,
+    SettingsSection, TrainingSettings, VOLUME_MAX, VOLUME_MIN, WPM_MAX, WPM_MIN, adapts_group_size,
 };
 use dioxus::prelude::*;
 
 use crate::ui::band::BandConditionsCard;
 use crate::ui::envelope::EnvelopeCard;
+use crate::ui::home::range_label;
 use crate::ui::paddle::PaddlePad;
 use crate::ui::settings_charset::CharsetCard;
 use crate::ui::widgets::{
-    CardHead, IconName, NumberField, SectionReset, Seg, SettingsRange, SliderField, Switch,
-    control_id,
+    CardHead, Icon, IconName, NumberField, SectionReset, Seg, SettingsRange, SliderField, Switch,
+    control_id, html_bool,
 };
 
 /// What a target for adaptive group size is called on screen.
@@ -93,6 +94,7 @@ pub fn SettingsView(
                 h2 { class: "page-title", "Settings" }
                 p { class: "page-sub", "Everything the trainer sends, and how hard it makes you work." }
             }
+            ExperienceCard { settings }
             CharsetCard { settings }
             SessionShapeCard { settings }
             SpeedCard { settings }
@@ -113,6 +115,75 @@ pub fn SettingsView(
             }
             crate::ui::privacy::PrivacyCard {}
             crate::ui::credits::CreditsCard {}
+        }
+    }
+}
+
+/// What a preset sets, in a line: "20 groups of 2–3 · 15–25 WPM · from level 8".
+fn experience_summary(experience: Experience) -> String {
+    let (fewest, most) = experience.group_size();
+    let (slowest, fastest) = experience.char_wpm();
+    format!(
+        "{} groups of {} · {} WPM · from level {}",
+        experience.groups(),
+        range_label(f64::from(fewest), f64::from(most)),
+        range_label(slowest, fastest),
+        experience.level()
+    )
+}
+
+/// A starting point for the kind of learner you are. The preset the
+/// settings are on is the one shown, so a change made anywhere on the page
+/// to what it set shows them as your own.
+#[component]
+fn ExperienceCard(settings: Signal<TrainingSettings>) -> Element {
+    let on = use_memo(move || Experience::of(&settings.read()))();
+    let note = match on {
+        Some(experience) => experience_summary(experience),
+        None => "Sets session length, group size, speed and level to start from.".to_string(),
+    };
+    rsx! {
+        div { class: "card experience",
+            CardHead { icon: IconName::Sparkle, title: "Experience", note,
+                // Drawn afresh when the preset the settings are on changes:
+                // a select keeps the option last picked in it over a change
+                // to which one is marked.
+                ExperiencePicker {
+                    key: "{on:?}",
+                    on,
+                    on_pick: move |experience: Experience| experience.apply(&mut settings.write()),
+                }
+            }
+        }
+    }
+}
+
+/// The presets as a dropdown: the platform's own picker, dressed as a pill.
+#[component]
+fn ExperiencePicker(on: Option<Experience>, on_pick: EventHandler<Experience>) -> Element {
+    rsx! {
+        span { class: "select-wrap",
+            select {
+                id: control_id("select", "experience"),
+                class: if on.is_some() { "select chosen" } else { "select" },
+                aria_label: "Experience",
+                onchange: move |e| {
+                    if let Some(experience) = Experience::from_key(&e.value()) {
+                        on_pick.call(experience);
+                    }
+                },
+                if on.is_none() {
+                    option { value: "", disabled: html_bool(true), selected: html_bool(true), "Custom" }
+                }
+                for experience in Experience::ALL {
+                    option {
+                        value: experience.key(),
+                        selected: html_bool(on == Some(experience)),
+                        "{experience.name()}"
+                    }
+                }
+            }
+            Icon { name: IconName::Chevron }
         }
     }
 }

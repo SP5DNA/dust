@@ -55,7 +55,8 @@ fn level_reading(settings: &TrainingSettings) -> LevelReading {
     }
 }
 
-fn range_label(min: f64, max: f64) -> String {
+/// A range as it reads: one number when its ends meet.
+pub(crate) fn range_label(min: f64, max: f64) -> String {
     if (min - max).abs() < f64::EPSILON {
         pretty_number(min)
     } else {
