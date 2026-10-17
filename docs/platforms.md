@@ -205,9 +205,10 @@ gives it:
 which is what a portable install uses.
 
 Updating the app does not clear any of it. The storage keys (`dust_settings`,
-`dust_sessions`, `dust_auto_adjust_*`) and file names are not versioned, and
-settings files from older builds still load — new fields fall back to their
-defaults, and one unreadable field costs only that field. A history that
+`dust_sessions`, `dust_auto_adjust_*`, `dust_theme`, `dust_tutorial_done`) and
+file names are not versioned, and settings files from older builds still load
+— new fields fall back to their defaults, and one unreadable field costs only
+that field. A history that
 cannot be read at all is set aside beside the new one rather than written over,
 and if it cannot even be moved, nothing is saved over it.
 

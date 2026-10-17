@@ -400,6 +400,14 @@ impl Ui {
         store.save_settings(&settings);
         store.save_sessions(sessions);
         store.settings_saves.set(0);
+        // Past the first launch, which opens the guided setup by itself.
+        store.mark_tutorial_done();
+        Self::launch(store)
+    }
+
+    /// The app, launched on whatever `store` holds: a first launch on one
+    /// that holds nothing.
+    pub fn launch(store: Rc<MemoryStore>) -> (Self, Rc<Recorder>) {
         let recorder = Recorder::new();
         let state = AppState::with(recorder.factory(), store.clone());
         (

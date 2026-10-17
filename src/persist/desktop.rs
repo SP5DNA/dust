@@ -11,6 +11,7 @@ use cw_core::{AutoLevelCounters, CountersKey, SessionResult, TrainingSettings};
 use super::{HistorySaved, Store, load_settings_from, newest, parse_sessions};
 
 const THEME: &str = "theme.txt";
+const TUTORIAL: &str = "tutorial_done.txt";
 const SETTINGS: &str = "settings.json";
 const SESSIONS: &str = "sessions.json";
 const COUNTERS: &str = "auto_adjust.json";
@@ -115,6 +116,14 @@ impl Store for DesktopStore {
 
     fn save_theme(&self, theme: &str) {
         let _ = self.write(THEME, theme.as_bytes());
+    }
+
+    fn tutorial_done(&self) -> bool {
+        self.root.join(TUTORIAL).exists()
+    }
+
+    fn mark_tutorial_done(&self) {
+        let _ = self.write(TUTORIAL, b"done");
     }
 
     fn load_settings(&self) -> TrainingSettings {
@@ -280,6 +289,7 @@ mod tests {
     fn a_fresh_install_reads_back_defaults() {
         let (_dir, store) = store("fresh");
         assert_eq!(store.load_theme(), "");
+        assert!(!store.tutorial_done());
         assert_eq!(store.load_settings(), TrainingSettings::default().clamp());
         assert!(store.load_sessions().is_empty());
         assert_eq!(
@@ -293,6 +303,8 @@ mod tests {
         let (dir, store) = store("roundtrip");
         store.save_theme("dark");
         assert_eq!(store.load_theme(), "dark");
+        store.mark_tutorial_done();
+        assert!(store.tutorial_done());
 
         let mut settings = TrainingSettings::default();
         settings.curriculum.num_groups = 7;
@@ -337,7 +349,8 @@ mod tests {
                 "auto_adjust.json",
                 "sessions.json",
                 "settings.json",
-                "theme.txt"
+                "theme.txt",
+                "tutorial_done.txt"
             ]
         );
     }

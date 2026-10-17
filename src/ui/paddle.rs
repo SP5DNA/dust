@@ -299,6 +299,19 @@ impl PaddleKeys {
         });
     }
 
+    /// Put `letter` in the open answer box, the way a keyed letter goes in:
+    /// how the guided setup's Show me copies a group. Whether a box took it.
+    pub fn type_letter(self, letter: char) -> bool {
+        let Some(answer) = *self.answer.peek() else {
+            return false;
+        };
+        if !*answer.open.peek() {
+            return false;
+        }
+        answer.letter.call(letter);
+        true
+    }
+
     fn taking_paddles(self) -> bool {
         match *self.answer.peek() {
             Some(answer) => *answer.open.peek(),
