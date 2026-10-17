@@ -252,6 +252,7 @@ fn floating_config() -> Config {
 fn floating_builder() -> WindowBuilder {
     WindowBuilder::new()
         .with_title("Dust — groups")
+        .with_window_icon(Some(crate::window_icon()))
         .with_decorations(false)
         .with_transparent(true)
         .with_resizable(false)

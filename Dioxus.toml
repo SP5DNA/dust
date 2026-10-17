@@ -22,7 +22,28 @@ style = []
 [bundle]
 identifier = "dev.dust.morse"
 publisher = "Dust"
+category = "Education"
 short_description = "CW Morse group trainer"
+# Freedesktop sizes of assets/icon.png. GNOME reads these from hicolor;
+# regenerate them with scripts/render-linux-icons.py.
+icon = [
+    "assets/linux/16x16.png",
+    "assets/linux/22x22.png",
+    "assets/linux/24x24.png",
+    "assets/linux/32x32.png",
+    "assets/linux/36x36.png",
+    "assets/linux/48x48.png",
+    "assets/linux/64x64.png",
+    "assets/linux/72x72.png",
+    "assets/linux/96x96.png",
+    "assets/linux/128x128.png",
+    "assets/linux/192x192.png",
+    "assets/linux/256x256.png",
+    "assets/linux/512x512.png",
+]
+
+[bundle.deb]
+desktop_template = "assets/linux/dust.desktop.hbs"
 
 # Play Store submissions from 2026-08-31 must target API 36.
 # Signing stays out of this file: see scripts/android-play-bundle.sh.

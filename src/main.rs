@@ -105,6 +105,14 @@ mod tests {
     }
 }
 
+/// The Dust mark on the window. GNOME's launcher uses the `.desktop` icon;
+/// this is what the title bar shows.
+#[cfg(feature = "desktop")]
+pub(crate) fn window_icon() -> dioxus::desktop::tao::window::Icon {
+    dioxus::desktop::icon_from_memory(include_bytes!("../assets/icon.png"))
+        .expect("assets/icon.png")
+}
+
 #[cfg(feature = "desktop")]
 fn launch_desktop() {
     #[cfg(target_os = "linux")]
@@ -126,6 +134,7 @@ fn launch_desktop() {
                 .with_window(
                     WindowBuilder::new()
                         .with_title("Dust")
+                        .with_window_icon(Some(window_icon()))
                         .with_inner_size(LogicalSize::new(560.0, 860.0))
                         .with_min_inner_size(LogicalSize::new(420.0, 640.0)),
                 ),
