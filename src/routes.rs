@@ -260,7 +260,6 @@ fn TrainingRoute() -> Element {
         return rsx! { p { class: "muted", "Starting…" } };
     };
     let view = session.view();
-    let keyer_mode = session.settings().playback.keyer_mode;
     rsx! {
         div { class: "stack",
             TrainingProgress {
@@ -280,7 +279,6 @@ fn TrainingRoute() -> Element {
                 locked: view.locked,
                 repeat_total: view.repeat_total,
                 repeat_done: view.repeat_done,
-                keyer_mode,
                 answer: ctx.answer,
                 on_change,
                 on_confirm,

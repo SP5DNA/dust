@@ -1,10 +1,10 @@
-use cw_core::{KeyerMode, answer_length_matches};
+use cw_core::answer_length_matches;
 use dioxus::core::Runtime;
 use dioxus::prelude::*;
 
 use crate::session_runtime::AnswerOutbox;
 use crate::time::sleep_ms;
-use crate::ui::paddle::{PaddleKeys, paddle_hint};
+use crate::ui::paddle::PaddleKeys;
 use crate::ui::widgets::{
     CharacterComparison, Icon, IconName, ProgressHeader, control_id, html_bool,
 };
@@ -355,6 +355,9 @@ fn AnswerBox(
     }
 }
 
+/// The room after the last group, which [`focus_script`] sizes.
+const GROUP_TAIL: &str = "group-tail";
+
 /// The script that brings the box for `idx` into view and gives it the focus,
 /// in one trip to the page.
 ///
@@ -366,6 +369,12 @@ fn AnswerBox(
 /// and mobile builds hand its alignment to `scrollIntoView` under names it
 /// does not know, and the box ends up at the top edge of the list.
 ///
+/// The last groups have no cards below them to scroll past, and stopped at
+/// the foot of the list, half under a phone's keyboard. So a list that
+/// scrolls ends in [`GROUP_TAIL`], half the list tall, and they come up to
+/// the middle like the rest. It is sized here, from the list as it is on
+/// screen, and only for a list that scrolls: one that fits keeps no gap.
+///
 /// Every build runs what it is given to eval as the body of a function, so the
 /// script may return early.
 fn focus_script(idx: usize) -> String {
@@ -375,6 +384,11 @@ const input = document.getElementById("group-input-{idx}");
 // A box that has closed again since it opened is left where it is.
 if (!card || !input || input.disabled || input.readOnly) {{
     return;
+}}
+const tail = document.getElementById("{GROUP_TAIL}");
+const list = tail && tail.parentElement;
+if (list && list.scrollHeight > list.clientHeight) {{
+    tail.style.height = list.clientHeight / 2 + "px";
 }}
 // An engine that does not know an instant scroll refuses the options whole;
 // it can still centre, and the focus must come either way.
@@ -408,7 +422,6 @@ pub fn TrainingView(
     on_confirm: EventHandler<()>,
     on_submit: EventHandler<()>,
     on_stop: EventHandler<()>,
-    #[props(default)] keyer_mode: KeyerMode,
 ) -> Element {
     let send_index = (repeat_done + 1).min(repeat_total.max(1));
     let current_done = confirmed.get(current).copied().unwrap_or(false);
@@ -436,12 +449,14 @@ pub fn TrainingView(
         // A letter half keyed for one group is not the next one's.
         keys.stop();
     }));
+    // One short line. How to key with the paddles is the settings screen's to
+    // say, beside the paddles, not something to read with a group to copy.
     let hint = if playing && locked {
-        "Listen — the answer box unlocks when the group finishes.".to_string()
+        "Listen — the answer box unlocks when the group finishes."
     } else if playing {
-        "Listen, or type along — the box stays open while this group is sent.".to_string()
+        "Listen, or type along — the box stays open while this group is sent."
     } else {
-        format!("Type the letters, or key them. {}", paddle_hint(keyer_mode))
+        "Type what you heard."
     };
     rsx! {
         div { style: "display: contents;",
@@ -504,6 +519,7 @@ pub fn TrainingView(
                             }
                         }
                     }
+                    div { id: GROUP_TAIL, class: "group-tail", aria_hidden: "true" }
                 }
             }
             div { class: "train-actions",
@@ -528,7 +544,8 @@ pub fn TrainingView(
 
 #[cfg(test)]
 mod tests {
-    use super::focus_script;
+    use super::{GROUP_TAIL, focus_script};
+    use crate::testing::{Ui, run, test_settings};
 
     /// The harness never mounts anything on a page, so the script is the one
     /// part of the box taking the focus a test can see.
@@ -563,5 +580,43 @@ mod tests {
             .find("input.disabled || input.readOnly")
             .expect("a closed box is left alone");
         assert!(guard < scroll, "{script}");
+        // The room after the last group is made before the card is centred,
+        // and only in a list that scrolls.
+        assert!(
+            script.contains(&format!(r#"getElementById("{GROUP_TAIL}")"#)),
+            "{script}"
+        );
+        let scrolls = script
+            .find("list.scrollHeight > list.clientHeight")
+            .expect("a list that fits keeps no gap");
+        let room = script
+            .find(r#"tail.style.height = list.clientHeight / 2 + "px";"#)
+            .expect("the room is half the list");
+        assert!(
+            guard < scrolls && scrolls < room && room < scroll,
+            "{script}"
+        );
+    }
+
+    /// The room the script sizes is the list's last child: after every
+    /// group, and before the session's buttons.
+    #[test]
+    fn the_group_list_ends_in_room_for_its_last_group() {
+        run(|| async {
+            let mut settings = test_settings();
+            settings.curriculum.num_groups = 3;
+            let (mut ui, _recorder) = Ui::app_with_settings(settings);
+            ui.click("btn-start-training");
+            let html = ui.html();
+            let at = |needle: &str| {
+                html.find(needle)
+                    .unwrap_or_else(|| panic!("no {needle} in {html}"))
+            };
+            let id = format!(r#"id="{GROUP_TAIL}""#);
+            let tail = at(&id);
+            assert!(at(r#"id="group-card-2""#) < tail, "{html}");
+            assert!(tail < at(r#"id="btn-end-session""#), "{html}");
+            assert_eq!(html.matches(&id).count(), 1, "{html}");
+        });
     }
 }

@@ -15,6 +15,7 @@ pub mod settings_charset;
 pub mod stats;
 pub mod stats_detail;
 pub mod tips;
+pub mod tour;
 pub mod training;
 pub mod widgets;
 #[cfg(feature = "desktop")]

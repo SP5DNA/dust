@@ -1173,6 +1173,10 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
   padding: 0.15rem;
   margin: 0 -0.15rem;
 }
+/* Room after the last group, so it can come up to the middle of a list that
+   scrolls, like the rest. The focus script gives it its height; the margin
+   takes back the gap before it, so in a list that fits it adds nothing. */
+.group-tail { flex: none; margin-top: -0.6rem; }
 .group {
   border: 1px solid var(--line);
   background: var(--surface-2);
@@ -1706,6 +1710,67 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
   transition: background 0.15s var(--ease);
 }
 .toast-action:hover { background: rgba(255, 255, 255, 0.1); }
+
+/* ==========================================================================
+   Guided setup
+   ========================================================================== */
+
+.icon-btn.on { color: var(--copper); border-color: var(--copper); }
+
+/* Docked above the nav, the way the toast is. The guide brings the control it
+   points at into sight above the dock, so the dock never covers it. */
+.tour-dock {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: calc(6rem + env(safe-area-inset-bottom));
+  z-index: 35;
+  display: flex;
+  justify-content: center;
+  pointer-events: none;
+}
+.tour {
+  pointer-events: auto;
+  width: min(560px, calc(100% - 1.5rem));
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.8rem 1rem 0.9rem;
+  border-radius: var(--r-lg);
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+  box-shadow: var(--shadow-lg);
+}
+.tour-head { display: flex; align-items: center; justify-content: space-between; gap: 0.6rem; }
+.tour-head .icon-btn { width: 1.9rem; height: 1.9rem; box-shadow: none; }
+.tour-title { margin: 0 0 0.2rem; font-size: 1.05rem; letter-spacing: -0.01em; color: var(--ink); }
+.tour-text { margin: 0; font-size: 0.86rem; line-height: 1.45; color: var(--ink-soft); }
+.tour-moves { display: flex; flex-wrap: wrap; gap: 0.35rem; }
+.tour-move {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  border: 1px solid var(--line);
+  border-radius: var(--pill);
+  background: var(--surface-2);
+  color: var(--ink-dim);
+  padding: 0.2rem 0.6rem;
+  font-size: 0.74rem;
+  font-weight: 700;
+}
+.tour-move .icon { width: 0.8rem; height: 0.8rem; }
+.tour-move.next { border-color: var(--copper); background: var(--copper-soft); color: var(--copper-deep); }
+.tour-move.done { border-color: transparent; background: var(--good-soft); color: var(--good); }
+.tour-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 0.45rem; }
+.tour-next { margin-left: auto; }
+
+/* The pulse of the control the guide points at. The rule that puts it on a
+   control is the guide's own, written for the ids it means (src/ui/tour.rs),
+   with held steps: a shadow repaints on every frame it moves. */
+@keyframes tour-ring {
+  0%, 100% { box-shadow: 0 0 0 0 var(--glow); }
+  50% { box-shadow: 0 0 0 7px var(--glow); }
+}
 
 .icon { width: 1rem; height: 1rem; flex: 0 0 auto; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 

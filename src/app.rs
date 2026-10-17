@@ -13,6 +13,7 @@ use crate::state::{AppCtx, AppState, Screen, ToastAction};
 use crate::theme::Theme;
 use crate::time::sleep_ms;
 use crate::ui::paddle::use_paddle_keys;
+use crate::ui::tour::{TourButton, TourDock};
 use crate::ui::widgets::{Icon, IconName, control_id};
 
 // Desktop inlines this in the window head. Web loads it through `asset!` so
@@ -153,6 +154,9 @@ pub fn App() -> Element {
                         }
                     }
                     div { class: "header-actions",
+                        if show_nav {
+                            TourButton {}
+                        }
                         button {
                             id: control_id("btn", "theme"),
                             class: "icon-btn",
@@ -212,6 +216,7 @@ pub fn App() -> Element {
                     }
                 }
             }
+            TourDock {}
             if let Some(toast) = toasts.current() {
                 div { class: if show_nav { "toast-dock has-nav" } else { "toast-dock" },
                     div { class: "toast", role: "status",
