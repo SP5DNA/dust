@@ -108,6 +108,8 @@ pub struct AppCtx {
     pub stream_heard: Signal<Vec<crate::playback::HeardGroup>>,
     /// The open answer box's text, on its way to the session.
     pub answer: AnswerOutbox,
+    /// The guided setup's step, while it is open (src/ui/tour.rs).
+    pub tour: Signal<Option<usize>>,
     /// The sessions deleted last, each with where it sat, for Undo to put
     /// back.
     trash: Signal<Vec<(usize, SessionResult)>>,
@@ -129,6 +131,7 @@ impl AppCtx {
             preview: Signal::new(Preview::Idle),
             stream_heard: Signal::new(Vec::new()),
             answer: AnswerOutbox::new(),
+            tour: Signal::new(None),
             trash: Signal::new(Vec::new()),
             app: CopyValue::new(app),
         }
@@ -245,7 +248,8 @@ impl AppCtx {
 
     /// Leave for another screen. A session in progress holds you; otherwise
     /// whatever was sounding stops before the screen changes, wherever you
-    /// are going.
+    /// are going. The guided setup points at the settings screen's controls,
+    /// so it ends with that screen.
     pub fn go_to(mut self, to: Screen) {
         if self.session_running() {
             return;
@@ -253,6 +257,9 @@ impl AppCtx {
         self.app().player.release();
         self.preview.set(Preview::Idle);
         self.stream_heard.set(Vec::new());
+        if to != Screen::Settings {
+            self.tour.set(None);
+        }
         self.screen.set(to);
     }
 }
