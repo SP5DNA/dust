@@ -1173,6 +1173,10 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
   padding: 0.15rem;
   margin: 0 -0.15rem;
 }
+/* Room after the last group, so it can come up to the middle of a list that
+   scrolls, like the rest. The focus script gives it its height; the margin
+   takes back the gap before it, so in a list that fits it adds nothing. */
+.group-tail { flex: none; margin-top: -0.6rem; }
 .group {
   border: 1px solid var(--line);
   background: var(--surface-2);
