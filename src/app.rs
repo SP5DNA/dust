@@ -7,6 +7,7 @@ use std::rc::Rc;
 use cw_core::SessionEvent;
 use dioxus::prelude::*;
 
+use crate::keep_awake::use_keep_awake;
 use crate::routes::Route;
 use crate::session_runtime::send_event;
 use crate::state::{AppCtx, AppState, Screen, ToastAction};
@@ -112,6 +113,7 @@ pub fn App() -> Element {
     let mut theme = use_signal(|| Theme::from_key(&ctx.app().store.load_theme()));
     let paddle = use_paddle_keys(settings, screen, Rc::new(ctx.app()));
     use_stored_settings(ctx);
+    use_keep_awake(screen);
     #[cfg(feature = "desktop")]
     crate::ui::floating::use_floating_window(ctx);
 
@@ -322,7 +324,6 @@ fn toggle_fullscreen() {
 mod ui_tests {
     use crate::persist::Store;
     use crate::testing::{Ui, run, stored_session, test_settings};
-    use crate::ui::training::INPUT_COMMIT_DEBOUNCE_MS;
     use cw_core::{CharSetMode, PracticeWindow, TrainingSettings};
     use dioxus::prelude::{Code, Key};
 
@@ -330,6 +331,12 @@ mod ui_tests {
         let mut settings = test_settings();
         settings.curriculum.num_groups = 1;
         settings
+    }
+
+    /// Whether the first group's box shows `text`.
+    fn box_shows(ui: &Ui, text: &str) -> bool {
+        ui.input_tag("group-input-0")
+            .contains(&format!("value=\"{text}\""))
     }
 
     /// Start a session and wait for the first group's answer box to open.
@@ -425,7 +432,7 @@ mod ui_tests {
             let (mut ui, recorder) = Ui::app_with_settings(short_session());
             ui.click("btn-start-training");
             assert_eq!(ui.screen(), "training");
-            assert!(ui.has("Listen — the answer box unlocks"));
+            assert!(ui.has("Listen — the box opens when it ends."));
             // The nav is out of the way while a session runs.
             assert!(!ui.has("bottom-nav"));
             assert!(ui.run_until(5_000, |ui| ui.has("Your turn")).await);
@@ -448,23 +455,27 @@ mod ui_tests {
             let (mut ui, recorder) = Ui::app_with_settings(settings);
             ui.click("btn-start-training");
             assert_eq!(ui.screen(), "training");
-            assert!(ui.has("Listen — the answer box unlocks"));
+            assert!(ui.has("Listen — the box opens when it ends."));
+            // Locked, but neither read-only nor disabled: either would take
+            // the focus away, and a phone's keyboard with it.
             let sending = ui.input_tag("group-input-0");
-            assert!(sending.contains("readonly"), "{sending}");
+            assert!(sending.contains("answer locked"), "{sending}");
+            assert!(!sending.contains("readonly"), "{sending}");
+            assert!(!sending.contains("disabled"), "{sending}");
             ui.type_into("group-input-0", "XX");
             assert!(!ui.has("committed"), "{}", ui.html());
 
             assert!(ui.run_until(5_000, |ui| ui.has("Your turn")).await);
             let open = ui.input_tag("group-input-0");
+            assert!(!open.contains("locked"), "{open}");
             assert!(!open.contains("readonly"), "{open}");
             assert!(!open.contains("disabled"), "{open}");
 
             let sent = recorder.texts().first().cloned().expect("a group was sent");
             ui.type_into("group-input-0", &sent);
             assert!(
-                ui.run_until(5_000, |ui| ui
-                    .input_tag("group-input-1")
-                    .contains("readonly"))
+                ui.run_until(5_000, |ui| ui.shows("group-input-1")
+                    && ui.input_tag("group-input-1").contains("answer locked"))
                     .await,
                 "the next group should lock while it plays: {}",
                 ui.html()
@@ -472,17 +483,16 @@ mod ui_tests {
             assert!(
                 ui.run_until(8_000, |ui| {
                     let tag = ui.input_tag("group-input-1");
-                    !tag.contains("readonly") && !tag.contains("disabled")
+                    !tag.contains("locked") && !tag.contains("disabled")
                 })
                 .await,
                 "the next group's box should unlock: {}",
                 ui.html()
             );
-            let first = ui.input_tag("group-input-0");
-            assert!(
-                first.contains("disabled") || first.contains("readonly"),
-                "the finished group must not stay live: {first}"
-            );
+            // The finished group has no box any more: it sits above the open
+            // one, with how it went.
+            assert!(!ui.shows("group-input-0"), "{}", ui.html());
+            assert!(ui.input_tag("group-card-0").contains("group done"));
         });
     }
 
@@ -579,11 +589,12 @@ mod ui_tests {
         });
     }
 
-    /// The answer window closes on everything typed before it did, the last
-    /// key included — even one still in the box's pause on its way to the
-    /// session when the window ran out.
+    /// A pause in an answer is time to think, not a character skipped: the
+    /// answer window leaves an answer under way open — even one whose first
+    /// key was still in the box's pause on its way to the session when the
+    /// window ran out — and the rest of it, typed long after, is the answer.
     #[test]
-    fn the_last_key_before_the_answer_window_closes_is_kept() {
+    fn the_answer_window_waits_for_an_answer_under_way() {
         run(|| async {
             let mut settings = short_session();
             settings.playback.group_timeout = 1.0;
@@ -594,21 +605,21 @@ mod ui_tests {
             ui.advance(970).await;
             assert_eq!(ui.screen(), "training");
             ui.type_into("group-input-0", &sent[..1]);
-            // Closed before the box's pause was over: only the runtime can
-            // have handed the key over.
-            ui.advance(u64::from(INPUT_COMMIT_DEBOUNCE_MS) - 8).await;
-            assert_eq!(ui.screen(), "results", "the window outlived the pause");
+            // Ten windows' worth of thinking.
+            ui.advance(10_000).await;
+            assert_eq!(ui.screen(), "training", "the window cut the answer off");
+            assert!(ui.has("Your turn"));
+            ui.type_into("group-input-0", &sent);
+            assert!(ui.run_until(2_000, |ui| ui.screen() == "results").await);
             let stored = ui.store.load_sessions();
             assert_eq!(stored.len(), 1);
-            assert_eq!(stored[0].groups[0].received, sent[..1]);
-            // The pause the key started ends with the box, harmlessly.
-            ui.advance(200).await;
-            assert_eq!(ui.screen(), "results");
+            assert_eq!(stored[0].groups[0].received, sent);
         });
     }
 
-    /// A letter keyed on the paddles is in the answer when the window closes,
-    /// even with its letter space still running out.
+    /// A letter keyed on the paddles as the window runs out begins the
+    /// answer, even with its letter space still running: the window waits
+    /// for the letter, and then for the rest.
     #[test]
     fn a_paddle_letter_keyed_before_the_window_closes_is_kept() {
         run(|| async {
@@ -627,19 +638,19 @@ mod ui_tests {
             ui.release_key("group-input-0", dah, Code::BracketRight);
             ui.advance(150).await;
             assert_eq!(ui.screen(), "training");
-            // The window closes here. The keyer alone would end the letter a
+            // The window runs out here. The keyer alone ends the letter a
             // dit of space and a letter space after the dah, 60 ms or more
-            // from now.
+            // from now, and the window waits for it.
             ui.advance(60).await;
-            assert_eq!(ui.screen(), "results", "the window outlived the dah");
+            assert_eq!(ui.screen(), "training", "the window cut the dah off");
+            ui.advance(2_000).await;
+            assert_eq!(ui.screen(), "training", "the answer was not waited for");
+            assert!(box_shows(&ui, "T"), "{}", ui.input_tag("group-input-0"));
+            ui.press_enter("group-input-0");
+            assert!(ui.run_until(2_000, |ui| ui.screen() == "results").await);
             let stored = ui.store.load_sessions();
             assert_eq!(stored.len(), 1);
             assert_eq!(stored[0].groups[0].received, "T");
-            // The keyer's own wake, still set for the letter space, finds the
-            // letter gone and the box with it.
-            ui.advance(400).await;
-            assert_eq!(ui.screen(), "results");
-            assert_eq!(ui.store.load_sessions()[0].groups[0].received, "T");
         });
     }
 

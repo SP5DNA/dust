@@ -324,7 +324,7 @@ const STEPS: &[Step] = &[
     },
     Step {
         title: "Copy a group",
-        text: "Listen to the group. When it finishes the box opens: type what you heard.",
+        text: "Listen to the group. When it finishes the box opens: type what you heard, on the keypad or a keyboard. Take your time — it waits for you.",
         moves: &[Move::Answer],
         screen: Some(Screen::Training),
         moves_on: true,

@@ -6,7 +6,7 @@
 
 use cw_core::{
     ADJUST_COUNT_MAX, ADJUST_THRESHOLD_MAX_PCT, ADJUST_THRESHOLD_MIN_PCT, AutoLevelSettings,
-    COVERAGE_STRENGTH_MAX, CharSetMode, ERROR_WEIGHT_MAX, EXTRA_WORD_SPACE_MAX,
+    COUNTDOWN_MAX_SEC, COVERAGE_STRENGTH_MAX, CharSetMode, ERROR_WEIGHT_MAX, EXTRA_WORD_SPACE_MAX,
     EXTRA_WORD_SPACE_MIN, Experience, GROUP_PAUSE_MAX_SEC, GROUP_REPEAT_MAX, GROUP_REPEAT_MIN,
     GROUP_SIZE_MAX, GROUP_SIZE_MIN, GROUP_TIMEOUT_MAX_SEC, GroupSizeTarget, KeyerMode,
     NUM_GROUPS_MAX, NUM_GROUPS_MIN, RangeSetting, SIDE_TONE_MAX_HZ, SIDE_TONE_MIN_HZ,
@@ -202,6 +202,7 @@ struct SessionShape {
     num_groups: u32,
     group_timeout: f64,
     group_pause_sec: f64,
+    countdown_sec: u32,
     lock_input: bool,
     keyer_mode: KeyerMode,
     keyer_wpm: f64,
@@ -221,6 +222,7 @@ impl SessionShape {
             num_groups: settings.curriculum.num_groups,
             group_timeout: p.group_timeout,
             group_pause_sec: p.group_pause_sec,
+            countdown_sec: p.countdown_sec,
             lock_input: p.lock_input_during_group_playback,
             keyer_mode: p.keyer_mode,
             keyer_wpm: p.keyer_wpm,
@@ -284,9 +286,21 @@ fn SessionShapeCard(settings: Signal<TrainingSettings>) -> Element {
                     unit: "sec",
                     onchange: move |v| settings.write().playback.group_pause_sec = v,
                 }
+                NumberField {
+                    label: "Countdown before the first group",
+                    value: f64::from(s.countdown_sec),
+                    min: 0.0,
+                    max: f64::from(COUNTDOWN_MAX_SEC),
+                    step: 1.0,
+                    unit: "sec",
+                    onchange: move |v| settings.write().playback.countdown_sec = v as u32,
+                }
             }
             p { class: "muted", style: "margin: 0; font-size: 0.8rem;",
                 "Time to read the last group before the next send. Zero keeps contest pace. Repeats of the same group stay a word space apart."
+            }
+            p { class: "muted", style: "margin: 0; font-size: 0.8rem;",
+                "The answer timeout moves on from a group you have not started. Once you type, the group waits for you: it is checked when every character is in, or when you press Next or Enter."
             }
             // A callsign or a word is as long as it is, so there is nothing to
             // set.

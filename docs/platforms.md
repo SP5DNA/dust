@@ -45,6 +45,15 @@ that does all three:
   Play reads it from the bundle. The hook still points the plugin at
   `ANDROID_NDK_HOME` (`ndkPath` and `ndkVersion`) as the plugin is applied.
 
+The screen stays on through a session — the count down, every send and
+every answer — through the window's own keep-screen-on flag
+(`FLAG_KEEP_SCREEN_ON`), set and cleared over JNI on the activity's thread
+([`src/keep_awake.rs`](../src/keep_awake.rs)). It needs no permission, and the
+system lets go of it with the window. The answer box asks for no on-screen
+keyboard (`inputmode="none"`): the training screen has a keypad of its own, so
+nothing slides in over the groups. A keyboard plugged in or paired still types
+into the box.
+
 The Morse, the band noise and static, and the paddle sidetone are mixed into
 one output stream, so there is no second stream for a device to refuse — some
 Android devices will not open two at once.
@@ -133,6 +142,10 @@ CoreAudio. One thing is iOS-only: an app that has not claimed an
 `AVAudioSession` is silent, follows the ringer switch and gets interrupted by
 anything else on the device, and cpal does not claim one. The player takes the
 `playback` category before opening its first stream.
+
+The screen is kept on through a session by the webview's Screen Wake Lock,
+which WebKit has on iOS 18.4 and later; an older iOS dims and locks on its
+usual schedule.
 
 What you can build, and what Apple lets you install, are different questions:
 

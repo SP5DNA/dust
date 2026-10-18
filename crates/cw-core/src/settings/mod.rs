@@ -32,6 +32,8 @@ pub const EXTRA_WORD_SPACE_MAX: f64 = 8.0;
 pub const GROUP_TIMEOUT_MAX_SEC: f64 = 120.0;
 /// The longest pause after a group before the next one.
 pub const GROUP_PAUSE_MAX_SEC: f64 = 15.0;
+/// The longest count down before a session's first group, in whole seconds.
+pub const COUNTDOWN_MAX_SEC: u32 = 10;
 /// The side tone: where on the dial a station can be heard.
 pub const SIDE_TONE_MIN_HZ: f64 = 200.0;
 pub const SIDE_TONE_MAX_HZ: f64 = 1_200.0;
@@ -250,6 +252,10 @@ pub struct PlaybackSettings {
     /// read before the next one starts. Zero is contest pace. This is not
     /// Morse spacing — repeats of the same group still use a word space.
     pub group_pause_sec: f64,
+    /// Seconds counted down, out loud on the screen, between Start training
+    /// and the first group: time to get the phone in hand and the ear ready.
+    /// Zero sends the first group at once.
+    pub countdown_sec: u32,
     pub lock_input_during_group_playback: bool,
     /// `[` is dit and `]` is dah on a USB keyer. Set when the paddles are wired the other way.
     pub paddle_swap: bool,
@@ -281,6 +287,7 @@ impl Default for PlaybackSettings {
             extra_word_space_multiplier: 1.0,
             group_timeout: 10.0,
             group_pause_sec: 2.0,
+            countdown_sec: 3,
             lock_input_during_group_playback: true,
             paddle_swap: false,
             keyer_mode: KeyerMode::IambicA,
@@ -754,6 +761,7 @@ mod tests {
         assert!(s.playback.link_char_to_effective);
         assert_eq!(s.playback.group_timeout, 10.0);
         assert_eq!(s.playback.group_pause_sec, 2.0);
+        assert_eq!(s.playback.countdown_sec, 3);
         assert_eq!(s.auto_level.auto_adjust_threshold, 90.0);
         assert_eq!(s.curriculum.num_groups, 20);
         assert_eq!(s.curriculum.digits_level, 1);
@@ -800,6 +808,7 @@ mod tests {
         s.playback.extra_word_space_multiplier = -3.0;
         s.playback.group_timeout = 9_000.0;
         s.playback.group_pause_sec = 9_000.0;
+        s.playback.countdown_sec = 9_000;
         s.playback.group_repeat_min = 99;
         s.playback.group_repeat_max = 0;
         s.band.side_tone_min = 9_000.0;
@@ -907,6 +916,7 @@ mod tests {
         assert_eq!(s.curriculum.num_groups, 200);
         assert_eq!(s.playback.group_timeout, 120.0);
         assert_eq!(s.playback.group_pause_sec, 15.0);
+        assert_eq!(s.playback.countdown_sec, COUNTDOWN_MAX_SEC);
         assert_eq!(s.playback.group_repeat_max, GROUP_REPEAT_MAX);
         assert_eq!(s.band.steepness, 50.0);
         assert_eq!(s.band.envelope_smoothing, 1.0);

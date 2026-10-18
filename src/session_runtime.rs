@@ -256,7 +256,10 @@ fn dispatch(ctx: AppCtx, lease: &Lease, event: SessionEvent) {
         // Auto-confirm waits for the answer to sit still, and one with a
         // letter still being keyed into it has not: ask again shortly. The
         // letter, once in, lengthens the answer and calls the confirm off.
-        Some(AnswerClose::Settled) if ctx.answer.entry_open() => {
+        // The answer window, likewise, closes only an answer nobody has
+        // begun, and a letter being keyed is one begun: once it is in, the
+        // window leaves the answer to its owner.
+        Some(AnswerClose::Settled | AnswerClose::Unbegun) if ctx.answer.entry_open() => {
             let lease = lease.clone();
             spawn_forever(async move {
                 if lease.sleep(ENTRY_RECHECK_MS).await.is_ok() {
@@ -265,6 +268,9 @@ fn dispatch(ctx: AppCtx, lease: &Lease, event: SessionEvent) {
             });
             return;
         }
+        // A letter keyed in full and not in the box yet begins the answer
+        // too, once it is in.
+        Some(AnswerClose::Unbegun) => ctx.answer.finish(),
         Some(AnswerClose::Settled) | None => {}
     }
     let effects = {
@@ -493,8 +499,9 @@ mod tests {
             .map(|g| g.input().to_string())
     }
 
-    /// A key still in the box's pause when the answer window closes counts:
-    /// the window closes on it, not on what the session had been told before.
+    /// A key still in the box's pause when the answer window runs out
+    /// counts: the session hears it first, and it is an answer begun, which
+    /// the window leaves open.
     #[test]
     fn typing_still_on_its_way_is_heard_before_the_answer_window_closes() {
         run(|| async {
@@ -506,10 +513,53 @@ mod tests {
             // Typed, and not yet handed over — nothing will hand it over but
             // the runtime.
             h.ctx.answer.hold(0, "K".into());
-            assert!(h.run_until(4_000, |h| h.texts().len() == 2).await);
+            h.advance(3_000).await;
             assert_eq!(input_of(&h, 0).as_deref(), Some("K"));
+            assert_eq!(
+                h.awaiting_answer(),
+                Some(0),
+                "the window cut the answer off"
+            );
+            assert_eq!(h.texts().len(), 1);
+            // Enter takes it as it is.
+            h.send(SessionEvent::Confirm);
             let confirmed = h.ctx.runtime.peek().as_ref().map(|s| s.view().confirmed);
             assert_eq!(confirmed, Some(vec![true, false]));
+        });
+    }
+
+    /// Nothing typed: the answer window moves the session on by itself.
+    #[test]
+    fn the_answer_window_moves_on_from_a_group_not_begun() {
+        run(|| async {
+            let mut settings = test_settings();
+            settings.playback.group_timeout = 1.0;
+            let mut h = Harness::with_settings(settings);
+            h.start_training();
+            assert!(h.run_until(4_000, |h| h.awaiting_answer() == Some(0)).await);
+            assert!(h.run_until(4_000, |h| h.texts().len() == 2).await);
+            assert_eq!(input_of(&h, 0).as_deref(), Some(""));
+        });
+    }
+
+    /// A session counts down before its first group, a second a step, and
+    /// sends nothing until it has.
+    #[test]
+    fn the_first_group_waits_for_the_count_down() {
+        run(|| async {
+            let mut settings = test_settings();
+            settings.playback.countdown_sec = 3;
+            let mut h = Harness::with_settings(settings);
+            h.start_training();
+            assert_eq!(h.phase(), Some(SessionPhase::Countdown { remaining: 3 }));
+            h.advance(1_000).await;
+            assert_eq!(h.phase(), Some(SessionPhase::Countdown { remaining: 2 }));
+            h.advance(1_900).await;
+            assert_eq!(h.phase(), Some(SessionPhase::Countdown { remaining: 1 }));
+            assert!(h.texts().is_empty(), "sent during the count down");
+            h.advance(200).await;
+            assert_eq!(h.texts().len(), 1);
+            assert_eq!(h.phase(), Some(SessionPhase::Playing { index: 0 }));
         });
     }
 
@@ -600,7 +650,9 @@ mod tests {
     /// Before the answer closes — and only then — the box is asked to finish
     /// what is entered in full, and what it finishes is in the answer. A
     /// send ending, or the gap between two sends, leaves the answer open:
-    /// finishing a paddle letter there would cut one being keyed in two.
+    /// finishing a paddle letter there would cut one being keyed in two. The
+    /// answer window asks too, and what it finishes begins the answer, which
+    /// it then leaves open for Enter.
     #[test]
     fn the_box_finishes_its_entry_only_as_the_answer_closes() {
         run(|| async {
@@ -625,8 +677,17 @@ mod tests {
             h.start_training();
             assert!(h.run_until(8_000, |h| h.awaiting_answer() == Some(0)).await);
             assert_eq!(asked.get(), 0, "two sends and a gap closed nothing");
+            assert!(h.run_until(4_000, |_| asked.get() == 1).await);
+            assert_eq!(input_of(&h, 0).as_deref(), Some("T"));
+            h.advance(2_000).await;
+            assert_eq!(
+                h.awaiting_answer(),
+                Some(0),
+                "an answer begun is waited for"
+            );
+            h.send(SessionEvent::Confirm);
+            assert_eq!(asked.get(), 2);
             assert!(h.run_until(4_000, |h| h.texts().len() == 3).await);
-            assert_eq!(asked.get(), 1);
             assert_eq!(input_of(&h, 0).as_deref(), Some("T"));
         });
     }

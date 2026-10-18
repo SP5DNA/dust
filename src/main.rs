@@ -17,6 +17,7 @@ compile_error!(
 
 mod app;
 mod audio;
+mod keep_awake;
 mod persist;
 mod playback;
 mod player;

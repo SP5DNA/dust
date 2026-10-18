@@ -772,6 +772,8 @@ mod tests {
         settings.auto_level.auto_adjust_level = true;
         settings.auto_level.auto_adjust_threshold = 50.0;
         settings.auto_level.auto_adjust_above_threshold_count = above_target;
+        // Played straight through: no count down to wait out first.
+        settings.playback.countdown_sec = 0;
         settings
     }
 

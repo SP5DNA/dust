@@ -24,9 +24,13 @@ pub fn TrainingProgress(
     playing: bool,
     repeat_total: u32,
     repeat_done: u32,
+    /// Seconds left before the first group, while the session counts down.
+    countdown: Option<u32>,
 ) -> Element {
     let send_index = (repeat_done + 1).min(repeat_total.max(1));
-    let status = if playing && repeat_total > 1 {
+    let status = if let Some(left) = countdown {
+        format!("Starting in {left}")
+    } else if playing && repeat_total > 1 {
         format!("Sending {send_index} of {repeat_total}")
     } else if playing {
         "Sending".to_string()
@@ -52,17 +56,16 @@ pub fn TrainingProgress(
 /// builds that write reaches the page a frame later, over whatever was typed
 /// in the meantime, and the key typed in between is lost for good. What is
 /// typed is in the box already, so while it is open the box is drawn only for
-/// what it has not seen: a letter the paddles keyed. Its card is drawn without
-/// it ([`AnswerBox`]), and a group that is over is drawn from what the session
-/// holds.
+/// what it has not seen: a letter the keypad or the paddles keyed. Its card is
+/// drawn without it ([`AnswerBox`]).
 #[derive(Clone, Copy, PartialEq)]
 struct AnswerDraft {
     /// The text in the box. Not reactive: a key is in the box before it is
     /// here, and drawing the box for it would only write it back.
     text: CopyValue<String>,
     /// Moved on when `text` changes in a way the box has not seen, which
-    /// draws the box again. Only the open box reads it, so it redraws that
-    /// box alone.
+    /// draws the box again. Only the box reads it, so it redraws that box
+    /// alone.
     repaint: Signal<u64>,
     /// The group `text` is the answer to.
     at: CopyValue<Option<usize>>,
@@ -71,7 +74,7 @@ struct AnswerDraft {
     /// moved stands down.
     epoch: CopyValue<u64>,
     /// The view the debounce belongs to, so one still waiting ends with it,
-    /// whoever started it — a key in a card, or the paddles.
+    /// whoever started it — a key in the box, the keypad, or the paddles.
     owner: ScopeId,
     on_change: EventHandler<(usize, String)>,
 }
@@ -100,7 +103,7 @@ impl AnswerDraft {
 
     /// What the box for `idx` shows while the draft is its own. Reading it
     /// subscribes the caller to the draft's rewrites — before the first one
-    /// too, since a paddle letter is what can make the draft this box's.
+    /// too, since a keyed letter is what can make the draft this box's.
     fn read_for(self, idx: usize) -> Option<String> {
         let _ = self.repaint.read();
         self.peek_for(idx)
@@ -138,13 +141,22 @@ impl AnswerDraft {
         });
     }
 
-    /// A paddle keyed `letter` into the box for `idx`. The page has not seen
-    /// it, so the box is drawn again to show it.
+    /// The keypad or a paddle keyed `letter` into the box for `idx`. The page
+    /// has not seen it, so the box is drawn again to show it.
     fn push(self, idx: usize, letter: char, sent: &str) {
         let mut text = self.peek_for(idx).unwrap_or_default();
         text.push(letter);
         self.edit(idx, text, sent);
         self.redraw();
+    }
+
+    /// The keypad's ⌫ took the last character out of the box for `idx`.
+    fn pop(self, idx: usize, sent: &str) {
+        let mut text = self.peek_for(idx).unwrap_or_default();
+        if text.pop().is_some() {
+            self.edit(idx, text, sent);
+            self.redraw();
+        }
     }
 
     /// Hand the session whatever is waiting. A debounce still waiting has
@@ -159,17 +171,20 @@ impl AnswerDraft {
     /// A new group is up, or this one is over: the pause has nothing left to
     /// wait for, and a finished group's draft is gone. Whatever was typed is
     /// with the session already — only the session moves a group on, and it
-    /// takes what is waiting first. Nothing is drawn for it: a finished
-    /// group's box is closed, and shows what the session holds.
+    /// takes what is waiting first. A finished group moves up to the slot
+    /// above, drawn from what the session holds, and the box is drawn empty
+    /// for the next one.
     fn settle(mut self, finished: bool) {
         self.cancel_pending();
         if finished {
             self.at.set(None);
             self.text.set(String::new());
+            self.redraw();
         }
     }
 
-    /// Draw the box showing the draft again, for a change it has not seen.
+    /// Draw the box again, for a change it has not seen — or to put back
+    /// what a box that is not taking typing was typed into.
     fn redraw(mut self) {
         *self.repaint.write() += 1;
     }
@@ -181,99 +196,86 @@ impl AnswerDraft {
     }
 }
 
-/// One group: what was sent, the box you answer it in, and the comparison
-/// once it is confirmed.
+/// Whether the phone's own keyboard is kept away from the answer box.
 ///
-/// Its own component for one reason, and it is the whole reason: a key lands
-/// in one box, and the twenty other cards on the screen have not changed. As
-/// an inline loop body every keystroke rebuilt and re-diffed all of them —
-/// twenty cards of roughly twenty nodes each, over the wire to the webview,
-/// between the key going down and the letter appearing. Given props to compare
-/// instead, the nineteen that did not move are skipped. That holds only while
-/// every prop is stable: a handler built afresh in the parent's body is a new
-/// prop on every render, and redraws them all.
+/// The keypad under the groups types into it instead, so the keyboard would
+/// only cover the screen — and come and go with every group, moving
+/// everything above it each time. A keyboard plugged in or paired still
+/// types into the box: `none` asks only that no keyboard be drawn on screen.
+const ANSWER_INPUT_MODE: &str = "none";
+
+/// The open group: its number, how many times it has been sent, and the box
+/// it is answered in.
+///
+/// It is the one place an answer is typed, for every group of the session,
+/// and the same box all the while: a box that came and went with each group
+/// took the focus with it, and with the focus the keyboard.
 #[component]
-#[allow(clippy::too_many_arguments)]
-fn GroupCard(
+fn OpenCard(
     idx: usize,
     sent: String,
-    /// What the session holds for this group. Blank for the active card,
-    /// whose box shows the draft instead.
-    value: String,
-    disabled: bool,
-    input_locked: bool,
-    is_focused: bool,
-    is_active: bool,
-    is_confirmed: bool,
+    /// The box takes typing: the group has been sent, or the lock is off.
+    live: bool,
     send_badge: Option<String>,
     placeholder: &'static str,
     draft: AnswerDraft,
     on_confirm: EventHandler<()>,
 ) -> Element {
-    let cls = if is_focused {
-        "group focused"
-    } else if is_confirmed {
-        "group done"
-    } else {
-        "group"
-    };
-    let live = is_active && !input_locked;
-    let correct = value.trim().eq_ignore_ascii_case(&sent);
+    // A box that opens takes the focus, so a keyboard types straight into
+    // it. One that has it already keeps it, and nothing moves.
+    use_effect(use_reactive!(|idx, live| {
+        // Tests have no page to run it on.
+        #[cfg(not(test))]
+        if live {
+            spawn(async move {
+                let _ = document::eval(&focus_script(idx)).await;
+            });
+        }
+        #[cfg(test)]
+        let _ = (idx, live);
+    }));
     rsx! {
-        div { id: "group-card-{idx}", class: cls,
+        div { id: "group-card-{idx}", class: "group focused",
             div { class: "row-between",
                 div { class: "row", style: "gap: 0.35rem;",
-                    span { class: if is_focused { "badge current" } else { "badge" }, "{idx + 1}" }
+                    span { class: "badge current", "{idx + 1}" }
                     if let Some(badge) = send_badge {
                         span { class: "badge current", "{badge}" }
                     }
                 }
-                div { class: "row", style: "gap: 0.4rem;",
-                    if is_confirmed {
-                        span { class: "sent", "{sent}" }
-                        span { class: if correct { "badge good" } else { "badge bad" },
-                            Icon { name: if correct { IconName::Check } else { IconName::X } }
-                        }
-                    } else {
-                        span { class: "sent", "•••" }
-                    }
-                }
+                span { class: "sent", "•••" }
             }
             AnswerBox {
                 idx,
-                sent: sent.clone(),
-                value: value.clone(),
-                disabled,
-                input_locked,
-                is_active,
-                is_confirmed,
+                sent,
+                live,
                 placeholder,
                 draft,
                 on_confirm,
             }
-            // The card is keyed on whether its box is live, so a box that
-            // opens is a new card, and this mounts with it: mounting is when
-            // the box takes the focus — the one place that does. Only a live
-            // card carries it, so the others cost no mount event.
-            if live {
-                span {
-                    hidden: true,
-                    onmounted: move |_| {
-                        // Tests have no page to run it on.
-                        #[cfg(not(test))]
-                        spawn(async move {
-                            let _ = document::eval(&focus_script(idx)).await;
-                        });
-                    },
-                }
-            }
-            if is_confirmed {
-                div { style: "margin-top: 0.5rem;",
-                    CharacterComparison {
-                        sent,
-                        received: value.trim().to_ascii_uppercase(),
+        }
+    }
+}
+
+/// The group just answered, dimmed, above the open one: what was sent, what
+/// you copied, and whether it was right.
+#[component]
+fn PreviousCard(idx: usize, sent: String, received: String) -> Element {
+    let received = received.trim().to_ascii_uppercase();
+    let correct = received.eq_ignore_ascii_case(&sent);
+    rsx! {
+        div { id: "group-card-{idx}", class: "group done",
+            div { class: "row-between",
+                span { class: "badge", "{idx + 1}" }
+                div { class: "row", style: "gap: 0.4rem;",
+                    span { class: "sent", "{sent}" }
+                    span { class: if correct { "badge good" } else { "badge bad" },
+                        Icon { name: if correct { IconName::Check } else { IconName::X } }
                     }
                 }
+            }
+            div { style: "margin-top: 0.5rem;",
+                CharacterComparison { sent, received }
             }
         }
     }
@@ -288,61 +290,45 @@ fn GroupCard(
 /// box has nothing to do with — the send counter, while a group repeats with
 /// the box open — and given props to compare, the box is skipped then.
 ///
-/// Only the open box reads the draft, and so only it is drawn for a paddle
-/// letter. The others must not: a read would subscribe every box to every
-/// letter and quietly undo the split.
+/// It is never disabled or read-only, not even while a group is sent with
+/// the lock on: either takes the focus away, and on a phone the keyboard
+/// with it. A box that is not taking typing turns away what reaches it
+/// instead, and draws itself again over it.
 #[component]
-#[allow(clippy::too_many_arguments)]
 fn AnswerBox(
     idx: usize,
     sent: String,
-    /// What the session holds for this group. Blank for the open box, which
-    /// shows the draft instead.
-    value: String,
-    disabled: bool,
-    input_locked: bool,
-    is_active: bool,
-    is_confirmed: bool,
+    live: bool,
     placeholder: &'static str,
     draft: AnswerDraft,
     on_confirm: EventHandler<()>,
 ) -> Element {
-    let class = if input_locked {
-        "answer locked"
-    } else {
-        "answer"
-    };
-    let closed = disabled || input_locked;
-    let shown = if is_active {
-        draft.read_for(idx).unwrap_or_default()
-    } else {
-        value
-    };
+    let shown = draft.read_for(idx).unwrap_or_default();
     rsx! {
         input {
             id: "group-input-{idx}",
-            class,
+            class: if live { "answer" } else { "answer locked" },
             aria_label: "Answer for group {idx + 1}",
             value: "{shown}",
-            disabled: html_bool(disabled),
-            readonly: html_bool(input_locked || is_confirmed),
             placeholder,
             autocomplete: "off",
             autocorrect: "off",
             autocapitalize: "characters",
             spellcheck: false,
             enterkeyhint: "done",
-            inputmode: "text",
+            inputmode: ANSWER_INPUT_MODE,
             lang: "zxx",
             oninput: move |e| {
-                if !closed {
+                if live {
                     draft.edit(idx, e.value(), &sent);
+                } else {
+                    draft.redraw();
                 }
             },
             // `[` and `]` are paddles: the app's root keys them and keeps
             // them out of the box.
             onkeydown: move |e| {
-                if closed {
+                if !live {
                     e.prevent_default();
                     return;
                 }
@@ -355,53 +341,112 @@ fn AnswerBox(
     }
 }
 
-/// The room after the last group, which [`focus_script`] sizes.
-const GROUP_TAIL: &str = "group-tail";
+/// A key on the keypad.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum PadKey {
+    Char(char),
+    Back,
+    Next,
+}
 
-/// The script that brings the box for `idx` into view and gives it the focus,
-/// in one trip to the page.
+/// The keypad's character rows, top to bottom: digits, then the letters as a
+/// keyboard has them, with the punctuation a group can hold at the ends.
+const PAD_ROWS: [&str; 4] = ["1234567890", "QWERTYUIOP", "ASDFGHJKL/", "ZXCVBNM,.?"];
+/// What the bottom row holds before ⌫ and Next.
+const PAD_LAST: [char; 2] = ['=', '+'];
+
+/// What a character key is called: its id, and what a screen reader says.
+fn pad_name(ch: char) -> (String, String) {
+    let word = match ch {
+        '/' => "slash",
+        ',' => "comma",
+        '.' => "period",
+        '?' => "question mark",
+        '=' => "equals",
+        '+' => "plus",
+        _ => return (control_id("key", &ch.to_string()), ch.to_string()),
+    };
+    (control_id("key", word), word.to_string())
+}
+
+/// Large keys for every character a group can hold, to answer by touch.
 ///
-/// Centred, so the group just answered stays in sight above it, and at once:
-/// a smooth scroll is an animation running for a few hundred milliseconds just
-/// as the group opens and you start typing, and the browser spends it laying
-/// out rather than echoing your keys. The focus then must not scroll again.
-/// The mounted element's own `scroll_to_with_options` will not do: the desktop
-/// and mobile builds hand its alignment to `scrollIntoView` under names it
-/// does not know, and the box ends up at the top edge of the list.
+/// The phone's keyboard stays away ([`ANSWER_INPUT_MODE`]), so the screen
+/// keeps one layout for the whole session. A key takes no focus: a press
+/// leaves the box focused, for a keyboard or the paddles to type on into.
 ///
-/// The last groups have no cards below them to scroll past, and stopped at
-/// the foot of the list, half under a phone's keyboard. So a list that
-/// scrolls ends in [`GROUP_TAIL`], half the list tall, and they come up to
-/// the middle like the rest. It is sized here, from the list as it is on
-/// screen, and only for a list that scrolls: one that fits keeps no gap.
+/// Shown wherever touch is how you type: always in the phone and tablet
+/// builds, and on the web and desktop whenever the device has a touch
+/// screen. A desktop with only a mouse and keyboard has no use for it.
+#[component]
+fn Keypad(open: bool, on_key: Callback<PadKey>) -> Element {
+    let class = if cfg!(any(feature = "mobile", feature = "mobile-silent")) {
+        "keypad"
+    } else {
+        "keypad touch-only"
+    };
+    let key =
+        move |pressed: PadKey, id: String, label: String, text: String, class: &'static str| {
+            rsx! {
+                button {
+                    id,
+                    class,
+                    r#type: "button",
+                    aria_label: label,
+                    disabled: html_bool(!open),
+                    onmousedown: move |e| e.prevent_default(),
+                    onclick: move |_| on_key.call(pressed),
+                    "{text}"
+                }
+            }
+        };
+    rsx! {
+        div { class, role: "group", aria_label: "Keypad",
+            for row in PAD_ROWS {
+                div { class: "keypad-row",
+                    for ch in row.chars() {
+                        {
+                            let (id, label) = pad_name(ch);
+                            key(PadKey::Char(ch), id, label, ch.to_string(), "key group-text")
+                        }
+                    }
+                }
+            }
+            div { class: "keypad-row keypad-last",
+                for ch in PAD_LAST {
+                    {
+                        let (id, label) = pad_name(ch);
+                        key(PadKey::Char(ch), id, label, ch.to_string(), "key group-text")
+                    }
+                }
+                {key(PadKey::Back, control_id("key", "delete"), "Delete".into(), "⌫".into(), "key key-back")}
+                {key(PadKey::Next, control_id("key", "next"), "Next".into(), "Next".into(), "key key-next")}
+            }
+        }
+    }
+}
+
+/// The script that gives the box for `idx` the focus, unless it has it.
 ///
 /// Every build runs what it is given to eval as the body of a function, so the
 /// script may return early.
 fn focus_script(idx: usize) -> String {
     format!(
-        r#"const card = document.getElementById("group-card-{idx}");
-const input = document.getElementById("group-input-{idx}");
-// A box that has closed again since it opened is left where it is.
-if (!card || !input || input.disabled || input.readOnly) {{
+        r#"const input = document.getElementById("group-input-{idx}");
+if (!input || document.activeElement === input) {{
     return;
-}}
-const tail = document.getElementById("{GROUP_TAIL}");
-const list = tail && tail.parentElement;
-if (list && list.scrollHeight > list.clientHeight) {{
-    tail.style.height = list.clientHeight / 2 + "px";
-}}
-// An engine that does not know an instant scroll refuses the options whole;
-// it can still centre, and the focus must come either way.
-try {{
-    card.scrollIntoView({{ block: "center", inline: "nearest", behavior: "instant" }});
-}} catch (_) {{
-    card.scrollIntoView({{ block: "center", inline: "nearest" }});
 }}
 input.focus({{ preventScroll: true }});"#
     )
 }
 
-/// The group list and the way out of the session.
+/// The open group, the one before it, the keypad, and the way out of the
+/// session.
+///
+/// Only two groups are on screen, each in a slot of its own that does not
+/// move: the one just answered above, dimmed, with how it went, and the open
+/// one below it, with the box. The keypad takes the room under them that a
+/// keyboard would have.
 ///
 /// The answer box is local: [`AnswerDraft`] says when the session hears it.
 /// Typing itself does not clone the session.
@@ -416,6 +461,8 @@ pub fn TrainingView(
     locked: bool,
     repeat_total: u32,
     repeat_done: u32,
+    /// Seconds left before the first group, while the session counts down.
+    countdown: Option<u32>,
     /// Where the box's text waits on its way to the session.
     answer: AnswerOutbox,
     on_change: EventHandler<(usize, String)>,
@@ -436,9 +483,12 @@ pub fn TrainingView(
     let sent_now = groups.get(current).cloned().unwrap_or_default();
     // The paddles key into the box that is open, and only while it is.
     let keys = use_context::<PaddleKeys>();
-    keys.use_answer_box(can_paddle, move |letter: char| {
-        draft.push(current, letter, &sent_now);
-    });
+    {
+        let sent_now = sent_now.clone();
+        keys.use_answer_box(can_paddle, move |letter: char| {
+            draft.push(current, letter, &sent_now);
+        });
+    }
     // A letter keyed in full is in the answer when it closes, even with its
     // letter space still running out; and auto-confirm waits for a letter
     // still being keyed, as it would for a key still being typed.
@@ -449,20 +499,59 @@ pub fn TrainingView(
         // A letter half keyed for one group is not the next one's.
         keys.stop();
     }));
+
+    // The open slot shows the group in focus: the one being sent or
+    // answered, or, between two groups, the one about to be sent.
+    let open = focused;
+    let open_done = confirmed.get(open).copied().unwrap_or(false);
+    let is_active = current == open && !open_done;
+    let awaiting_play = !is_active && !open_done;
+    let input_locked = (locked && is_active) || awaiting_play;
+    let live = is_active && !input_locked;
+    let placeholder = if countdown.is_some() {
+        "Get ready…"
+    } else if awaiting_play {
+        "Waiting…"
+    } else if input_locked {
+        "Listening…"
+    } else if live {
+        "Type the group"
+    } else {
+        "Waiting…"
+    };
+    let previous = open
+        .checked_sub(1)
+        .filter(|&idx| confirmed.get(idx).copied().unwrap_or(false));
+    let on_key = use_callback(move |pressed: PadKey| {
+        if !live {
+            return;
+        }
+        match pressed {
+            PadKey::Char(ch) => draft.push(current, ch, &sent_now),
+            PadKey::Back => draft.pop(current, &sent_now),
+            PadKey::Next => on_confirm.call(()),
+        }
+    });
     // One short line. How to key with the paddles is the settings screen's to
     // say, beside the paddles, not something to read with a group to copy.
-    let hint = if playing && locked {
-        "Listen — the answer box unlocks when the group finishes."
+    // Each fits one line of a narrow phone, so the groups below never move
+    // as it changes.
+    let hint = if countdown.is_some() {
+        "Get ready — the first group is coming."
+    } else if playing && locked {
+        "Listen — the box opens when it ends."
     } else if playing {
-        "Listen, or type along — the box stays open while this group is sent."
+        "Listen, or type along."
+    } else if live {
+        "Type what you heard — no rush."
     } else {
-        "Type what you heard."
+        "Next group on its way."
     };
     rsx! {
         div { style: "display: contents;",
             div { class: "card",
-                div { class: "row-between",
-                    p { class: "muted", style: "margin: 0;", "{hint}" }
+                div { class: "train-head",
+                    p { class: "muted train-hint", "{hint}" }
                     if repeat_total > 1 {
                         span { class: "chip",
                             Icon { name: IconName::Repeat }
@@ -470,58 +559,40 @@ pub fn TrainingView(
                         }
                     }
                 }
-                div { class: "group-list", style: "margin-top: 0.85rem;",
-                    for (idx, sent) in groups.iter().enumerate() {
-                        {
-                            let is_focused = focused == idx;
-                            let is_confirmed = confirmed.get(idx).copied().unwrap_or(false);
-                            let is_active = current == idx && !is_confirmed;
-                            let awaiting_play = is_focused && !is_active && !is_confirmed;
-                            let disabled = is_confirmed || (!is_active && !awaiting_play);
-                            let input_locked =
-                                (locked && is_active && !is_confirmed) || awaiting_play;
-                            let live = is_active && !input_locked;
-                            let placeholder = if awaiting_play {
-                                "Waiting…"
-                            } else if input_locked {
-                                "Listening…"
-                            } else if disabled {
-                                "Waiting…"
-                            } else {
-                                "Type the group"
-                            };
-                            rsx! {
-                                GroupCard {
-                                    key: "{idx}-{live}",
-                                    idx,
-                                    sent: sent.clone(),
-                                    // The open box shows the draft. What the
-                                    // session has heard of it changes nothing
-                                    // on screen, and passing it would draw the
-                                    // box each time the session hears — and
-                                    // write it back over the typing.
-                                    value: if is_active {
-                                        String::new()
-                                    } else {
-                                        inputs.get(idx).cloned().unwrap_or_default()
-                                    },
-                                    disabled,
-                                    input_locked,
-                                    is_focused,
-                                    is_active,
-                                    is_confirmed,
-                                    send_badge: (is_focused && playing && repeat_total > 1)
-                                        .then(|| format!("Send {send_index}/{repeat_total}")),
-                                    placeholder,
-                                    draft,
-                                    on_confirm,
-                                }
+                div { class: "train-groups",
+                    // Held before the first answer too, so the open group
+                    // below it never moves.
+                    div { class: "group-slot",
+                        if let Some(left) = countdown {
+                            div { class: "group countdown", role: "status",
+                                span { id: "countdown", class: "countdown-num", "{left}" }
+                                span { class: "muted", "The first group starts in {left} s" }
+                            }
+                        } else if let Some(idx) = previous {
+                            PreviousCard {
+                                idx,
+                                sent: groups.get(idx).cloned().unwrap_or_default(),
+                                received: inputs.get(idx).cloned().unwrap_or_default(),
+                            }
+                        } else {
+                            div { class: "group placeholder",
+                                span { class: "muted", "Each group you answer is checked here." }
                             }
                         }
                     }
-                    div { id: GROUP_TAIL, class: "group-tail", aria_hidden: "true" }
+                    OpenCard {
+                        idx: open,
+                        sent: groups.get(open).cloned().unwrap_or_default(),
+                        live,
+                        send_badge: (playing && repeat_total > 1)
+                            .then(|| format!("Send {send_index}/{repeat_total}")),
+                        placeholder,
+                        draft,
+                        on_confirm,
+                    }
                 }
             }
+            Keypad { open: live, on_key }
             div { class: "train-actions",
                 button {
                     id: control_id("btn", "end session"),
@@ -544,79 +615,73 @@ pub fn TrainingView(
 
 #[cfg(test)]
 mod tests {
-    use super::{GROUP_TAIL, focus_script};
+    use super::{PAD_LAST, PAD_ROWS, focus_script, pad_name};
     use crate::testing::{Ui, run, test_settings};
 
     /// The harness never mounts anything on a page, so the script is the one
     /// part of the box taking the focus a test can see.
     #[test]
-    fn the_opened_box_is_centred_and_focused_in_one_script() {
+    fn the_opened_box_takes_the_focus_unless_it_has_it() {
         let script = focus_script(7);
-        assert!(
-            script.contains(r#"getElementById("group-card-7")"#),
-            "{script}"
-        );
         assert!(
             script.contains(r#"getElementById("group-input-7")"#),
             "{script}"
         );
-        // `block`, not the `vertical` the desktop builds send for a mounted
-        // element's scroll: `scrollIntoView` ignores that, and top-aligns.
-        // Centred on both ways in, and never anywhere else.
-        let primary =
-            r#"card.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });"#;
-        let fallback = r#"card.scrollIntoView({ block: "center", inline: "nearest" });"#;
-        assert!(script.contains(primary), "{script}");
-        assert!(script.contains(fallback), "{script}");
-        assert_eq!(script.matches("block:").count(), 2, "{script}");
-        assert!(!script.contains("vertical"), "{script}");
-        let scroll = script.find(primary).expect("the card is scrolled");
+        let has = script
+            .find("document.activeElement === input")
+            .expect("a box with the focus is left alone");
         let focus = script
             .find("input.focus({ preventScroll: true })")
-            .expect("the box takes the focus without scrolling again");
-        assert!(scroll < focus, "centred first, then focused: {script}");
-        // A box closed again by the time the script runs keeps its place.
-        let guard = script
-            .find("input.disabled || input.readOnly")
-            .expect("a closed box is left alone");
-        assert!(guard < scroll, "{script}");
-        // The room after the last group is made before the card is centred,
-        // and only in a list that scrolls.
-        assert!(
-            script.contains(&format!(r#"getElementById("{GROUP_TAIL}")"#)),
-            "{script}"
-        );
-        let scrolls = script
-            .find("list.scrollHeight > list.clientHeight")
-            .expect("a list that fits keeps no gap");
-        let room = script
-            .find(r#"tail.style.height = list.clientHeight / 2 + "px";"#)
-            .expect("the room is half the list");
-        assert!(
-            guard < scrolls && scrolls < room && room < scroll,
-            "{script}"
-        );
+            .expect("the box takes the focus where it is");
+        assert!(has < focus, "{script}");
     }
 
-    /// The room the script sizes is the list's last child: after every
-    /// group, and before the session's buttons.
+    /// Every character a group can be sent in has a key, once, and every key
+    /// a name of its own.
     #[test]
-    fn the_group_list_ends_in_room_for_its_last_group() {
+    fn the_keypad_has_a_key_for_every_character_and_one_only() {
+        let keys: Vec<char> = PAD_ROWS
+            .iter()
+            .flat_map(|row| row.chars())
+            .chain(PAD_LAST)
+            .collect();
+        for ch in ('A'..='Z').chain('0'..='9').chain("/=+?,.".chars()) {
+            assert!(cw_core::morse_for(ch).is_some(), "{ch} is not sendable");
+            assert_eq!(keys.iter().filter(|&&key| key == ch).count(), 1, "{ch}");
+        }
+        assert!(keys.iter().all(|&key| cw_core::morse_for(key).is_some()));
+        let mut ids: Vec<String> = keys.iter().map(|&key| pad_name(key).0).collect();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), keys.len(), "{ids:?}");
+        assert!(ids.contains(&"key-slash".to_string()), "{ids:?}");
+        assert!(ids.contains(&"key-a".to_string()), "{ids:?}");
+    }
+
+    /// Two groups on screen at most, in their own slots, then the keypad,
+    /// then the session's buttons.
+    #[test]
+    fn only_the_open_group_and_the_one_before_it_are_shown() {
         run(|| async {
             let mut settings = test_settings();
             settings.curriculum.num_groups = 3;
             let (mut ui, _recorder) = Ui::app_with_settings(settings);
             ui.click("btn-start-training");
             let html = ui.html();
+            assert!(html.contains(r#"id="group-card-0""#), "{html}");
+            assert!(!html.contains(r#"id="group-card-1""#), "{html}");
+            assert!(!html.contains(r#"id="group-card-2""#), "{html}");
+            assert!(ui.has("Each group you answer is checked here."));
             let at = |needle: &str| {
                 html.find(needle)
                     .unwrap_or_else(|| panic!("no {needle} in {html}"))
             };
-            let id = format!(r#"id="{GROUP_TAIL}""#);
-            let tail = at(&id);
-            assert!(at(r#"id="group-card-2""#) < tail, "{html}");
-            assert!(tail < at(r#"id="btn-end-session""#), "{html}");
-            assert_eq!(html.matches(&id).count(), 1, "{html}");
+            assert!(at(r#"id="group-input-0""#) < at(r#"id="key-q""#), "{html}");
+            assert!(
+                at(r#"id="key-next""#) < at(r#"id="btn-end-session""#),
+                "{html}"
+            );
+            assert_eq!(html.matches("inputmode=\"none\"").count(), 1, "{html}");
         });
     }
 }

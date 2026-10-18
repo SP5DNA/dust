@@ -99,6 +99,7 @@ fn TrainingScreen(
     on_submit: EventHandler<()>,
     on_stop: EventHandler<()>,
     #[props(default)] keyer_mode: KeyerMode,
+    countdown: Option<u32>,
 ) -> Element {
     let answer = use_hook(AnswerOutbox::new);
     rsx! {
@@ -110,6 +111,7 @@ fn TrainingScreen(
                     playing,
                     repeat_total,
                     repeat_done,
+                    countdown,
                 }
                 TrainingView {
                     current,
@@ -121,6 +123,7 @@ fn TrainingScreen(
                     locked,
                     repeat_total,
                     repeat_done,
+                    countdown,
                     answer,
                     on_change,
                     on_confirm,
@@ -716,10 +719,51 @@ fn training_without_repeats_omits_the_counter() {
     assert!(!html.contains("per group"));
     // One short line to answer by. How to key with the paddles is said on
     // the settings screen, beside them.
-    assert!(html.contains(">Type what you heard.<"), "{html}");
+    assert!(html.contains(">Type what you heard — no rush.<"), "{html}");
     assert!(!html.contains("dits"), "{html}");
     // The confirmed group shows its comparison.
     assert!(html.contains("ch sent-row"));
+}
+
+/// Counting down: the number big where the last group will show, the box
+/// and the keypad shut, and the header saying how long.
+#[test]
+fn a_count_down_shows_where_the_last_group_will() {
+    let html = render(|| {
+        rsx! {
+            TrainingScreen {
+                current: 0,
+                total: 2,
+                groups: vec!["KM".to_string(), "UR".to_string()],
+                inputs: vec![String::new(), String::new()],
+                confirmed: vec![false, false],
+                focused: 0,
+                playing: false,
+                locked: true,
+                repeat_total: 1,
+                repeat_done: 0,
+                countdown: Some(3),
+                on_change: move |_: (usize, String)| {},
+                on_confirm: move |()| {},
+                on_submit: move |_| {},
+                on_stop: move |_| {},
+            }
+        }
+    });
+    assert!(html.contains("Starting in 3"), "{html}");
+    assert!(
+        html.contains(r#"id="countdown" class="countdown-num">3<"#),
+        "{html}"
+    );
+    assert!(html.contains("The first group starts in 3 s"), "{html}");
+    assert!(
+        !html.contains("Each group you answer is checked here."),
+        "{html}"
+    );
+    let tag = input_open_tag(&html, "group-input-0");
+    assert!(tag.contains("answer locked"), "{tag}");
+    assert!(tag.contains("Get ready…"), "{tag}");
+    assert!(input_open_tag(&html, "key-next").contains("disabled"));
 }
 
 fn input_open_tag(html: &str, id: &str) -> String {
@@ -772,7 +816,7 @@ fn an_unlocked_answer_box_does_not_look_disabled() {
 }
 
 #[test]
-fn a_locked_answer_box_is_readonly_not_disabled() {
+fn a_locked_answer_box_is_neither_readonly_nor_disabled() {
     let html = render(|| {
         rsx! {
             TrainingScreen {
@@ -795,8 +839,12 @@ fn a_locked_answer_box_is_readonly_not_disabled() {
     });
     let tag = input_open_tag(&html, "group-input-0");
     assert!(
-        tag.contains("readonly"),
-        "the listening box should be readonly: {tag}"
+        tag.contains("answer locked"),
+        "the listening box should look locked: {tag}"
+    );
+    assert!(
+        !tag.contains("readonly"),
+        "a read-only box loses the focus, and a phone its keyboard with it: {tag}"
     );
     assert!(
         !tag.contains("disabled"),
@@ -804,8 +852,10 @@ fn a_locked_answer_box_is_readonly_not_disabled() {
     );
 }
 
+/// A finished group has no box: it steps up into the slot above, with how
+/// it went, and the box below waits for the next group.
 #[test]
-fn a_confirmed_answer_box_cannot_be_typed_in() {
+fn a_confirmed_group_moves_up_and_leaves_no_box() {
     let html = render(|| {
         rsx! {
             TrainingScreen {
@@ -826,11 +876,17 @@ fn a_confirmed_answer_box_cannot_be_typed_in() {
             }
         }
     });
-    let tag = input_open_tag(&html, "group-input-0");
+    assert!(!html.contains(r#"id="group-input-0""#), "{html}");
     assert!(
-        tag.contains("disabled") || tag.contains("readonly"),
-        "a finished group must not still look like an answer box: {tag}"
+        html.contains(r#"id="group-card-0" class="group done""#),
+        "{html}"
     );
+    let tag = input_open_tag(&html, "group-input-1");
+    assert!(
+        tag.contains("answer locked"),
+        "the next group's box waits for its send: {tag}"
+    );
+    assert!(html.contains("Waiting…"), "{html}");
 }
 
 /// Components that own state, driven through their own controls.
@@ -1368,6 +1424,71 @@ mod interactions {
     }
 
     #[component]
+    fn KeypadHarness() -> Element {
+        let mut typed = use_signal(String::new);
+        let mut confirms = use_signal(|| 0u32);
+        rsx! {
+            TrainingScreen {
+                current: 0,
+                total: 2,
+                groups: vec!["KMR".to_string(), "UR".to_string()],
+                inputs: vec![typed(), String::new()],
+                confirmed: vec![false, false],
+                focused: 0,
+                playing: false,
+                locked: false,
+                repeat_total: 1,
+                repeat_done: 1,
+                on_change: move |(_, value): (usize, String)| typed.set(value),
+                on_confirm: move |()| confirms += 1,
+                on_submit: move |_| {},
+                on_stop: move |_| {},
+            }
+            if !typed().is_empty() {
+                p { id: "committed-answer", "committed:{typed()}" }
+            }
+            p { "confirmed:{confirms}" }
+        }
+    }
+
+    /// The keypad types into the box a key at a time and draws each key at
+    /// once, takes the last one back with ⌫, and Next confirms what is
+    /// there. A press takes no focus: the box keeps it.
+    #[test]
+    fn the_keypad_types_into_the_open_box() {
+        crate::testing::run(|| async {
+            let mut ui = Ui::new(KeypadHarness, ());
+            assert!(!ui.input_tag("key-k").contains("disabled"));
+            ui.click("key-k");
+            assert!(box_shows(&ui, "K"), "{}", ui.input_tag("group-input-0"));
+            ui.click("key-x");
+            assert!(box_shows(&ui, "KX"), "{}", ui.input_tag("group-input-0"));
+            ui.click("key-delete");
+            assert!(box_shows(&ui, "K"), "{}", ui.input_tag("group-input-0"));
+            ui.click("key-m");
+            assert!(!ui.has("committed:KM"), "handed over before the pause");
+            ui.advance(u64::from(INPUT_COMMIT_DEBOUNCE_MS)).await;
+            assert!(ui.has("committed:KM"), "{}", ui.html());
+            // A pause to think costs nothing: the box is as it was.
+            ui.advance(30_000).await;
+            assert!(box_shows(&ui, "KM"), "{}", ui.input_tag("group-input-0"));
+            assert!(ui.has("confirmed:0"));
+            ui.click("key-next");
+            assert!(ui.has("confirmed:1"), "{}", ui.html());
+            // The full length goes to the session at once.
+            ui.click("key-r");
+            assert!(ui.has("committed:KMR"), "{}", ui.html());
+            // ⌫ on an empty box, and every key on the way, is harmless.
+            for _ in 0..5 {
+                ui.click("key-delete");
+            }
+            assert!(box_shows(&ui, ""), "{}", ui.input_tag("group-input-0"));
+            // Keys keep the focus where it is.
+            assert!(ui.input_tag("key-k").contains("type=\"button\""));
+        });
+    }
+
+    #[component]
     fn FinishedGroupHarness() -> Element {
         let mut typed = use_signal(String::new);
         rsx! {
@@ -1572,11 +1693,6 @@ mod interactions {
     fn box_shows(ui: &Ui, text: &str) -> bool {
         ui.input_tag("group-input-0")
             .contains(&format!("value=\"{text}\""))
-    }
-
-    /// How many cards carry what gives an opened box the focus as it mounts.
-    fn focus_markers(ui: &Ui) -> usize {
-        ui.html().matches("<span hidden").count()
     }
 
     /// A keyed letter is in the box the moment it is keyed, not once the
@@ -1828,18 +1944,22 @@ mod interactions {
         crate::testing::run(|| async {
             let mut ui = Ui::new(LockCycleHarness, ());
             let locked = ui.input_tag("group-input-0");
-            assert!(locked.contains("readonly"), "{locked}");
+            assert!(locked.contains("answer locked"), "{locked}");
             ui.type_into("group-input-0", "KM");
             assert!(!ui.has("committed:"), "typing must not land while locked");
-            // What takes the focus as a box opens is carried by the open box's
-            // card alone, so a locked box has none.
-            assert_eq!(focus_markers(&ui), 0, "{}", ui.html());
+            // What was typed is turned away: the box is drawn empty again.
+            assert!(box_shows(&ui, ""), "{}", ui.input_tag("group-input-0"));
+            // The keypad is shut while the box is.
+            assert!(ui.input_tag("key-k").contains("disabled"));
+            ui.click("key-k");
+            assert!(box_shows(&ui, ""), "{}", ui.input_tag("group-input-0"));
 
             ui.click("btn-unlock-group");
             let open = ui.input_tag("group-input-0");
+            assert!(!open.contains("locked"), "{open}");
             assert!(!open.contains("readonly"), "{open}");
             assert!(!open.contains("disabled"), "{open}");
-            assert_eq!(focus_markers(&ui), 1, "{}", ui.html());
+            assert!(!ui.input_tag("key-k").contains("disabled"));
             ui.type_into("group-input-0", "KM");
             assert!(ui.has("committed:KM"), "{}", ui.html());
         });
@@ -1849,7 +1969,12 @@ mod interactions {
     fn typing_into_a_finished_group_is_ignored() {
         crate::testing::run(|| async {
             let mut ui = Ui::new(FinishedGroupHarness, ());
-            ui.type_into("group-input-0", "XX");
+            // The finished group has no box left to type into, and the next
+            // one's turns typing away until its group is sent.
+            assert!(!ui.shows("group-input-0"));
+            ui.type_into("group-input-1", "XX");
+            assert!(!ui.has("committed:"));
+            ui.click("key-x");
             assert!(!ui.has("committed:"));
         });
     }
