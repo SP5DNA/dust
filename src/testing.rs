@@ -689,6 +689,38 @@ impl Ui {
         );
     }
 
+    /// Put a finger down on the control with this id, and nothing after it:
+    /// a touch that slid as it tapped, which the browser sends no click for.
+    pub fn touch_down(&mut self, id: &str) {
+        let mut data = serde_json::to_value(dioxus::html::SerializedMouseData::default())
+            .expect("mouse data serializes");
+        let fields = data.as_object_mut().expect("mouse data is an object");
+        for (name, value) in [
+            ("pointer_id", serde_json::json!(1)),
+            ("width", serde_json::json!(1.0)),
+            ("height", serde_json::json!(1.0)),
+            ("pressure", serde_json::json!(0.5)),
+            ("tangential_pressure", serde_json::json!(0.0)),
+            ("tilt_x", serde_json::json!(0)),
+            ("tilt_y", serde_json::json!(0)),
+            ("twist", serde_json::json!(0)),
+            ("pointer_type", serde_json::json!("touch")),
+            ("is_primary", serde_json::json!(true)),
+        ] {
+            fields.insert(name.to_string(), value);
+        }
+        let pointer: dioxus::html::SerializedPointerData =
+            serde_json::from_value(data).expect("pointer data deserializes");
+        self.fire("pointerdown", id, Box::new(pointer));
+    }
+
+    /// Tap the control with this id with a finger: down, then the click the
+    /// browser sends after it.
+    pub fn tap(&mut self, id: &str) {
+        self.touch_down(id);
+        self.click(id);
+    }
+
     /// Type into the field with this id.
     pub fn type_into(&mut self, id: &str, value: &str) {
         self.fire("input", id, Self::form(value));

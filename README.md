@@ -57,7 +57,8 @@ crashes of a near one) and the other stations on the band go through one
 eight-pole CW filter together with the Morse, so the hiss takes the filter's
 pitch and every crash and dit rings in it; the AGC ducks the band under a
 strong station and behind a crash, and the audio stage after the filter adds
-its own faint floor. The filter is set by its width at −6 dB and one of three
+its own floor, far enough under the hiss that a narrow filter leaves no
+wideband noise to hear. The filter is set by its width at −6 dB and one of three
 shapes: **Sharp** (a modern DSP filter, flat with steep sides), **Soft**
 (rounded, like an older crystal filter) and **Peaked**, the default: Sharp
 plus the rig's audio peak filter, which rings at your pitch. "Stations

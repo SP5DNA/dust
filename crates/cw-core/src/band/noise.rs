@@ -78,12 +78,18 @@ impl NoiseFloor {
 
 /// How far the receiver's audio-stage floor sits under the band's hiss, in
 /// decibels: its density against the band noise's density at the pitch,
-/// where the receiver passes the band at unity. Recorded receivers put it
-/// 32 to 38 dB down (rig audio through a CWformer), 35 dB (Morse Walker's
-/// receiver) or as little as 13.5 to 28 dB (an FTdx101's USB audio); this is
-/// among the quieter of them, enough to fill the silence outside the filter
-/// without standing in for the hiss inside it.
-pub const FLOOR_BELOW_DB: f64 = 32.0;
+/// where the receiver passes the band at unity.
+///
+/// Recordings put it 32 to 38 dB down (rig audio through a CWformer), 35 dB
+/// (Morse Walker's receiver) or as little as 13.5 to 28 dB (an FTdx101's USB
+/// audio), and at 32 dB it was heard as wideband white noise under a narrow
+/// filter. The floor runs two and a half kilohertz wide where a 150 Hz filter
+/// passes 150, so its power was only some 20 dB under the hiss, and with a
+/// station keyed — the AGC turning the hiss down, never the floor — under
+/// 10. On a rig with a narrow filter the hiss outside it is buried. Sixty
+/// decibels down it is too: more than 35 dB under the hiss in power at the
+/// narrowest filter, a station keyed or not, and still not dead silence.
+pub const FLOOR_BELOW_DB: f64 = 60.0;
 /// Where the audio stage's own band starts: a second-order roll-off below
 /// this, so the floor brings no rumble of its own.
 pub const FLOOR_HIGH_PASS_HZ: f64 = 200.0;
@@ -100,9 +106,9 @@ const STATIC_SEED: u64 = 0x51ED_2701;
 /// The receiver's own audio stage: a faint, wide hiss that the CW filter
 /// never touches.
 ///
-/// Every recording of a real receiver's CW audio has it: a floor some thirty
-/// decibels under the hiss at the note, running flat from a couple of hundred
-/// hertz to where the audio stage rolls off. It is the noise of the
+/// Every recording of a real receiver's CW audio has it: a floor well under
+/// the hiss at the note ([`FLOOR_BELOW_DB`]), running flat from a couple of
+/// hundred hertz to where the audio stage rolls off. It is the noise of the
 /// amplifiers after the filter, so narrowing the filter cannot take it away,
 /// and the AGC, which works ahead of them, cannot duck it. Without it
 /// everything outside the passband is dead silence, which no radio makes, and

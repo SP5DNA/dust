@@ -792,18 +792,17 @@ struct Floored {
     added: Vec<f32>,
 }
 
-/// A real receiver is never silent outside its filter: its own audio stage
-/// hisses some thirty decibels under the band, from a couple of hundred
-/// hertz to the top of its audio. Without it the band is dead silent there —
-/// 80 dB down and more — which no recording of a radio is.
+/// A real receiver is never quite silent outside its filter: its own audio
+/// stage hisses far under the band ([`FLOOR_BELOW_DB`]), from a couple of
+/// hundred hertz to the top of its audio.
 ///
-/// Measured against the hiss at the note, where the receiver is unity, so the
-/// floor sits in the same place whatever width the filter is set to: 32 dB
-/// down from 1.2 to 2.4 kHz, and gone by 5 kHz. Below 200 Hz it falls away
-/// as well, so it brings no rumble; that is measured on what the floor itself
-/// adds, because down there a wide filter's own skirt is far louder than the
-/// floor (27 dB down at the default 500 Hz, and in the passband at 1 kHz).
-/// And it is Gaussian like the hiss, so the band stays a hiss.
+/// Measured on what the floor itself adds, against the hiss at the note,
+/// where the receiver is unity, so the floor sits in the same place whatever
+/// width the filter is set to: [`FLOOR_BELOW_DB`] down from 1.2 to 2.4 kHz,
+/// and gone by 5 kHz. Below 200 Hz it falls away as well, so it brings no
+/// rumble. Down there, and up at 1.2 kHz for a wide filter, the filter's own
+/// skirt is louder than the floor, which is why the floor is measured on its
+/// own. And the band stays a hiss: Gaussian.
 #[test]
 fn the_receiver_hisses_faintly_outside_its_filter() {
     let mut outside_at = Vec::new();
@@ -815,7 +814,7 @@ fn the_receiver_hisses_faintly_outside_its_filter() {
         let spectrum = welch(&floored.heard, STAGE_SEGMENT);
         let added = welch(&floored.added, STAGE_SEGMENT);
         let at_pitch = median_db(&spectrum, pitch - 20.0, pitch + 20.0);
-        let outside = median_db(&spectrum, 1_200.0, 2_400.0) - at_pitch;
+        let outside = median_db(&added, 1_200.0, 2_400.0) - at_pitch;
         let above = median_db(&spectrum, 5_000.0, 10_000.0) - at_pitch;
         let below = median_db(&added, 100.0, 150.0) - at_pitch;
         let k = kurtosis(&floored.heard);
@@ -825,7 +824,7 @@ fn the_receiver_hisses_faintly_outside_its_filter() {
         );
         assert!((outside + FLOOR_BELOW_DB).abs() < 1.5, "{report}");
         assert!(above < -50.0, "{report}");
-        assert!(below < -38.0, "{report}");
+        assert!(below < -FLOOR_BELOW_DB - 6.0, "{report}");
         assert!((k - 3.0).abs() < 0.1, "{report}");
         outside_at.push(outside);
     }
@@ -835,6 +834,30 @@ fn the_receiver_hisses_faintly_outside_its_filter() {
             (outside - outside_at[0]).abs() < 1.0,
             "{outside_at:.2?} dB across 500, 150 and 1000 Hz"
         );
+    }
+}
+
+/// A narrow filter leaves no wideband hiss to hear. The floor spreads over
+/// the whole of the audio stage where the hiss comes through the filter's
+/// width alone, and with a station keyed the AGC turns the hiss down and
+/// never the floor; even so, at the narrowest filter, in every shape, its
+/// power stays more than 35 dB under the hiss's, and 45 between stations.
+#[test]
+fn a_narrow_filter_leaves_no_wideband_hiss_to_hear() {
+    for shape in ALL_SHAPES {
+        let mut settings = hiss_only(Some(FILTER_WIDTH_MIN));
+        settings.band.filter_shape = shape;
+        let settings = settings.clamp();
+        let knee = knee_for(&settings).expect("the AGC is on by default");
+        for (when, send, under_db) in [("idle", 0.0, 45.0), ("keyed", 10.0 * knee, 35.0)] {
+            let floored = with_and_without_floor(&settings, send, 5);
+            let power = |v: &[f32]| v.iter().map(|s| f64::from(*s).powi(2)).sum::<f64>();
+            let floor_db = 10.0 * (power(&floored.added) / power(&floored.band)).log10();
+            assert!(
+                floor_db < -under_db,
+                "{shape:?} {when}: the floor is {floor_db:.1} dB against the hiss"
+            );
+        }
     }
 }
 
