@@ -431,6 +431,8 @@ mod tests {
             group_timings: vec![SessionTiming {
                 time_to_complete_ms: 400.0,
                 char_wpm: None,
+                effective_wpm: None,
+                sends: 1,
             }],
             accuracy: 0.5,
             tally: CopyTally::of("KM", "K?"),
@@ -467,6 +469,8 @@ mod tests {
             .map(|(sent, _)| SessionTiming {
                 time_to_complete_ms: 1000.0 * sent.chars().count() as f64,
                 char_wpm: Some(20.0),
+                effective_wpm: None,
+                sends: 1,
             })
             .collect();
         out

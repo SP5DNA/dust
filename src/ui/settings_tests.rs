@@ -565,7 +565,12 @@ fn words_start_on_the_starter_list_and_drop_what_a_word_has_none_of() {
             ui.html()
         );
         assert!(ui.has("Until you add your own, Words sends a starter list"));
-        assert!(ui.has(">QTH<"));
+        // How many words there are to draw from is said; the list itself is
+        // folded away, and no character is shown on its own: a word is sent
+        // whole.
+        assert!(ui.has("43 words to draw from"), "{}", ui.html());
+        assert!(!ui.has(">QTH<"), "the list starts folded");
+        assert!(!ui.has("ch sent-row"), "single characters in Words mode");
         assert_eq!(value_of(&ui, "field-word-list"), "");
         for gone in [
             "field-level",
@@ -577,6 +582,39 @@ fn words_start_on_the_starter_list_and_drop_what_a_word_has_none_of() {
         }
         assert!(ui.shows("number-words-per-session"));
         assert!(!ui.shows("btn-starter-words"), "nothing to go back from");
+    });
+}
+
+/// The starter list unfolds to be looked through, and folds away again.
+#[test]
+fn the_starter_list_unfolds_and_folds() {
+    run(|| async {
+        let (mut ui, _recorder) = on_words();
+        let toggle = "disclosure-starter-list";
+        assert!(ui.input_tag(toggle).contains("aria-expanded=\"false\""));
+        ui.click(toggle);
+        assert!(ui.input_tag(toggle).contains("link-toggle open"));
+        assert!(ui.has(">QTH<") && ui.has(">73<"), "{}", ui.html());
+        ui.click(toggle);
+        assert!(!ui.has(">QTH<"));
+    });
+}
+
+/// Callsigns are sent whole too: a few calls of the tier, with more to
+/// come, and no character on its own.
+#[test]
+fn callsigns_show_calls_not_characters() {
+    run(|| async {
+        let (mut ui, _recorder) = Ui::app();
+        ui.click("nav-settings");
+        ui.click("seg-callsigns");
+        assert!(ui.has("What this tier sends"), "{}", ui.html());
+        assert_eq!(ui.html().matches("class=\"call\"").count(), 4);
+        assert!(ui.has(">…<"), "{}", ui.html());
+        assert!(!ui.has("ch sent-row"), "single characters in Callsign mode");
+        // Character groups are drawn a character at a time, and show them.
+        ui.click("seg-koch");
+        assert!(ui.has("ch sent-row"));
     });
 }
 

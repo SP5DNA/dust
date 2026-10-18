@@ -934,6 +934,7 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
 .link-toggle .icon { width: 0.82rem; height: 0.82rem; }
 .link-toggle:hover { color: var(--ink); border-color: var(--line-strong); }
 .link-toggle.on { background: var(--ink); border-color: var(--ink); color: var(--surface); }
+.link-toggle.open .icon { transform: rotate(180deg); }
 .range-vis {
   position: relative;
   height: 6px;

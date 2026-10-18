@@ -7,7 +7,9 @@ use cw_core::{
 use dioxus::html::FileData;
 use dioxus::prelude::*;
 
-use crate::ui::widgets::{CardHead, Icon, IconName, NumberField, SectionReset, Seg, control_id};
+use crate::ui::widgets::{
+    CardHead, DISCLOSURE, Icon, IconName, NumberField, SectionReset, Seg, control_id,
+};
 
 /// The largest file read as a word list. The longest list kept is a few
 /// tens of kilobytes; anything near this is not a word list.
@@ -230,6 +232,8 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
                     for call in c.tier_examples.iter() {
                         span { class: "call", "{call}" }
                     }
+                    // A few of endless calls, not the lot.
+                    span { class: "muted", aria_label: "and more", "…" }
                 }
                 p { class: "muted", style: "margin: 0;",
                     "Every tier keeps what the ones below it send, so moving up only adds. Prefixes are real allocations, weighted the way you hear them."
@@ -249,9 +253,14 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
                     }
                 }
             }
-            div { class: "chars", style: "gap: 4px;",
-                for ch in c.pool.iter() {
-                    span { class: "ch sent-row", "{ch}" }
+            // The characters groups are drawn from, one at a time. A word or
+            // a callsign is sent whole, never a character of it on its own,
+            // so for them the characters would say nothing.
+            if !words && !callsigns {
+                div { class: "chars", style: "gap: 4px;",
+                    for ch in c.pool.iter() {
+                        span { class: "ch sent-row", "{ch}" }
+                    }
                 }
             }
         }
@@ -364,6 +373,8 @@ fn WordListEditor(settings: Signal<TrainingSettings>, words: Vec<String>, own: b
     // Moved on by every file chosen, to draw a fresh file input: the same
     // file chosen again in the old one would change nothing, and not load.
     let mut picked = use_signal(|| 0u64);
+    // The starter list, unfolded.
+    let mut show_list = use_signal(|| false);
     let shown = draft
         .peek()
         .clone()
@@ -424,11 +435,25 @@ fn WordListEditor(settings: Signal<TrainingSettings>, words: Vec<String>, own: b
         WordCount { draft, report, count: words.len(), own }
         if !own {
             p { class: "muted", style: "margin: 0;",
-                "Until you add your own, Words sends a starter list of the abbreviations and Q-codes a contact is made of:"
+                "Until you add your own, Words sends a starter list of the abbreviations and Q-codes a contact is made of."
             }
-            div { class: "calls",
-                for word in STARTER_WORDS.iter() {
-                    span { class: "call", "{word}" }
+            // How many words is the summary; the list itself is there to
+            // look through when wanted, folded away until then.
+            button {
+                id: control_id(DISCLOSURE, "starter list"),
+                class: if show_list() { "link-toggle open" } else { "link-toggle" },
+                style: "align-self: flex-start;",
+                aria_expanded: if show_list() { "true" } else { "false" },
+                aria_controls: "starter-list",
+                onclick: move |_| show_list.toggle(),
+                "{count_words(STARTER_WORDS.len())} to draw from"
+                Icon { name: IconName::Chevron }
+            }
+            if show_list() {
+                div { id: "starter-list", class: "calls",
+                    for word in STARTER_WORDS.iter() {
+                        span { class: "call", "{word}" }
+                    }
                 }
             }
         }

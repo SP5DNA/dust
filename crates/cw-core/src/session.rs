@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 use crate::alignment::{CopyTally, LetterAccuracy};
 use crate::level::LEVEL_MIN;
 use crate::score::{
-    ScoreConstants, calculate_effective_alphabet_size, calculate_total_chars,
-    compute_average_response_ms, compute_session_score,
+    GroupCopy, calculate_effective_alphabet_size, calculate_total_chars,
+    compute_average_response_ms, copy_speed, session_points,
 };
 use crate::settings::{CharSetMode, LevelAxis, PlaybackSettings, TrainingSettings};
 
@@ -151,6 +151,10 @@ impl Group {
         SessionTiming {
             time_to_complete_ms: measured.max(MIN_RESPONSE_MS_PER_CHAR * chars),
             char_wpm: self.played_wpm.map(|(char_wpm, _)| char_wpm),
+            effective_wpm: self.played_wpm.map(|(_, effective_wpm)| effective_wpm),
+            // A group answered before its last send was heard was heard
+            // fewer times than planned, and is scored for what it was.
+            sends: self.plays_done.clamp(1, self.repeats.max(1)),
         }
     }
 }
@@ -391,13 +395,6 @@ impl GroupSession {
             .collect();
         let avg_response_ms = compute_average_response_ms(&per_char);
         let total_chars = calculate_total_chars(&sent);
-        let score = compute_session_score(
-            calculate_effective_alphabet_size(&sent),
-            accuracy,
-            avg_response_ms,
-            total_chars,
-            ScoreConstants::default(),
-        );
         let played: Vec<(f64, f64)> = scored.iter().filter_map(|g| g.played_wpm).collect();
         let playback = &self.settings.playback;
         let (char_wpm, effective_wpm) = if played.is_empty() {
@@ -413,7 +410,7 @@ impl GroupSession {
             )
         };
 
-        SessionResult {
+        let mut result = SessionResult {
             date,
             timestamp: finished_at,
             groups: scored
@@ -429,7 +426,7 @@ impl GroupSession {
             tally,
             avg_response_ms,
             total_chars,
-            score,
+            score: 0.0,
             // One level per mode, and `level` is the one this mode was run at —
             // callsigns need no second field the way Mixed needs `digits_level`.
             level: self.settings.active_level(),
@@ -438,7 +435,9 @@ impl GroupSession {
             char_wpm,
             effective_wpm,
             alphabet_fingerprint: self.settings.alphabet_fingerprint(),
-        }
+        };
+        result.score = result.points();
+        result
     }
 }
 
@@ -478,6 +477,18 @@ pub struct SessionTiming {
     pub time_to_complete_ms: f64,
     #[serde(default)]
     pub char_wpm: Option<f64>,
+    /// The pace the spacing set. Older saves have none, and are taken to
+    /// have been sent with the session's spacing.
+    #[serde(default)]
+    pub effective_wpm: Option<f64>,
+    /// How many times the group was sent before it was answered. Older saves
+    /// sent each group once.
+    #[serde(default = "one_send")]
+    pub sends: u32,
+}
+
+fn one_send() -> u32 {
+    1
 }
 
 fn session_level_default() -> u32 {
@@ -526,6 +537,39 @@ pub struct SessionResult {
 }
 
 impl SessionResult {
+    /// What the session earns ([`crate::score`]): every group's points,
+    /// added up. Worked out from what is stored, so a session saved before
+    /// speed counted can be scored the same way as one finished today.
+    pub fn points(&self) -> f64 {
+        let sent: Vec<&str> = self.groups.iter().map(|g| g.sent.as_str()).collect();
+        let copies: Vec<GroupCopy> = self
+            .groups
+            .iter()
+            .zip(&self.group_timings)
+            .map(|(group, timing)| {
+                let char_wpm = timing.char_wpm.unwrap_or(self.char_wpm);
+                // Older saves have the session's spacing only: the group's
+                // own character speed, spaced as the session was.
+                let effective_wpm = timing.effective_wpm.unwrap_or_else(|| {
+                    if self.char_wpm > 0.0 {
+                        self.effective_wpm * char_wpm / self.char_wpm
+                    } else {
+                        self.effective_wpm
+                    }
+                });
+                let chars = group.sent.chars().count().max(1) as f64;
+                GroupCopy::of(
+                    &group.sent,
+                    &group.received,
+                    copy_speed(char_wpm, effective_wpm),
+                    timing.time_to_complete_ms / chars,
+                    timing.sends,
+                )
+            })
+            .collect();
+        session_points(&copies, calculate_effective_alphabet_size(&sent))
+    }
+
     /// How each character sent was copied. Sessions saved before that was
     /// recorded have it worked out again from their groups.
     pub fn letter_accuracy(&self) -> Cow<'_, BTreeMap<char, LetterAccuracy>> {
@@ -639,6 +683,79 @@ mod tests {
         // A confirmed group with nothing in it scores nothing at all.
         let silent = answered(TrainingSettings::default(), &[("", "", 400)]);
         assert!(result(&silent).groups.is_empty());
+    }
+
+    /// The same copy, sent at `wpm`, each group sent `sends` times.
+    fn copied_at(wpm: f64, sends: u32) -> SessionResult {
+        let copies = [("KMURE", "KMURE"), ("SNAPT", "SNAPT"), ("LWIJZ", "LWIXZ")];
+        let mut session =
+            GroupSession::new(SessionId::new(1), copies.len(), TrainingSettings::default());
+        let mut now = MonoMs(1_000);
+        for (index, (sent, typed)) in copies.iter().enumerate() {
+            session.set_group(index, (*sent).into(), sends);
+            session.begin_group(index, now);
+            for _ in 0..sends {
+                session.note_play_finished(index);
+            }
+            now = now.plus(2_000);
+            session.end_playback(index, now, wpm, wpm);
+            session.set_input(index, typed);
+            now = now.plus(600);
+            session.confirm(index, now);
+        }
+        result(&session)
+    }
+
+    /// Thirty-five words a minute earns more than twenty for the same copy —
+    /// it used to earn exactly the same.
+    #[test]
+    fn a_faster_session_earns_more() {
+        let (slow, fast) = (copied_at(20.0, 1), copied_at(35.0, 1));
+        assert_eq!(slow.accuracy, fast.accuracy);
+        assert!(
+            fast.score > 2.5 * slow.score,
+            "{} at 35 WPM against {} at 20",
+            fast.score,
+            slow.score
+        );
+    }
+
+    /// A group sent twice earns half: hearing it again is RufzXP's replay.
+    #[test]
+    fn a_group_heard_twice_earns_half() {
+        let (once, twice) = (copied_at(25.0, 1), copied_at(25.0, 2));
+        assert_eq!(twice.group_timings[0].sends, 2);
+        assert!(
+            (twice.score - once.score / 2.0).abs() < 0.05,
+            "{} against {}",
+            twice.score,
+            once.score
+        );
+    }
+
+    /// A session is scored from what is stored of it, so one saved before
+    /// speed counted — no spacing or sends per group — is scored the same way
+    /// as one finished today.
+    #[test]
+    fn a_stored_session_is_scored_from_what_is_stored() {
+        let today = copied_at(30.0, 1);
+        assert_eq!(today.points(), today.score);
+        let mut json = serde_json::to_value(&today).expect("serializes");
+        for timing in json["groupTimings"].as_array_mut().expect("timings") {
+            let timing = timing.as_object_mut().expect("an object");
+            timing.remove("effectiveWpm");
+            timing.remove("sends");
+        }
+        json["score"] = serde_json::json!(1.0);
+        let older: SessionResult = serde_json::from_value(json).expect("an older save reads");
+        assert_eq!(older.group_timings[0].effective_wpm, None);
+        assert_eq!(older.group_timings[0].sends, 1);
+        assert!(
+            (older.points() - today.score).abs() < 0.01,
+            "{} against {}",
+            older.points(),
+            today.score
+        );
     }
 
     #[test]

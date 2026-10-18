@@ -121,19 +121,26 @@ fn newest(sessions: &[SessionResult]) -> &[SessionResult] {
 /// That is different from an empty one: the caller has to set the stored copy
 /// aside before anything writes over it, or the first session finished after
 /// a bad write would replace years of history with itself.
+///
+/// Every session is scored again as it is read, from what is stored of it, so
+/// the history is on one scale however the score has been worked out over the
+/// versions: sessions saved before speed counted read as they would score
+/// today.
 fn parse_sessions(raw: &str) -> Option<Vec<SessionResult>> {
     // Almost always the whole list reads; only when it does not is it worth
     // reading again a session at a time to keep the ones that do.
-    if let Ok(sessions) = serde_json::from_str::<Vec<SessionResult>>(raw) {
-        return Some(sessions);
-    }
-    let values = serde_json::from_str::<Vec<serde_json::Value>>(raw).ok()?;
-    Some(
-        values
+    let mut sessions = match serde_json::from_str::<Vec<SessionResult>>(raw) {
+        Ok(sessions) => sessions,
+        Err(_) => serde_json::from_str::<Vec<serde_json::Value>>(raw)
+            .ok()?
             .into_iter()
             .filter_map(|value| serde_json::from_value(value).ok())
             .collect(),
-    )
+    };
+    for session in &mut sessions {
+        session.score = session.points();
+    }
+    Some(sessions)
 }
 
 /// Load settings without throwing away everything for one bad field.
@@ -267,6 +274,31 @@ mod tests {
     /// A browser's history is capped by room. Large sessions — two hundred
     /// groups each — used to overflow the quota by count, and the oldest half
     /// went at a time until something fitted, with nobody told.
+    /// A history saved under an older score reads on today's scale: every
+    /// session is scored again from what is stored of it.
+    #[test]
+    fn a_history_reads_scored_the_way_sessions_score_today() {
+        let mut stored = session("2026-01-01");
+        stored.groups = vec![cw_core::GroupResult {
+            sent: "KMURE".into(),
+            received: "KMURE".into(),
+            correct: true,
+        }];
+        stored.group_timings = vec![cw_core::SessionTiming {
+            time_to_complete_ms: 500.0,
+            char_wpm: Some(35.0),
+            effective_wpm: None,
+            sends: 1,
+        }];
+        stored.char_wpm = 35.0;
+        stored.effective_wpm = 35.0;
+        stored.score = 1.0;
+        let raw = serde_json::to_string(&[stored.clone()]).unwrap();
+        let back = parse_sessions(&raw).expect("a list");
+        assert_eq!(back[0].score, stored.points());
+        assert!(back[0].score > 1.0, "{}", back[0].score);
+    }
+
     #[test]
     fn only_the_newest_sessions_that_fit_are_kept() {
         let all: Vec<SessionResult> = (0..10)

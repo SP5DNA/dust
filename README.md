@@ -6,11 +6,13 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 CW Morse **group trainer** in Rust. Hear a group, type it from memory, and get
-alignment-based accuracy, letter mastery and a skill score.
+alignment-based accuracy, letter mastery and a score.
 
 Two ways to practise: Koch-style **character groups**, unlocked one letter at a
 time, or **callsigns** — real prefixes in realistic shapes, from `W1AW` up to
-`DL1ABC/P`, the drill MorseRunner and Morse Walker are built around.
+`DL1ABC/P` and `EA8/G3XYZ`, the drill MorseRunner and Morse Walker are built
+around. Every call is one its country could issue: the digit after the prefix
+and the length of the suffix are ones that country hands out.
 
 Opt in to **adaptive group size** and the trainer learns your copy span, the
 group length you copy whole about half the time, and draws lengths near its
@@ -37,6 +39,15 @@ set otherwise under **Session shape**), and keeps the screen on until it
 ends. Take your time over an answer: the answer timeout moves on only from a
 group you have not started, and one you have waits until every character is
 in or you press **Next**.
+
+The **score** works the way RufzXP's does: each group earns points with the
+square of its speed and in proportion to its length; every error cuts what is
+left hard — one to a quarter, two to a ninth — a group sent again earns half,
+and a slow answer costs a little, a quarter for each tenfold past a tenth of a
+second a character. Two things are Dust's own: a character from a short Koch
+alphabet is worth what it tells you (`log₂` of how many it could have been,
+against the 26 letters), and Farnsworth spacing earns between its two speeds.
+Your history is scored the same way, sessions from before included.
 
 Practise words of your own: pick **Words** under Character set and paste a
 list, one word to a line, or load it from a text file. Each word is sent
