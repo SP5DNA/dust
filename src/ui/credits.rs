@@ -63,12 +63,20 @@ pub struct Credit {
 ///     work: "Publishes Dust on the App Store.",
 /// },
 /// ```
-pub const CREDITS: &[Credit] = &[Credit {
-    name: "Mateusz K",
-    callsign: Some("SO5KM"),
-    role: Role::Author,
-    work: "Created Dust, leads its development and builds every release.",
-}];
+pub const CREDITS: &[Credit] = &[
+    Credit {
+        name: "Mateusz K",
+        callsign: Some("SO5KM"),
+        role: Role::Author,
+        work: "Created Dust, leads its development and builds every release.",
+    },
+    Credit {
+        name: "Michał",
+        callsign: Some("SP5TLS"),
+        role: Role::Maintainer,
+        work: "Publishes Dust on the iOS App Store.",
+    },
+];
 
 /// Someone in the closed testing group.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -326,7 +334,8 @@ mod tests {
                 .unwrap_or_else(|| panic!("{word} is missing, or out of order: {html}"));
             at += found;
         }
-        assert_eq!(callsigns(&html), 1 + TESTERS.len());
+        let team = CREDITS.iter().filter(|c| c.callsign.is_some()).count();
+        assert_eq!(callsigns(&html), team + TESTERS.len());
         assert!(
             html.contains("many others"),
             "they are a few of many: {html}"
