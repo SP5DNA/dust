@@ -110,10 +110,10 @@ printf 'pcm.!default { type null }\nctl.!default { type null }\n' > ~/.asoundrc
 
 ## Release
 
-Push a tag matching the workspace version in `Cargo.toml` (currently `0.14.9`):
+Push a tag matching the workspace version in `Cargo.toml` (currently `0.14.10`):
 
 ```bash
-git tag v0.14.9 && git push origin v0.14.9
+git tag v0.14.10 && git push origin v0.14.10
 ```
 
 CI then builds and attaches every bundle in the table above. Mobile jobs cannot
