@@ -170,6 +170,8 @@ fn session(date: &str, accuracy: f64) -> SessionResult {
         group_timings: vec![SessionTiming {
             time_to_complete_ms: 900.0,
             char_wpm: Some(20.0),
+            effective_wpm: None,
+            sends: 1,
         }],
         accuracy,
         tally: Default::default(),

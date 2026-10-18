@@ -1,18 +1,25 @@
 //! Realistic amateur callsigns, built from their structure rather than read from
 //! a list.
 //!
-//! A callsign is `prefix + separator digit + suffix`, optionally followed by a
-//! portable marker: `W1AW`, `DL1ABC`, `9A1AA`, `G3XYZ/P`. The prefix says which
-//! country issued it, so the tables below are real ITU allocations weighted by
-//! how much of the band they actually are — US-heavy, then Europe and Japan,
-//! then everywhere else. Generating from structure rather than a callsign
-//! database keeps this crate pure and the output endless.
+//! A callsign is `prefix + separator digit + suffix`: `W1AW`, `DL1ABC`, `9A1AA`.
+//! The prefix says which country issued it, and so does what may follow it: a
+//! country hands out only some of the ten digits, and suffixes of only some
+//! lengths. A Briton is `G0` to `G8`, never `G9`; a Croatian is `9A` and then any
+//! digit; a Frenchman has `F1`, `F4`, `F5`, `F6` or `F8`, and three letters. So
+//! each prefix below carries the digits and the suffix lengths its country
+//! issues, and a call is drawn from those alone — every call is one its country
+//! could have issued. The prefixes are weighted by how much of the band they
+//! are: US-heavy, then Europe and Japan, then everywhere else. Generating from
+//! structure rather than a callsign database keeps this crate pure and the
+//! output endless.
 //!
 //! Difficulty is the *shape* of the call, not the characters in it: even `W1AW`
 //! needs four different characters, so there is no Koch-style ladder to climb
-//! here. [`CALLSIGN_TIER_MAX`] tiers add longer suffixes, then two-letter and
-//! digit-bearing prefixes, then portable suffixes. Tiers are cumulative, so
-//! moving up never takes practice away — a high tier sounds like a real band.
+//! here. [`CALLSIGN_TIER_MAX`] tiers add suffixes of every length, then
+//! two-letter prefixes, prefixes with a digit in them, portable operation
+//! (`G3XYZ/P`), and last a station operating abroad (`DL/W1AW`). Tiers are
+//! cumulative, so moving up never takes practice away — a high tier sounds
+//! like a real band.
 
 use crate::rng::{Rng, SplitMix64};
 
@@ -26,6 +33,13 @@ const LETTERS: &[char] = &[
 
 /// How often a tier that allows portables actually sends one.
 const PORTABLE_SHARE: f64 = 0.25;
+
+/// How often a tier that allows it sends a station operating abroad.
+const ABROAD_SHARE: f64 = 0.12;
+
+/// The longest suffix any country here issues. Four letters would be a call
+/// nobody holds.
+pub(crate) const SUFFIX_MAX: usize = 3;
 
 /// What a callsign's prefix looks like.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,6 +67,8 @@ struct Tier {
     suffix_min: usize,
     suffix_max: usize,
     portable: bool,
+    /// A station operating abroad, the host country's prefix first.
+    abroad: bool,
 }
 
 use PrefixShape::{Letter, LetterLetter, WithDigit};
@@ -65,6 +81,7 @@ const TIERS: &[Tier] = &[
         suffix_min: 2,
         suffix_max: 2,
         portable: false,
+        abroad: false,
     },
     // 2 — the suffix stops being a fixed length.
     Tier {
@@ -72,6 +89,7 @@ const TIERS: &[Tier] = &[
         suffix_min: 1,
         suffix_max: 3,
         portable: false,
+        abroad: false,
     },
     // 3 — two-letter prefixes, so the call can come from anywhere.
     Tier {
@@ -79,187 +97,288 @@ const TIERS: &[Tier] = &[
         suffix_min: 1,
         suffix_max: 3,
         portable: false,
+        abroad: false,
     },
-    // 4 — the long suffixes.
-    Tier {
-        shapes: &[Letter, LetterLetter],
-        suffix_min: 1,
-        suffix_max: 4,
-        portable: false,
-    },
-    // 5 — prefixes with a digit in them, which break the rhythm.
+    // 4 — prefixes with a digit in them, which break the rhythm.
     Tier {
         shapes: &[Letter, LetterLetter, WithDigit],
         suffix_min: 1,
-        suffix_max: 4,
+        suffix_max: 3,
         portable: false,
+        abroad: false,
     },
-    // 6 — portable and mobile operation.
+    // 5 — portable and mobile operation.
     Tier {
         shapes: &[Letter, LetterLetter, WithDigit],
         suffix_min: 1,
-        suffix_max: 4,
+        suffix_max: 3,
         portable: true,
+        abroad: false,
+    },
+    // 6 — stations operating abroad, under the host country's prefix.
+    Tier {
+        shapes: &[Letter, LetterLetter, WithDigit],
+        suffix_min: 1,
+        suffix_max: 3,
+        portable: true,
+        abroad: true,
     },
 ];
+
+/// One prefix, and what its country issues after it.
+#[derive(Clone, Copy, Debug)]
+struct Prefix {
+    prefix: &'static str,
+    /// The separator digits the country hands out with this prefix.
+    digits: &'static str,
+    /// The shortest and longest suffix it hands out.
+    suffix: (usize, usize),
+    /// Which country it is, so a station abroad is never abroad at home.
+    country: &'static str,
+    /// The country's own operators mark where they are with a call-area
+    /// digit — `W1AW/4`, `JA1ABC/3` — rather than only `/P` or `/M`.
+    area_marker: bool,
+    weight: f64,
+}
+
+/// A prefix of `country`, followed by one of `digits` and a suffix
+/// `suffix.0` to `suffix.1` letters long.
+const fn p(
+    prefix: &'static str,
+    digits: &'static str,
+    suffix: (usize, usize),
+    country: &'static str,
+    weight: f64,
+) -> Prefix {
+    Prefix {
+        prefix,
+        digits,
+        suffix,
+        country,
+        area_marker: false,
+        weight,
+    }
+}
+
+/// The same, for a country whose operators mark a call area after a slash.
+const fn area(
+    prefix: &'static str,
+    digits: &'static str,
+    suffix: (usize, usize),
+    country: &'static str,
+    weight: f64,
+) -> Prefix {
+    Prefix {
+        prefix,
+        digits,
+        suffix,
+        country,
+        area_marker: true,
+        weight,
+    }
+}
+
+const ALL_DIGITS: &str = "0123456789";
+const ONE_TO_NINE: &str = "123456789";
 
 /// Single-letter prefixes actually in use, weighted by how much of the band
-/// they are.
-const SINGLE_LETTER: &[(&str, f64)] = &[
-    ("W", 9.0),
-    ("K", 9.0),
-    ("N", 7.0), // USA
-    ("G", 4.0),
-    ("M", 2.0), // UK
-    ("F", 2.5), // France
-    ("I", 2.5), // Italy
-    ("R", 2.5),
-    ("U", 1.0), // Russia
+/// they are. Only countries that issue a lone letter: Russia's `R` and `U`
+/// start blocks — `RA`, `UA`, Ukraine's `UR` — and stand alone only on special
+/// calls, so they are two-letter prefixes below.
+const SINGLE_LETTER: &[Prefix] = &[
+    // USA: any call area, 1x1 special events to 1x3.
+    area("W", ALL_DIGITS, (1, 3), "US", 9.0),
+    area("K", ALL_DIGITS, (1, 3), "US", 9.0),
+    area("N", ALL_DIGITS, (1, 3), "US", 7.0),
+    // UK: G0 to G8; M0, M1, M3, M5, M6 and M7, with three letters.
+    p("G", "012345678", (2, 3), "UK", 4.0),
+    p("M", "013567", (3, 3), "UK", 2.0),
+    p("F", "14568", (2, 3), "FR", 2.5),
+    p("I", ALL_DIGITS, (2, 3), "IT", 2.5),
 ];
 
-/// The US two-letter blocks, which are most of the two-letter calls you hear.
-/// `A` only runs to `AL`; the rest take the whole alphabet.
+/// The US two-letter blocks, which are most of the two-letter calls you hear:
+/// `AA` to `AK`, and `K`, `N` and `W` with any second letter but the `H`, `L`
+/// and `P` of Hawaii, Alaska and Puerto Rico, which have prefixes of their
+/// own below.
 const US_TWO_LETTER: &[(char, &str)] = &[
-    ('A', "ABCDEFGHIJKL"),
-    ('K', "ABCDEFGHIJKLMNOPQRSTUVWXYZ"),
-    ('N', "ABCDEFGHIJKLMNOPQRSTUVWXYZ"),
-    ('W', "ABCDEFGHIJKLMNOPQRSTUVWXYZ"),
+    ('A', "ABCDEFGHIJK"),
+    ('K', "ABCDEFGIJKMNOQRSTUVWXYZ"),
+    ('N', "ABCDEFGIJKMNOQRSTUVWXYZ"),
+    ('W', "ABCDEFGIJKMNOQRSTUVWXYZ"),
 ];
+
+/// What a US two-letter block issues after it: any call area, and 2x1 to 2x3.
+const US_TWO_LETTER_CALL: Prefix = area("", ALL_DIGITS, (1, 3), "US", 0.0);
 
 /// How much of the two-letter traffic is American.
 const US_TWO_LETTER_SHARE: f64 = 0.45;
 
-/// Two-letter prefixes from outside the US.
-const DX_TWO_LETTER: &[(&str, f64)] = &[
+/// Two-letter prefixes from outside the US blocks.
+const TWO_LETTER: &[Prefix] = &[
+    // Hawaii, Alaska and Puerto Rico: their own prefix, their own call area.
+    p("KH", "6", (1, 3), "KH6", 0.8),
+    p("NH", "6", (1, 3), "KH6", 0.3),
+    p("WH", "6", (1, 3), "KH6", 0.3),
+    p("KL", "7", (1, 3), "KL7", 0.8),
+    p("AL", "7", (1, 3), "KL7", 0.3),
+    p("WL", "7", (1, 3), "KL7", 0.3),
+    p("KP", "34", (1, 3), "KP4", 0.8),
+    p("NP", "4", (1, 3), "KP4", 0.3),
+    p("WP", "4", (1, 3), "KP4", 0.3),
     // Germany
-    ("DL", 9.0),
-    ("DK", 4.0),
-    ("DJ", 3.0),
-    ("DF", 2.0),
-    ("DG", 1.5),
+    p("DL", ALL_DIGITS, (2, 3), "DE", 9.0),
+    p("DK", ALL_DIGITS, (2, 3), "DE", 4.0),
+    p("DJ", ALL_DIGITS, (2, 3), "DE", 3.0),
+    p("DF", ALL_DIGITS, (2, 3), "DE", 2.0),
+    p("DG", ALL_DIGITS, (3, 3), "DE", 1.5),
     // Japan
-    ("JA", 8.0),
-    ("JE", 2.5),
-    ("JH", 3.0),
-    ("JR", 2.5),
-    ("JF", 1.5),
+    area("JA", ALL_DIGITS, (2, 3), "JA", 8.0),
+    area("JE", ALL_DIGITS, (3, 3), "JA", 2.5),
+    area("JH", ALL_DIGITS, (3, 3), "JA", 3.0),
+    area("JR", ALL_DIGITS, (3, 3), "JA", 2.5),
+    area("JF", ALL_DIGITS, (3, 3), "JA", 1.5),
     // Rest of Europe
-    ("EA", 4.0),
-    ("EB", 1.0),
-    ("IK", 3.0),
-    ("IZ", 2.0),
-    ("IW", 1.5),
-    ("PA", 3.5),
-    ("PD", 1.0),
-    ("ON", 2.5),
-    ("OK", 3.0),
-    ("OM", 2.0),
-    ("SP", 3.5),
-    ("SQ", 1.5),
-    ("OH", 3.0),
-    ("SM", 3.0),
-    ("SA", 1.0),
-    ("LA", 2.5),
-    ("OZ", 2.0),
-    ("HB", 2.0),
-    ("OE", 2.5),
-    ("YO", 2.0),
-    ("LZ", 1.5),
-    ("SV", 2.0),
-    ("TA", 1.5),
-    ("YU", 1.5),
-    ("YT", 1.0),
-    ("CT", 2.0),
-    ("EI", 1.5),
-    ("HA", 2.0),
-    ("HG", 1.0),
-    ("TF", 0.6),
-    ("LY", 1.5),
-    ("YL", 1.5),
-    ("ES", 1.2),
-    ("EW", 1.0),
+    p("EA", ONE_TO_NINE, (2, 3), "ES", 4.0),
+    p("EB", ONE_TO_NINE, (3, 3), "ES", 1.0),
+    p("IK", ALL_DIGITS, (3, 3), "IT", 3.0),
+    p("IZ", ALL_DIGITS, (3, 3), "IT", 2.0),
+    p("IW", ALL_DIGITS, (3, 3), "IT", 1.5),
+    p("PA", ALL_DIGITS, (2, 3), "NL", 3.5),
+    p("PD", ALL_DIGITS, (3, 3), "NL", 1.0),
+    p("ON", "345678", (2, 3), "BE", 2.5),
+    p("OK", "12", (2, 3), "CZ", 3.0),
+    p("OM", "02345678", (2, 3), "SK", 2.0),
+    p("SP", ONE_TO_NINE, (2, 3), "PL", 3.5),
+    p("SQ", ONE_TO_NINE, (3, 3), "PL", 1.5),
+    p("OH", ONE_TO_NINE, (2, 3), "FI", 3.0),
+    p("SM", "01234567", (2, 3), "SE", 3.0),
+    p("SA", "01234567", (3, 3), "SE", 1.0),
+    p("LA", ONE_TO_NINE, (2, 3), "NO", 2.5),
+    p("OZ", ONE_TO_NINE, (2, 3), "DK", 2.0),
+    p("HB", "9", (2, 3), "CH", 2.0),
+    p("OE", ONE_TO_NINE, (2, 3), "AT", 2.5),
+    p("YO", "23456789", (2, 3), "RO", 2.0),
+    p("LZ", "12345", (2, 3), "BG", 1.5),
+    p("SV", ONE_TO_NINE, (2, 3), "GR", 2.0),
+    p("TA", ONE_TO_NINE, (2, 3), "TR", 1.5),
+    p("YU", ONE_TO_NINE, (2, 3), "RS", 1.5),
+    p("YT", ONE_TO_NINE, (2, 3), "RS", 1.0),
+    p("CT", "1247", (2, 3), "PT", 2.0),
+    p("EI", "23456789", (2, 3), "IE", 1.5),
+    p("HA", ONE_TO_NINE, (2, 3), "HU", 2.0),
+    p("HG", ONE_TO_NINE, (2, 3), "HU", 1.0),
+    p("TF", "12345678", (2, 3), "IS", 0.6),
+    p("LY", "12345", (2, 3), "LT", 1.5),
+    p("YL", "23", (2, 3), "LV", 1.5),
+    p("ES", "12345678", (2, 3), "EE", 1.2),
+    p("EW", "12345678", (2, 3), "BY", 1.0),
     // UK regions
-    ("GM", 1.5),
-    ("GW", 1.2),
-    ("GI", 0.8),
-    ("MM", 0.6),
+    p("GM", "012345678", (2, 3), "GM", 1.5),
+    p("GW", "012345678", (2, 3), "GW", 1.2),
+    p("GI", "012345678", (2, 3), "GI", 0.8),
+    p("MM", "013567", (3, 3), "GM", 0.6),
     // Former USSR
-    ("UA", 4.0),
-    ("RA", 3.5),
-    ("RN", 2.0),
-    ("RK", 1.5),
-    ("UR", 2.5),
-    ("UT", 2.0),
-    ("UX", 1.2),
+    p("UA", "013469", (2, 3), "RU", 4.0),
+    p("RA", "013469", (2, 3), "RU", 3.5),
+    p("RN", "13469", (2, 3), "RU", 2.0),
+    p("RK", "13469", (2, 3), "RU", 1.5),
+    p("RW", "13469", (2, 3), "RU", 1.2),
+    p("RZ", "13469", (2, 3), "RU", 1.0),
+    p("UR", ALL_DIGITS, (2, 3), "UA", 2.5),
+    p("US", ALL_DIGITS, (2, 3), "UA", 1.0),
+    p("UT", ALL_DIGITS, (2, 3), "UA", 2.0),
+    p("UX", ALL_DIGITS, (2, 3), "UA", 1.2),
+    p("UY", ALL_DIGITS, (2, 3), "UA", 0.8),
     // Canada
-    ("VE", 4.5),
-    ("VA", 2.0),
-    ("VO", 0.8),
+    area("VE", ONE_TO_NINE, (2, 3), "CA", 4.5),
+    area("VA", "237", (2, 3), "CA", 2.0),
+    area("VO", "12", (2, 3), "CA", 0.8),
     // Rest of the world
-    ("VK", 3.0),
-    ("ZL", 2.0),
-    ("ZS", 1.2),
-    ("PY", 3.0),
-    ("PP", 1.0),
-    ("PU", 1.5),
-    ("LU", 2.5),
-    ("CE", 1.5),
-    ("CX", 0.8),
-    ("HK", 1.0),
-    ("XE", 1.5),
-    ("BA", 1.5),
-    ("BY", 1.0),
-    ("BG", 1.5),
-    ("HL", 1.5),
-    ("DS", 1.0),
-    ("VU", 1.5),
+    area("VK", "12345678", (2, 3), "AU", 3.0),
+    p("ZL", "1234", (2, 3), "NZ", 2.0),
+    p("ZS", "123456", (2, 3), "ZA", 1.2),
+    p("PY", ONE_TO_NINE, (2, 3), "BR", 3.0),
+    p("PP", "12345678", (3, 3), "BR", 1.0),
+    p("PU", ONE_TO_NINE, (3, 3), "BR", 1.5),
+    p("LU", ONE_TO_NINE, (2, 3), "AR", 2.5),
+    p("CE", "12345678", (2, 3), "CL", 1.5),
+    p("CX", ONE_TO_NINE, (2, 3), "UY", 0.8),
+    p("HK", ONE_TO_NINE, (2, 3), "CO", 1.0),
+    p("XE", "123", (2, 3), "MX", 1.5),
+    p("BA", ONE_TO_NINE, (2, 2), "CN", 1.5),
+    p("BY", ONE_TO_NINE, (3, 3), "CN", 1.0),
+    p("BG", ONE_TO_NINE, (3, 3), "CN", 1.5),
+    p("HL", "12345", (2, 3), "KR", 1.5),
+    p("DS", "12345", (3, 3), "KR", 1.0),
+    p("VU", "23", (2, 3), "IN", 1.5),
 ];
 
 /// Prefixes carrying a digit, both ways round: `9A` and `S5` alike.
-const DIGIT_PREFIX: &[(&str, f64)] = &[
-    ("9A", 3.0), // Croatia
-    ("S5", 3.0), // Slovenia
-    ("4X", 2.0),
-    ("4Z", 1.5), // Israel
-    ("Z3", 1.5), // North Macedonia
-    ("E7", 1.5), // Bosnia and Herzegovina
-    ("T7", 0.8), // San Marino
-    ("9H", 1.2), // Malta
-    ("3A", 0.6), // Monaco
-    ("4O", 0.8), // Montenegro
-    ("4L", 1.0), // Georgia
-    ("5B", 1.0), // Cyprus
-    ("9K", 0.8), // Kuwait
-    ("9V", 0.8), // Singapore
-    ("9M", 1.0), // Malaysia
-    ("E2", 0.8), // Thailand
-    ("3B", 0.5), // Mauritius
-    ("8P", 0.5), // Barbados
-    ("7X", 0.5), // Algeria
-    ("6Y", 0.6), // Jamaica
-    ("9Y", 0.6), // Trinidad and Tobago
+const DIGIT_PREFIX: &[Prefix] = &[
+    p("9A", ONE_TO_NINE, (2, 3), "HR", 3.0),
+    p("S5", ALL_DIGITS, (2, 3), "SI", 3.0),
+    p("4X", "123456", (2, 3), "IL", 2.0),
+    p("4Z", "45", (2, 3), "IL", 1.5),
+    p("Z3", "1235", (2, 3), "MK", 1.5),
+    p("E7", ALL_DIGITS, (2, 3), "BA", 1.5),
+    p("T7", "07", (1, 2), "SM", 0.8),
+    p("9H", "135", (2, 3), "MT", 1.2),
+    p("3A", "2", (2, 3), "MC", 0.6),
+    p("4O", "34", (2, 3), "ME", 0.8),
+    p("4L", "145", (2, 3), "GE", 1.0),
+    p("5B", "4", (2, 3), "CY", 1.0),
+    p("9K", "2", (2, 3), "KW", 0.8),
+    p("9V", "1", (2, 3), "SG", 0.8),
+    p("9M", "268", (2, 3), "MY", 1.0),
+    p("E2", "012", (2, 3), "TH", 0.8),
+    p("3B", "8", (2, 3), "MU", 0.5),
+    p("8P", "6", (2, 3), "BB", 0.5),
+    p("7X", "2345", (2, 3), "DZ", 0.5),
+    p("6Y", "5", (2, 3), "JM", 0.6),
+    p("9Y", "4", (2, 3), "TT", 0.6),
+];
+
+/// Where a station operating abroad most often is, as the prefix it signs
+/// first: `DL/W1AW`, `EA8/G3XYZ`. Mostly CEPT countries, whose licences
+/// travel.
+const HOSTS: &[(&str, &str, f64)] = &[
+    ("DL", "DE", 3.0),
+    ("EA", "ES", 2.0),
+    ("EA8", "ES", 1.5),
+    ("F", "FR", 2.0),
+    ("G", "UK", 1.2),
+    ("GM", "GM", 0.6),
+    ("I", "IT", 1.5),
+    ("OE", "AT", 1.0),
+    ("HB9", "CH", 1.0),
+    ("PA", "NL", 1.0),
+    ("ON", "BE", 0.8),
+    ("OH", "FI", 0.8),
+    ("SM", "SE", 0.8),
+    ("LA", "NO", 0.6),
+    ("OZ", "DK", 0.8),
+    ("SP", "PL", 1.0),
+    ("OK", "CZ", 0.8),
+    ("9A", "HR", 1.0),
+    ("S5", "SI", 0.5),
+    ("SV", "GR", 0.8),
+    ("SV9", "GR", 0.5),
+    ("CT", "PT", 0.8),
+    ("CT3", "PT", 0.5),
+    ("EI", "IE", 0.6),
+    ("TF", "IS", 0.3),
 ];
 
 /// Suffix lengths are not uniform either: two and three letters dominate.
-const SUFFIX_WEIGHTS: &[(usize, f64)] = &[(1, 1.0), (2, 5.0), (3, 5.0), (4, 1.0)];
+const SUFFIX_WEIGHTS: &[(usize, f64)] = &[(1, 1.0), (2, 5.0), (3, 5.0)];
 
 /// What follows the slash. `/P` and `/M` are much the most common.
-const PORTABLE_MARKERS: &[(&str, f64)] = &[
-    ("P", 6.0),
-    ("M", 4.0),
-    ("QRP", 1.5),
-    ("A", 1.0),
-    ("0", 0.4),
-    ("1", 0.4),
-    ("2", 0.4),
-    ("3", 0.4),
-    ("4", 0.4),
-    ("5", 0.4),
-    ("6", 0.4),
-    ("7", 0.4),
-    ("8", 0.4),
-    ("9", 0.4),
-];
+const PORTABLE_MARKERS: &[(&str, f64)] = &[("P", 6.0), ("M", 4.0), ("QRP", 1.5), ("A", 1.0)];
+
+/// The share of portables an area-marking country signs with a call-area
+/// digit instead: `W1AW/4`.
+const AREA_MARKER_SHARE: f64 = 0.35;
 
 fn tier_at(tier: u32) -> &'static Tier {
     let index = tier.clamp(CALLSIGN_TIER_MIN, CALLSIGN_TIER_MAX) - CALLSIGN_TIER_MIN;
@@ -293,62 +412,105 @@ fn pick_shape(tier: &Tier, rng: &mut impl Rng) -> PrefixShape {
     pick_weighted(&table, rng).copied().unwrap_or(Letter)
 }
 
-fn us_two_letter(rng: &mut impl Rng) -> Option<String> {
+/// Whether `prefix` issues a suffix of a length the tier allows.
+fn fits(prefix: &Prefix, tier: &Tier) -> bool {
+    prefix.suffix.0 <= tier.suffix_max && prefix.suffix.1 >= tier.suffix_min
+}
+
+/// A prefix of `table` the tier can use, by weight.
+fn pick_prefix(table: &'static [Prefix], tier: &Tier, rng: &mut impl Rng) -> Option<Prefix> {
+    let usable: Vec<(Prefix, f64)> = table
+        .iter()
+        .filter(|prefix| fits(prefix, tier))
+        .map(|prefix| (*prefix, prefix.weight))
+        .collect();
+    pick_weighted(&usable, rng).copied()
+}
+
+/// A US two-letter block, and what it issues.
+fn us_two_letter(rng: &mut impl Rng) -> Option<(String, Prefix)> {
     let (first, seconds) = US_TWO_LETTER.get(rng.usize_in(0, US_TWO_LETTER.len() - 1))?;
     let choices: Vec<char> = seconds.chars().collect();
     let second = choices.get(rng.usize_in(0, choices.len().saturating_sub(1)))?;
-    Some(format!("{first}{second}"))
+    Some((format!("{first}{second}"), US_TWO_LETTER_CALL))
 }
 
-fn prefix_for(shape: PrefixShape, rng: &mut impl Rng) -> String {
-    match shape {
-        Letter => pick_weighted(SINGLE_LETTER, rng)
-            .map(|prefix| (*prefix).to_string())
-            .unwrap_or_else(|| "W".to_string()),
+/// The prefix a call of `shape` starts with, and what its country issues.
+fn prefix_for(shape: PrefixShape, tier: &Tier, rng: &mut impl Rng) -> (String, Prefix) {
+    let picked = match shape {
+        Letter => pick_prefix(SINGLE_LETTER, tier, rng),
         LetterLetter => {
             if rng.f64() < US_TWO_LETTER_SHARE
-                && let Some(prefix) = us_two_letter(rng)
+                && let Some(us) = us_two_letter(rng)
             {
-                return prefix;
+                return us;
             }
-            pick_weighted(DX_TWO_LETTER, rng)
-                .map(|prefix| (*prefix).to_string())
-                .unwrap_or_else(|| "DL".to_string())
+            pick_prefix(TWO_LETTER, tier, rng)
         }
-        WithDigit => pick_weighted(DIGIT_PREFIX, rng)
-            .map(|prefix| (*prefix).to_string())
-            .unwrap_or_else(|| "9A".to_string()),
-    }
+        WithDigit => pick_prefix(DIGIT_PREFIX, tier, rng),
+    };
+    // Every tier's lengths are some US call's, so this is only ever a
+    // fallback for a table that cannot fit.
+    let prefix = picked.unwrap_or(SINGLE_LETTER[0]);
+    (prefix.prefix.to_string(), prefix)
 }
 
-fn suffix_len(tier: &Tier, rng: &mut impl Rng) -> usize {
+/// A suffix length both the tier and the country allow, by how common it is.
+fn suffix_len(tier: &Tier, prefix: &Prefix, rng: &mut impl Rng) -> usize {
+    let low = tier.suffix_min.max(prefix.suffix.0);
+    let high = tier.suffix_max.min(prefix.suffix.1).min(SUFFIX_MAX);
     let allowed: Vec<(usize, f64)> = SUFFIX_WEIGHTS
         .iter()
         .copied()
-        .filter(|(len, _)| *len >= tier.suffix_min && *len <= tier.suffix_max)
+        .filter(|(len, _)| (low..=high).contains(len))
         .collect();
-    pick_weighted(&allowed, rng)
+    pick_weighted(&allowed, rng).copied().unwrap_or(low.max(1))
+}
+
+/// One of the digits `prefix`'s country issues.
+fn separator(prefix: &Prefix, rng: &mut impl Rng) -> char {
+    let digits: Vec<char> = prefix.digits.chars().collect();
+    digits
+        .get(rng.usize_in(0, digits.len().saturating_sub(1)))
         .copied()
-        .unwrap_or(tier.suffix_min.max(1))
+        .unwrap_or('1')
 }
 
 /// One realistic callsign at this tier.
 pub fn generate_callsign(tier: u32, rng: &mut impl Rng) -> String {
     let tier = tier_at(tier);
     let shape = pick_shape(tier, rng);
-    let mut call = prefix_for(shape, rng);
-    call.push(char::from_digit(rng.usize_in(0, 9) as u32, 10).unwrap_or('1'));
-    for _ in 0..suffix_len(tier, rng) {
+    let (mut call, prefix) = prefix_for(shape, tier, rng);
+    call.push(separator(&prefix, rng));
+    for _ in 0..suffix_len(tier, &prefix, rng) {
         call.push(LETTERS[rng.usize_in(0, LETTERS.len() - 1)]);
     }
-    if tier.portable
-        && rng.f64() < PORTABLE_SHARE
-        && let Some(marker) = pick_weighted(PORTABLE_MARKERS, rng)
+    // One of the two at most: abroad, or portable at home.
+    if tier.abroad
+        && rng.f64() < ABROAD_SHARE
+        && let Some(host) = pick_host(prefix.country, rng)
     {
+        return format!("{host}/{call}");
+    }
+    if tier.portable && rng.f64() < PORTABLE_SHARE {
         call.push('/');
-        call.push_str(marker);
+        if prefix.area_marker && rng.f64() < AREA_MARKER_SHARE {
+            call.push(char::from_digit(rng.usize_in(0, 9) as u32, 10).unwrap_or('1'));
+        } else if let Some(marker) = pick_weighted(PORTABLE_MARKERS, rng) {
+            call.push_str(marker);
+        }
     }
     call
+}
+
+/// A country to be operating in that is not `home`.
+fn pick_host(home: &str, rng: &mut impl Rng) -> Option<&'static str> {
+    let away: Vec<(&'static str, f64)> = HOSTS
+        .iter()
+        .filter(|(_, country, _)| *country != home)
+        .map(|(prefix, _, weight)| (*prefix, *weight))
+        .collect();
+    pick_weighted(&away, rng).copied()
 }
 
 /// Every character a callsign at this tier can contain — what the stats and the
@@ -356,7 +518,8 @@ pub fn generate_callsign(tier: u32, rng: &mut impl Rng) -> String {
 pub fn callsign_pool(tier: u32) -> Vec<char> {
     let mut pool: Vec<char> = LETTERS.to_vec();
     pool.extend(crate::morse::DIGITS.iter().copied());
-    if tier_at(tier).portable {
+    let tier = tier_at(tier);
+    if tier.portable || tier.abroad {
         pool.push('/');
     }
     pool
@@ -373,6 +536,9 @@ pub fn tier_examples(tier: u32) -> Vec<String> {
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CallsignParts<'a> {
+    /// The country a station operating abroad signs first: the `DL` of
+    /// `DL/W1AW`.
+    pub host: Option<&'a str>,
     pub prefix: &'a str,
     pub separator: char,
     pub suffix: &'a str,
@@ -382,21 +548,32 @@ pub(crate) struct CallsignParts<'a> {
 /// Split a callsign into its parts, or `None` if it is not one.
 ///
 /// The separator is the *last* digit before the suffix, which is what makes
-/// `9A1AA` split as `9A` + `1` + `AA` rather than at its leading digit.
+/// `9A1AA` split as `9A` + `1` + `AA` rather than at its leading digit. A
+/// slash has a marker after the call (`G3XYZ/P`) or a host country before it
+/// (`DL/W1AW`); whichever side is a whole call is the call.
 #[cfg(test)]
 pub(crate) fn parse_callsign(call: &str) -> Option<CallsignParts<'_>> {
-    let (base, portable) = match call.split_once('/') {
-        Some((base, portable)) => (base, Some(portable)),
-        None => (call, None),
+    let Some((left, right)) = call.split_once('/') else {
+        return parse_base(call, None, None);
     };
-    if let Some(marker) = portable
-        && (marker.is_empty()
-            || !marker
+    let marker = |part: &str| {
+        !part.is_empty()
+            && part
                 .chars()
-                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()))
-    {
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+    };
+    if !marker(left) || !marker(right) {
         return None;
     }
+    parse_base(left, None, Some(right)).or_else(|| parse_base(right, Some(left), None))
+}
+
+#[cfg(test)]
+fn parse_base<'a>(
+    base: &'a str,
+    host: Option<&'a str>,
+    portable: Option<&'a str>,
+) -> Option<CallsignParts<'a>> {
     let separator = base.rfind(|c: char| c.is_ascii_digit())?;
     let prefix = &base[..separator];
     let suffix = &base[separator + 1..];
@@ -413,6 +590,7 @@ pub(crate) fn parse_callsign(call: &str) -> Option<CallsignParts<'_>> {
         return None;
     }
     Some(CallsignParts {
+        host,
         prefix,
         separator: base[separator..].chars().next()?,
         suffix,
@@ -468,6 +646,11 @@ mod tests {
                         parts.portable.is_none(),
                         "tier {tier}: {call:?} is portable"
                     );
+                }
+                if !spec.abroad {
+                    assert!(parts.host.is_none(), "tier {tier}: {call:?} is abroad");
+                }
+                if !spec.portable && !spec.abroad {
                     assert!(!call.contains('/'), "tier {tier}: {call:?} has a slash");
                 }
                 let has_digit_prefix = parts.prefix.chars().any(|c| c.is_ascii_digit());
@@ -505,6 +688,7 @@ mod tests {
             assert!(upper.suffix_min <= lower.suffix_min);
             assert!(upper.suffix_max >= lower.suffix_max);
             assert!(upper.portable || !lower.portable);
+            assert!(upper.abroad || !lower.abroad);
         }
     }
 
@@ -519,11 +703,18 @@ mod tests {
     }
 
     #[test]
-    fn the_top_tier_goes_portable_sometimes_but_not_always() {
-        let calls = calls(CALLSIGN_TIER_MAX, 500);
-        let portable = calls.iter().filter(|call| call.contains('/')).count();
-        assert!(portable > 0, "no portable calls at the top tier");
-        assert!(portable < calls.len(), "every call was portable");
+    fn the_top_tiers_go_portable_and_abroad_sometimes_but_not_always() {
+        let portable = calls(5, 500);
+        let marked = portable.iter().filter(|call| call.contains('/')).count();
+        assert!(marked > 0, "no portable calls at tier 5");
+        assert!(marked < portable.len(), "every call was portable");
+        let top = calls(CALLSIGN_TIER_MAX, 1_000);
+        let abroad = top
+            .iter()
+            .filter(|call| parse_callsign(call).is_some_and(|parts| parts.host.is_some()))
+            .count();
+        assert!(abroad > 0, "nobody operating abroad at the top tier");
+        assert!(abroad < top.len() / 4, "{abroad} of {} abroad", top.len());
     }
 
     #[test]
@@ -538,7 +729,8 @@ mod tests {
                     );
                 }
             }
-            assert!(pool.contains(&'/') == tier_at(tier).portable);
+            let spec = tier_at(tier);
+            assert!(pool.contains(&'/') == (spec.portable || spec.abroad));
         }
     }
 
@@ -584,33 +776,137 @@ mod tests {
         assert_eq!(portable.prefix, "W");
         assert_eq!(portable.suffix, "AW");
         assert_eq!(portable.portable, Some("4"));
+        assert_eq!(portable.host, None);
+        let abroad = parse_callsign("EA8/G3XYZ").expect("a callsign");
+        assert_eq!(abroad.host, Some("EA8"));
+        assert_eq!(abroad.prefix, "G");
+        assert_eq!(abroad.separator, '3');
+        assert_eq!(abroad.suffix, "XYZ");
+        assert_eq!(abroad.portable, None);
+        assert!(parse_callsign("DL/W1AW").is_some_and(|parts| parts.host == Some("DL")));
+    }
+
+    /// What a country issues after `prefix`: a table's entry for it, or a
+    /// US two-letter block's.
+    fn issued(prefix: &str) -> Option<Prefix> {
+        let listed = SINGLE_LETTER
+            .iter()
+            .chain(TWO_LETTER)
+            .chain(DIGIT_PREFIX)
+            .find(|entry| entry.prefix == prefix)
+            .copied();
+        listed.or_else(|| {
+            let mut chars = prefix.chars();
+            let (first, second) = (chars.next()?, chars.next()?);
+            let block = US_TWO_LETTER.iter().find(|(lead, _)| *lead == first)?;
+            (chars.next().is_none() && block.1.contains(second)).then_some(US_TWO_LETTER_CALL)
+        })
+    }
+
+    /// Every call is one its country could have issued: the prefix is a real
+    /// one, the digit after it is one that country hands out with it, the
+    /// suffix is a length it issues, and a station abroad is not abroad at
+    /// home. `G9`, `F9`, `9M1`, `NL0` and the lone `U` of `U7A` are none of
+    /// those.
+    #[test]
+    fn every_call_is_one_its_country_could_issue() {
+        for tier in CALLSIGN_TIER_MIN..=CALLSIGN_TIER_MAX {
+            for call in calls(tier, 2_000) {
+                let parts = parse_callsign(&call).expect("a callsign");
+                let country = issued(parts.prefix)
+                    .unwrap_or_else(|| panic!("{call:?}: no country issues {}", parts.prefix));
+                assert!(
+                    country.digits.contains(parts.separator),
+                    "{call:?}: {} is not followed by {}",
+                    parts.prefix,
+                    parts.separator
+                );
+                let len = parts.suffix.chars().count();
+                assert!(
+                    (country.suffix.0..=country.suffix.1).contains(&len) && len <= SUFFIX_MAX,
+                    "{call:?}: {} issues no {len}-letter suffix",
+                    parts.prefix
+                );
+                if let Some(host) = parts.host {
+                    let (_, host_country, _) = HOSTS
+                        .iter()
+                        .find(|(prefix, _, _)| *prefix == host)
+                        .unwrap_or_else(|| panic!("{call:?}: {host} is not a host"));
+                    assert_ne!(*host_country, country.country, "{call:?} is abroad at home");
+                }
+                if let Some(marker) = parts.portable
+                    && marker.chars().all(|c| c.is_ascii_digit())
+                {
+                    assert!(
+                        country.area_marker,
+                        "{call:?}: {} marks no call area",
+                        parts.prefix
+                    );
+                }
+            }
+        }
+        for lone in ["U", "R"] {
+            assert!(
+                issued(lone).is_none(),
+                "{lone} alone is no country's prefix"
+            );
+        }
     }
 
     #[test]
     fn the_prefix_tables_are_real_prefixes() {
-        let tables: [&[(&str, f64)]; 3] = [SINGLE_LETTER, DX_TWO_LETTER, DIGIT_PREFIX];
-        for table in tables {
+        let tables: [(&[Prefix], PrefixShape); 3] = [
+            (SINGLE_LETTER, Letter),
+            (TWO_LETTER, LetterLetter),
+            (DIGIT_PREFIX, WithDigit),
+        ];
+        for (table, shape) in tables {
             assert!(!table.is_empty());
-            for (prefix, weight) in table {
-                assert!(*weight > 0.0, "{prefix} has no weight");
-                assert!(!prefix.is_empty());
-                assert!(
-                    prefix
-                        .chars()
-                        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()),
-                    "{prefix} is not a prefix"
-                );
+            for entry in table {
+                let prefix = entry.prefix;
+                assert!(entry.weight > 0.0, "{prefix} has no weight");
+                let letters = prefix.chars().filter(char::is_ascii_uppercase).count();
+                let digits = prefix.chars().filter(char::is_ascii_digit).count();
+                let expected = match shape {
+                    Letter => (1, 0),
+                    LetterLetter => (2, 0),
+                    WithDigit => (1, 1),
+                };
+                assert_eq!((letters, digits), expected, "{prefix} is not a {shape:?}");
                 for ch in prefix.chars() {
                     assert!(morse_for(ch).is_some(), "{prefix} cannot be sent");
                 }
+                assert!(!entry.digits.is_empty(), "{prefix} issues no digit");
+                assert!(
+                    entry.digits.chars().all(|c| c.is_ascii_digit()),
+                    "{prefix}: {}",
+                    entry.digits
+                );
+                let (low, high) = entry.suffix;
+                assert!(
+                    1 <= low && low <= high && high <= SUFFIX_MAX,
+                    "{prefix}: {low}..{high}"
+                );
+                assert!(!entry.country.is_empty());
             }
+        }
+        // The US blocks leave Hawaii, Alaska and Puerto Rico to their own
+        // prefixes and call areas.
+        for (lead, seconds) in US_TWO_LETTER {
+            if *lead != 'A' {
+                assert!(!seconds.contains(['H', 'L', 'P']), "{lead}: {seconds}");
+            }
+        }
+        for (host, country, weight) in HOSTS {
+            assert!(*weight > 0.0 && !country.is_empty(), "{host}");
+            assert!(host.chars().all(|c| morse_for(c).is_some()), "{host}");
         }
         // A prefix listed twice would quietly double its share of the band.
         let mut seen: Vec<&str> = SINGLE_LETTER
             .iter()
-            .chain(DX_TWO_LETTER)
+            .chain(TWO_LETTER)
             .chain(DIGIT_PREFIX)
-            .map(|(prefix, _)| *prefix)
+            .map(|entry| entry.prefix)
             .collect();
         let before = seen.len();
         seen.sort_unstable();

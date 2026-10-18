@@ -187,7 +187,7 @@ const QSB_DEPTH_MAX_DB: f64 = 10.0;
 
 /// The callsign tier the band's callsigns are drawn from: every shape of call
 /// but portables, which are a small part of real traffic.
-const CALL_TIER: u32 = 5;
+const CALL_TIER: u32 = 4;
 /// How many stations' worth of text the band is built with. Stations reuse
 /// them, as the same few regulars come back on a real band.
 const SCRIPTS: usize = 40;
