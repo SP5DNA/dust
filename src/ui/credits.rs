@@ -87,24 +87,28 @@ pub const TESTERS: &[Tester] = &[
         callsign: Some("SP5DNA"),
     },
     Tester {
+        name: "Szymon",
+        callsign: Some("SO7NA"),
+    },
+    Tester {
+        name: "Ryszard",
+        callsign: Some("M0RPA"),
+    },
+    Tester {
         name: "Mariusz",
         callsign: Some("SP8KM"),
-    },
-    Tester {
-        name: "Krzysztof",
-        callsign: Some("SP8BFG"),
-    },
-    Tester {
-        name: "Mariusz",
-        callsign: Some("SP7UDB"),
     },
     Tester {
         name: "Dariusz",
         callsign: Some("SQ5VDR"),
     },
     Tester {
-        name: "Ryszard",
-        callsign: Some("M0RPA"),
+        name: "Mariusz",
+        callsign: Some("SP7UDB"),
+    },
+    Tester {
+        name: "Krzysztof",
+        callsign: Some("SP8BFG"),
     },
     Tester {
         name: "Czarek",
