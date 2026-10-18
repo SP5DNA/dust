@@ -338,6 +338,8 @@ pub struct BandSettings {
     pub volume_min: f64,
     pub volume_max: f64,
     pub link_volume: bool,
+    /// The keying envelope's rise and fall, in milliseconds. A rig keys in
+    /// four to eight; ten sounded soft.
     pub steepness: f64,
     pub envelope_smoothing: f64,
     pub qsb_enabled: bool,
@@ -396,7 +398,7 @@ impl Default for BandSettings {
             volume_min: 0.7,
             volume_max: 1.0,
             link_volume: false,
-            steepness: 10.0,
+            steepness: 6.0,
             envelope_smoothing: 0.75,
             qsb_enabled: true,
             qsb_depth: 0.35,

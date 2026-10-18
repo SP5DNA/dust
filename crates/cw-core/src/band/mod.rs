@@ -20,7 +20,7 @@
 //! 3. The AGC rides the gain: a steady few decibels down under a keyed
 //!    station, back up in the pauses, and only a moment's duck for a crash.
 //!    Its knee is set from the band's own floor ([`agc_knee`]).
-//! 4. The receiver's audio stage adds a faint, wide hiss of its own
+//! 4. The receiver's audio stage adds a very faint, wide hiss of its own
 //!    ([`AudioFloor`]), after the filter and the AGC, so the band is never
 //!    quite silent outside the passband — as no real receiver is.
 //! 5. A soft limiter ([`soft_limit`]) catches whatever is still too loud,
