@@ -77,6 +77,7 @@ fn wild_settings(rng: &mut SplitMix64) -> TrainingSettings {
     s.playback.extra_word_space_multiplier = rng.pick_in_range(-5.0, 30.0);
     s.playback.group_timeout = rng.pick_in_range(-5.0, 600.0);
     s.playback.group_pause_sec = rng.pick_in_range(-5.0, 40.0);
+    s.playback.countdown_sec = rng.usize_in(0, 40) as u32;
     s.playback.group_repeat_min = rng.usize_in(0, 12) as u32;
     s.playback.group_repeat_max = rng.usize_in(0, 12) as u32;
     s.playback.fist_variation = rng.pick_in_range(-1.0, 4.0);
@@ -143,6 +144,10 @@ fn check_clamped(s: &TrainingSettings, seed: u64) {
     );
     assert!(
         p.group_pause_sec.is_finite() && (0.0..=15.0).contains(&p.group_pause_sec),
+        "seed {seed}"
+    );
+    assert!(
+        p.countdown_sec <= crate::settings::COUNTDOWN_MAX_SEC,
         "seed {seed}"
     );
     let b = &once.band;
@@ -390,6 +395,12 @@ fn no_run_of_events_can_put_a_session_somewhere_impossible() {
                 assert!(
                     index < groups,
                     "seed {seed} step {step}: phase points at group {index} of {groups}"
+                );
+            }
+            if let SessionPhase::Countdown { remaining } = machine.phase() {
+                assert!(
+                    remaining >= 1 && !machine.session().any_confirmed(),
+                    "seed {seed} step {step}: counting down from {remaining} mid-session"
                 );
             }
             if let SessionPhase::InterGroupGap { next } = machine.phase() {

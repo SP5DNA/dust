@@ -13,6 +13,9 @@ use crate::timing::{compute_after_group_gap_ms, compute_group_gap_for_wpm};
 
 pub const AUTO_CONFIRM_DELAY_MS: u32 = 300;
 
+/// One step of the count down before the first group.
+pub const COUNTDOWN_STEP_MS: u32 = 1_000;
+
 /// Where a session's groups come from, and where what was copied of them
 /// goes back to.
 pub trait GroupSource {
@@ -75,6 +78,11 @@ pub enum AnswerClose {
     /// Auto-confirm: the answer reached full length a moment ago and has sat
     /// still since. Anything still being entered means it has not.
     Settled,
+    /// The answer window running out on an answer nobody has begun. It
+    /// moves on from a group that was not copied at all, and never from one
+    /// being answered: a pause to think is not a character skipped. Anything
+    /// still being entered means it has begun.
+    Unbegun,
 }
 
 /// What the phase's timer is waiting for.
@@ -84,6 +92,8 @@ enum PhaseTimer {
     Gap,
     /// The answer window closing.
     AnswerWindow,
+    /// One second of the count down before the first group.
+    Countdown,
 }
 
 /// An answer that reached its group's length, waiting a moment in case the
@@ -106,10 +116,15 @@ pub struct SessionMachine<S> {
     repeats_left: u32,
     /// Audio time already spent on this group: every send plus the gaps between them.
     group_elapsed_ms: u64,
+    /// Something has been typed into the group being answered, so the answer
+    /// window no longer closes it: it waits for the answer to be finished,
+    /// or for Enter.
+    answer_begun: bool,
 }
 
 impl<S: GroupSource> SessionMachine<S> {
-    /// Start a session: draw its first group and send it.
+    /// Start a session: draw its first group, and send it once the count
+    /// down the settings ask for has run — at once, if they ask for none.
     pub fn start(
         session_id: SessionId,
         now: MonoMs,
@@ -117,11 +132,11 @@ impl<S: GroupSource> SessionMachine<S> {
         mut source: S,
     ) -> (Self, Vec<SessionEffect>) {
         let groups = settings.curriculum.num_groups.max(1) as usize;
+        let countdown = settings.playback.countdown_sec;
         let (text, repeats) = source.next_group(&settings);
         let mut session = GroupSession::new(session_id, groups, settings);
-        session.set_group(0, text.clone(), repeats);
-        session.begin_group(0, now);
-        let machine = Self {
+        session.set_group(0, text, repeats);
+        let mut machine = Self {
             repeats_left: session.group_repeats(0),
             session,
             source,
@@ -129,8 +144,17 @@ impl<S: GroupSource> SessionMachine<S> {
             phase_timer: None,
             auto_confirm: None,
             group_elapsed_ms: 0,
+            answer_begun: false,
         };
-        (machine, vec![SessionEffect::Play { index: 0, text }])
+        let effects = if countdown == 0 {
+            machine.begin_group(0, now)
+        } else {
+            machine.set_phase(SessionPhase::Countdown {
+                remaining: countdown,
+            });
+            vec![machine.start_phase_timer(PhaseTimer::Countdown, COUNTDOWN_STEP_MS)]
+        };
+        (machine, effects)
     }
 
     pub fn session(&self) -> &GroupSession {
@@ -172,8 +196,9 @@ impl<S: GroupSource> SessionMachine<S> {
     /// The runtime asks before it applies the event. At a deadline, what the
     /// user has finished entering by then is part of the answer. Auto-confirm
     /// is no deadline: it waits for the answer to sit still, so an entry
-    /// still under way puts it off. Anything else — a send ending, a gap —
-    /// leaves the answer open for more.
+    /// still under way puts it off. The answer window closes only an answer
+    /// nobody has begun, and an entry under way is one begun. Anything else
+    /// — a send ending, a gap — leaves the answer open for more.
     ///
     /// Typing never closes the answer, and must not be made to. Closing it
     /// has the runtime ask the answer box to finish what is entered, and the
@@ -196,12 +221,12 @@ impl<S: GroupSource> SessionMachine<S> {
                 {
                     return Some(AnswerClose::Settled);
                 }
-                matches!(
+                let window = matches!(
                     (self.phase_timer, self.phase()),
                     (Some((timer, PhaseTimer::AnswerWindow)), SessionPhase::AwaitingAnswer { .. })
                         if timer == *id
-                )
-                .then_some(AnswerClose::Deadline)
+                );
+                (window && !self.answer_begun).then_some(AnswerClose::Unbegun)
             }
             SessionEvent::PlaybackEnded { .. }
             | SessionEvent::PlaybackStopped { .. }
@@ -323,6 +348,7 @@ impl<S: GroupSource> SessionMachine<S> {
             return Vec::new();
         };
         let (sent, value) = (group.sent(), group.input().to_string());
+        self.answer_begun |= !value.is_empty();
         let complete = answer_length_matches(sent, &value);
         self.session.mark_answer_complete(index, complete, now);
         if !complete {
@@ -360,6 +386,20 @@ impl<S: GroupSource> SessionMachine<S> {
             (PhaseTimer::Gap, SessionPhase::RepeatGap { index }) => {
                 self.set_phase(SessionPhase::Playing { index });
                 vec![self.play(index)]
+            }
+            (PhaseTimer::Countdown, SessionPhase::Countdown { remaining }) if remaining > 1 => {
+                self.set_phase(SessionPhase::Countdown {
+                    remaining: remaining - 1,
+                });
+                vec![self.start_phase_timer(PhaseTimer::Countdown, COUNTDOWN_STEP_MS)]
+            }
+            (PhaseTimer::Countdown, SessionPhase::Countdown { .. }) => self.begin_group(0, now),
+            // An answer under way is waited for, however long the pause in
+            // it: only Enter, or the answer reaching its length, closes it.
+            (PhaseTimer::AnswerWindow, SessionPhase::AwaitingAnswer { .. })
+                if self.answer_begun =>
+            {
+                Vec::new()
             }
             (PhaseTimer::AnswerWindow, SessionPhase::AwaitingAnswer { .. }) => {
                 self.confirm_current(now)
@@ -447,6 +487,7 @@ impl<S: GroupSource> SessionMachine<S> {
         self.set_phase(SessionPhase::Playing { index });
         self.repeats_left = self.session.group_repeats(index);
         self.group_elapsed_ms = 0;
+        self.answer_begun = false;
         vec![self.play(index)]
     }
 }
@@ -490,6 +531,9 @@ mod tests {
         s.curriculum.num_groups = groups;
         s.playback.group_timeout = timeout;
         s.playback.lock_input_during_group_playback = lock;
+        // The count down has tests of its own; everywhere else the first
+        // group goes out at once.
+        s.playback.countdown_sec = 0;
         s
     }
 
@@ -561,14 +605,74 @@ mod tests {
         assert!(m.session().input_locked(0));
     }
 
-    /// Confirming, finishing, and the answer window or auto-confirm running
-    /// out close the answer. A send ending, or the gap between sends running
-    /// out, leaves it open for more. Typing closes nothing, and must not:
-    /// not even an answer as long as the group, the one auto-confirm waits
-    /// on to settle.
+    /// A count down holds the first group back a second a step, with the
+    /// box closed, and then sends it as if the session had started then.
+    #[test]
+    fn a_count_down_comes_before_the_first_group() {
+        let mut ask = settings(2, false, 10.0);
+        ask.playback.countdown_sec = 3;
+        let (mut m, effects) =
+            SessionMachine::start(SessionId::new(7), MonoMs(0), ask, script(&["KM"], 1));
+        assert_eq!(m.phase(), SessionPhase::Countdown { remaining: 3 });
+        assert_eq!(timer(&effects).1, COUNTDOWN_STEP_MS);
+        let view = m.session().view();
+        assert_eq!(view.countdown, Some(3));
+        assert!(!view.playing);
+        // The group is drawn already, but nothing is sent, and nothing can be
+        // typed into it, however the lock is set.
+        assert_eq!(m.session().group(0).map(|g| g.sent()), Some("KM"));
+        assert!(m.session().input_locked(0));
+        assert!(m.apply(typed(0, "K"), MonoMs(10)).is_empty());
+        assert_eq!(m.session().group(0).map(|g| g.input()), Some(""));
+        assert!(m.apply(SessionEvent::Confirm, MonoMs(20)).is_empty());
+        assert!(m.apply(ended(0), MonoMs(30)).is_empty());
+        assert_eq!(
+            m.closes_answer(&SessionEvent::Confirm),
+            Some(AnswerClose::Deadline)
+        );
+
+        let effects = fire(&mut m, &effects, 1_000);
+        assert_eq!(m.phase(), SessionPhase::Countdown { remaining: 2 });
+        let effects = fire(&mut m, &effects, 2_000);
+        assert_eq!(m.session().view().countdown, Some(1));
+        let effects = fire(&mut m, &effects, 3_000);
+        assert_eq!(
+            effects,
+            vec![SessionEffect::Play {
+                index: 0,
+                text: "KM".into()
+            }]
+        );
+        assert_eq!(m.phase(), SessionPhase::Playing { index: 0 });
+        assert_eq!(m.session().view().countdown, None);
+        assert!(!m.session().input_locked(0), "the lock is off");
+        // The send is timed from the end of the count down, not the start.
+        assert_eq!(m.session().group_start(0), Some(MonoMs(3_000)));
+    }
+
+    /// Ending the session during the count down keeps nothing: nothing has
+    /// been sent.
+    #[test]
+    fn a_session_ended_during_its_count_down_is_not_kept() {
+        let mut ask = settings(2, true, 10.0);
+        ask.playback.countdown_sec = 2;
+        let mut m = start_with(ask, script(&["KM"], 1));
+        let effects = m.apply(SessionEvent::FinishNow, MonoMs(500));
+        assert_eq!(
+            effects,
+            vec![SessionEffect::StopAudio, SessionEffect::AbortToHome]
+        );
+        assert_eq!(m.phase(), SessionPhase::Aborted);
+    }
+
+    /// Confirming, finishing, and auto-confirm running out close the answer.
+    /// The answer window closes it only while nothing is typed. A send
+    /// ending, or the gap between sends running out, leaves it open for more.
+    /// Typing closes nothing, and must not: not even an answer as long as the
+    /// group, the one auto-confirm waits on to settle.
     #[test]
     fn only_what_closes_the_answer_says_so() {
-        use AnswerClose::{Deadline, Settled};
+        use AnswerClose::{Deadline, Settled, Unbegun};
         let mut m = start_with(settings(2, false, 10.0), script(&["KM"], 2));
         assert_eq!(m.closes_answer(&ended(0)), None);
         let gap = m.apply(ended(0), MonoMs(500));
@@ -581,7 +685,7 @@ mod tests {
         let window = m.apply(ended(0), MonoMs(1_400));
         let (window_id, _) = timer(&window);
         let window = SessionEvent::TimerFired { id: window_id };
-        assert_eq!(m.closes_answer(&window), Some(Deadline));
+        assert_eq!(m.closes_answer(&window), Some(Unbegun));
         assert_eq!(m.closes_answer(&SessionEvent::Confirm), Some(Deadline));
         assert_eq!(m.closes_answer(&SessionEvent::FinishNow), Some(Deadline));
         assert_eq!(m.closes_answer(&typed(0, "K")), None);
@@ -594,6 +698,8 @@ mod tests {
             m.closes_answer(&SessionEvent::TimerFired { id: auto_id }),
             Some(Settled)
         );
+        // An answer begun is not the answer window's to close.
+        assert_eq!(m.closes_answer(&window), None);
         // The same full answer again, with auto-confirm waiting on it, or a
         // different one, closes nothing either.
         assert_eq!(m.closes_answer(&typed(0, "KM")), None);
@@ -687,13 +793,64 @@ mod tests {
     }
 
     #[test]
-    fn the_answer_window_closing_confirms_what_was_typed() {
+    fn the_answer_window_closing_on_an_empty_box_moves_on() {
         let mut m = machine();
         let effects = m.apply(ended(0), MonoMs(500));
         let after = fire(&mut m, &effects, 10_500);
         assert!(m.session().group(0).is_some_and(|g| g.confirmed()));
+        assert_eq!(m.source.learned, vec![CopyTally::of("KM", "")]);
         assert!(matches!(m.phase(), SessionPhase::InterGroupGap { next: 1 }));
         assert_eq!(timer(&after).1, m.group_gap_ms(1));
+    }
+
+    /// A pause in the middle of an answer is time to think, not a character
+    /// skipped: the answer window leaves an answer under way open, however
+    /// long the pause, and only Enter or the answer reaching its length
+    /// closes it.
+    #[test]
+    fn the_answer_window_waits_for_an_answer_under_way() {
+        let mut m = start_with(settings(2, true, 10.0), script(&["KMR", "UK"], 1));
+        let window = m.apply(ended(0), MonoMs(500));
+        assert!(m.apply(typed(0, "K"), MonoMs(1_000)).is_empty());
+        assert!(fire(&mut m, &window, 10_500).is_empty());
+        assert_eq!(m.phase(), SessionPhase::AwaitingAnswer { index: 0 });
+        assert!(m.session().group(0).is_some_and(|g| !g.confirmed()));
+        // A minute later it is still the same answer, and the rest of it is
+        // taken.
+        let auto = m.apply(typed(0, "KMR"), MonoMs(70_000));
+        assert_eq!(timer(&auto).1, AUTO_CONFIRM_DELAY_MS);
+        let _ = fire(&mut m, &auto, 70_300);
+        assert_eq!(m.source.learned, vec![CopyTally::of("KMR", "KMR")]);
+        assert!(matches!(m.phase(), SessionPhase::InterGroupGap { next: 1 }));
+    }
+
+    /// Typed and then rubbed out is still an answer begun: the window does
+    /// not close on a box being retyped.
+    #[test]
+    fn an_answer_rubbed_out_is_still_waited_for() {
+        let mut m = machine();
+        let window = m.apply(ended(0), MonoMs(500));
+        let _ = m.apply(typed(0, "K"), MonoMs(1_000));
+        let _ = m.apply(typed(0, ""), MonoMs(1_200));
+        assert!(fire(&mut m, &window, 10_500).is_empty());
+        assert_eq!(m.phase(), SessionPhase::AwaitingAnswer { index: 0 });
+        // Enter takes what there is.
+        let _ = m.apply(SessionEvent::Confirm, MonoMs(11_000));
+        assert_eq!(m.source.learned, vec![CopyTally::of("KM", "")]);
+    }
+
+    /// Each group gets its own window: an answer begun for one says nothing
+    /// about the next.
+    #[test]
+    fn the_next_group_has_a_window_of_its_own() {
+        let mut m = machine();
+        let _ = m.apply(ended(0), MonoMs(500));
+        let _ = m.apply(typed(0, "K"), MonoMs(600));
+        let gap = m.apply(SessionEvent::Confirm, MonoMs(700));
+        let _ = fire(&mut m, &gap, 3_000);
+        let window = m.apply(ended(1), MonoMs(3_500));
+        let _ = fire(&mut m, &window, 13_500);
+        assert_eq!(m.phase(), SessionPhase::Finished);
     }
 
     #[test]

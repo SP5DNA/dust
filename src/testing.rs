@@ -108,6 +108,8 @@ pub fn test_settings() -> TrainingSettings {
     settings.playback.effective_wpm_min = 40.0;
     settings.playback.effective_wpm_max = 40.0;
     settings.playback.group_timeout = 5.0;
+    // Sessions start sending at once; the count down has tests of its own.
+    settings.playback.countdown_sec = 0;
     settings.playback.lock_input_during_group_playback = true;
     settings.playback.group_repeat_min = 1;
     settings.playback.group_repeat_max = 1;

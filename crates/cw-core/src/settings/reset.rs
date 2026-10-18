@@ -23,6 +23,7 @@ impl TrainingSettings {
                 self.playback.link_group_repeat = d.playback.link_group_repeat;
                 self.playback.group_timeout = d.playback.group_timeout;
                 self.playback.group_pause_sec = d.playback.group_pause_sec;
+                self.playback.countdown_sec = d.playback.countdown_sec;
                 self.playback.lock_input_during_group_playback =
                     d.playback.lock_input_during_group_playback;
                 self.playback.paddle_swap = d.playback.paddle_swap;

@@ -28,6 +28,16 @@ Or start from a preset: **Settings → Experience** sets session length, group
 size and speed for a Novice, Intermediate, Advanced or Expert in one go —
 your level stays yours — and shows Custom once you change any of them.
 
+Answer on the screen's own keypad: large keys for every letter, digit and
+sign a group can hold, in one layout for the whole session, so a phone's
+keyboard never comes and goes over the groups. Only the group you are
+copying and the one before it are on screen, the one before dimmed with how
+it went. A session counts down before its first group (3 seconds unless you
+set otherwise under **Session shape**), and keeps the screen on until it
+ends. Take your time over an answer: the answer timeout moves on only from a
+group you have not started, and one you have waits until every character is
+in or you press **Next**.
+
 Practise words of your own: pick **Words** under Character set and paste a
 list, one word to a line, or load it from a text file. Each word is sent
 whole, and the ones holding the characters you miss come round more often.

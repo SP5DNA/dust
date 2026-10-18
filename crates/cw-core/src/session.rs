@@ -69,6 +69,11 @@ impl MonoMs {
 /// Where a session is. Every phase that is about a group names it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SessionPhase {
+    /// Counting down to the first group, `remaining` seconds to go. Nothing
+    /// is sent and nothing can be typed yet.
+    Countdown {
+        remaining: u32,
+    },
     Playing {
         index: usize,
     },
@@ -160,6 +165,9 @@ pub struct SessionView {
     /// The current group is being sent, or is between two of its sends.
     pub playing: bool,
     pub locked: bool,
+    /// Seconds left before the first group is sent, while the session
+    /// counts down to it.
+    pub countdown: Option<u32>,
     /// Planned sends for the group being played, and how many are done.
     pub repeat_total: u32,
     pub repeat_done: u32,
@@ -222,11 +230,19 @@ impl GroupSession {
     }
 
     /// Whether typing into `index` is refused: while its group is being sent,
-    /// if the settings lock the box for that.
+    /// if the settings lock the box for that, and before anything has been
+    /// sent at all.
     pub fn input_locked(&self, index: usize) -> bool {
-        self.settings.playback.lock_input_during_group_playback
-            && self.playing()
-            && index == self.current_group
+        let sending = self.settings.playback.lock_input_during_group_playback && self.playing();
+        (sending || self.countdown().is_some()) && index == self.current_group
+    }
+
+    /// Seconds left before the first group, while the session counts down.
+    pub fn countdown(&self) -> Option<u32> {
+        match self.phase {
+            SessionPhase::Countdown { remaining } => Some(remaining),
+            _ => None,
+        }
     }
 
     fn playing(&self) -> bool {
@@ -246,6 +262,7 @@ impl GroupSession {
             confirmed: self.groups.iter().map(Group::confirmed).collect(),
             playing: self.playing(),
             locked: self.input_locked(self.current_group),
+            countdown: self.countdown(),
             repeat_total: current.map_or(1, |g| g.repeats.max(1)),
             repeat_done: current.map_or(0, |g| g.plays_done),
         }

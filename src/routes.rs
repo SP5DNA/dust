@@ -261,13 +261,14 @@ fn TrainingRoute() -> Element {
     };
     let view = session.view();
     rsx! {
-        div { class: "stack",
+        div { class: "stack train",
             TrainingProgress {
                 focused: view.focused,
                 total: view.sent.len(),
                 playing: view.playing,
                 repeat_total: view.repeat_total,
                 repeat_done: view.repeat_done,
+                countdown: view.countdown,
             }
             TrainingView {
                 current: view.current,
@@ -279,6 +280,7 @@ fn TrainingRoute() -> Element {
                 locked: view.locked,
                 repeat_total: view.repeat_total,
                 repeat_done: view.repeat_done,
+                countdown: view.countdown,
                 answer: ctx.answer,
                 on_change,
                 on_confirm,
