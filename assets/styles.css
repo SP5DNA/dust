@@ -1387,6 +1387,9 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
   display: grid;
   gap: 0.35rem;
   padding: 0.15rem 0;
+  /* A finger that slides as it taps types its key: nothing here starts a
+     scroll or a zoom, which would swallow the tap. */
+  touch-action: none;
 }
 .keypad.touch-only { display: none; }
 @media (any-pointer: coarse) {

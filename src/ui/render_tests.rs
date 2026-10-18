@@ -1488,6 +1488,44 @@ mod interactions {
         });
     }
 
+    /// A key types as the finger lands: a touch the browser sends no click
+    /// for — one that slid as it tapped — types all the same, and the click
+    /// it does send after a clean tap is not a second key. A click with no
+    /// finger behind it, a screen reader's, types too.
+    #[test]
+    fn a_key_types_as_the_finger_lands() {
+        crate::testing::run(|| async {
+            let mut ui = Ui::new(KeypadHarness, ());
+            ui.touch_down("key-k");
+            assert!(box_shows(&ui, "K"), "{}", ui.input_tag("group-input-0"));
+            ui.tap("key-m");
+            assert!(box_shows(&ui, "KM"), "{}", ui.input_tag("group-input-0"));
+            ui.tap("key-delete");
+            assert!(box_shows(&ui, "K"), "{}", ui.input_tag("group-input-0"));
+            ui.click("key-x");
+            assert!(box_shows(&ui, "KX"), "{}", ui.input_tag("group-input-0"));
+            ui.tap("key-delete");
+            ui.touch_down("key-m");
+            ui.touch_down("key-r");
+            ui.advance(u64::from(INPUT_COMMIT_DEBOUNCE_MS)).await;
+            assert!(ui.has("committed:KMR"), "{}", ui.html());
+            ui.tap("key-next");
+            assert!(ui.has("confirmed:1"), "{}", ui.html());
+        });
+    }
+
+    /// A finger on a key of a box that is not taking typing types nothing.
+    #[test]
+    fn a_finger_on_a_shut_keypad_types_nothing() {
+        crate::testing::run(|| async {
+            let mut ui = Ui::new(LockCycleHarness, ());
+            ui.touch_down("key-k");
+            ui.tap("key-m");
+            assert!(box_shows(&ui, ""), "{}", ui.input_tag("group-input-0"));
+            assert!(!ui.has("committed:"));
+        });
+    }
+
     #[component]
     fn FinishedGroupHarness() -> Element {
         let mut typed = use_signal(String::new);

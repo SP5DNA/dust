@@ -375,6 +375,15 @@ fn pad_name(ch: char) -> (String, String) {
 /// keeps one layout for the whole session. A key takes no focus: a press
 /// leaves the box focused, for a keyboard or the paddles to type on into.
 ///
+/// A key types the moment a finger lands on it, the way a phone's own
+/// keyboard does. Waiting for the click lost keys: a finger that slid a few
+/// pixels as it tapped, as fingers do typing quickly, was taken for the
+/// start of a scroll, and the browser sent no click at all. The keypad does
+/// not let a scroll start on it either (`touch-action: none`). A press with
+/// no finger behind it — a screen reader's — still comes as a click alone,
+/// and the click a browser sends after a finger's press is that press, not
+/// another.
+///
 /// Shown wherever touch is how you type: always in the phone and tablet
 /// builds, and on the web and desktop whenever the device has a touch
 /// screen. A desktop with only a mouse and keyboard has no use for it.
@@ -385,6 +394,8 @@ fn Keypad(open: bool, on_key: Callback<PadKey>) -> Element {
     } else {
         "keypad touch-only"
     };
+    // Set by a press on the way down, so the click after it is not a second.
+    let mut pressed_down = use_hook(|| CopyValue::new(false));
     let key =
         move |pressed: PadKey, id: String, label: String, text: String, class: &'static str| {
             rsx! {
@@ -394,8 +405,20 @@ fn Keypad(open: bool, on_key: Callback<PadKey>) -> Element {
                     r#type: "button",
                     aria_label: label,
                     disabled: html_bool(!open),
-                    onmousedown: move |e| e.prevent_default(),
-                    onclick: move |_| on_key.call(pressed),
+                    onpointerdown: move |e| {
+                        // Nor does the focus move, or any mouse event follow
+                        // to move it: the box keeps it.
+                        e.prevent_default();
+                        pressed_down.set(true);
+                        on_key.call(pressed);
+                    },
+                    onclick: move |_| {
+                        let by_finger = *pressed_down.peek();
+                        pressed_down.set(false);
+                        if !by_finger {
+                            on_key.call(pressed);
+                        }
+                    },
                     "{text}"
                 }
             }
