@@ -11,8 +11,10 @@ alignment-based accuracy, letter mastery and a score.
 Two ways to practise: Koch-style **character groups**, unlocked one letter at a
 time, or **callsigns** — real prefixes in realistic shapes, from `W1AW` up to
 `DL1ABC/P` and `EA8/G3XYZ`, the drill MorseRunner and Morse Walker are built
-around. Every call is one its country could issue: the digit after the prefix
-and the length of the suffix are ones that country hands out.
+around. Every call is one its country could issue: prefixes, the digits after
+them and the lengths of their suffixes come up as often as they do in real
+calls, counted from the Super Check Partial list of active contest calls by
+`scripts/callsign-prefixes.py`.
 
 Opt in to **adaptive group size** and the trainer learns your copy span, the
 group length you copy whole about half the time, and draws lengths near its
