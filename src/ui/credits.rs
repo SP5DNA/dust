@@ -201,7 +201,7 @@ pub fn CreditsCard(
                         }
                     }
                     p { class: "muted",
-                        "Dust {version} is open source, under the MIT licence. "
+                        "Dust {version} is free software, under the GNU General Public License version 3 or later, with permission to publish it in app stores: share it and change it, and what is built from it stays free. "
                         a {
                             class: "credit-link",
                             href: SOURCE_URL,
@@ -368,6 +368,8 @@ mod tests {
         let html = render(CREDITS, TESTERS);
         assert!(html.contains(&format!("Dust {}", env!("CARGO_PKG_VERSION"))));
         assert!(html.contains(SOURCE_URL));
-        assert!(html.contains("MIT licence"));
+        assert!(html.contains("GNU General Public License version 3"));
+        assert!(html.contains("permission to publish it in app stores"));
+        assert!(!html.contains("MIT"), "no other licence: {html}");
     }
 }

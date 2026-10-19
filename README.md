@@ -3,7 +3,7 @@
 [![CI](https://github.com/mashu/dust/actions/workflows/ci.yml/badge.svg)](https://github.com/mashu/dust/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/mashu/dust/graph/badge.svg)](https://codecov.io/gh/mashu/dust)
 [![Pages](https://github.com/mashu/dust/actions/workflows/pages.yml/badge.svg)](https://mashu.github.io/dust/)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License: GPL v3](https://img.shields.io/badge/license-GPLv3-blue.svg)](LICENSE)
 
 CW Morse **group trainer** in Rust. Hear a group, type it from memory, and get
 alignment-based accuracy, letter mastery and a score.
@@ -150,4 +150,36 @@ assets/          CSS
 docs/            Platform notes
 ```
 
-MIT — see [LICENSE](LICENSE).
+## License
+
+Copyright © 2026 Mateusz Kaduk SO5KM.
+
+Dust is free software: you can redistribute it and/or modify it under the
+terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version. Anything built from it and distributed must be released under the
+same terms, with its source.
+
+### App stores
+
+As an additional permission under section 7 of the GNU General Public License
+version 3, you may convey Dust, or a work based on it, through an app store or
+a similar distribution service, such as Apple's App Store or Google Play, even
+when the service's terms or technical measures (usage rules, device limits,
+digital rights management) add restrictions that the GNU General Public
+License would otherwise not allow, provided that
+
+- the Corresponding Source of what you convey is also available under the GNU
+  General Public License, with or without this permission, from a place free
+  of those restrictions; and
+- you add no restrictions of your own.
+
+Anyone who conveys Dust may remove this permission from their copy, as
+section 7 allows.
+
+### No warranty
+
+Dust is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR
+A PARTICULAR PURPOSE. See [LICENSE](LICENSE) for the full text of the GNU
+General Public License version 3.
