@@ -77,7 +77,7 @@ if [[ ! -d "$ANDROID_NDK_HOME" ]]; then
 fi
 if [[ ! -f "$KEYSTORE" ]]; then
   echo "Upload keystore not found at $KEYSTORE" >&2
-  echo "Create one with keytool; see README Android / Play Store." >&2
+  echo "Create one with keytool; see docs/platforms.md, Play Store." >&2
   exit 1
 fi
 if [[ ! -f "$ENV_FILE" ]]; then

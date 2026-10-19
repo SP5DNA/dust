@@ -536,8 +536,9 @@ fn scoring_holds_for_anything_a_listener_can_type() {
 }
 
 /// Settings have to survive the trip to storage and back, and to survive
-/// coming back from a build that did not have every field yet. The README
-/// promises that updating never clears anything; this is that promise, tested.
+/// coming back from a build that did not have every field yet. The platform
+/// notes promise that updating never clears anything; this is that promise,
+/// tested.
 #[test]
 fn settings_survive_storage_and_older_saves() {
     for seed in 0..SEEDS {

@@ -1,7 +1,7 @@
 # Platform notes
 
 The parts of building, shipping and storing that are specific to one target.
-Everything else is in the [README](../README.md).
+Building and testing in general is in the [README](../README.md).
 
 ## Android
 
