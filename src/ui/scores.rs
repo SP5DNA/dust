@@ -7,7 +7,8 @@
 
 use chrono::{NaiveDate, TimeZone};
 use cw_core::{
-    BoardEntry, CharSetMode, SessionResult, TimelinePoint, board_modes, score_board, score_timeline,
+    BOARD_MIN_GROUPS, BoardEntry, CharSetMode, FORM_SESSIONS, SessionResult, TimelinePoint,
+    board_modes, score_board, score_timeline,
 };
 use dioxus::prelude::*;
 
@@ -89,6 +90,11 @@ fn ago(date: &str, today: &str) -> Option<String> {
     }
 }
 
+/// What a session earned a group, as the board shows it: "72.4".
+pub fn per_group_label(per_group: f64) -> String {
+    format!("{per_group:.1}")
+}
+
 /// When a session was set, in full: "Friday 16 October 2026 at 14:32".
 fn when_set(entry: &BoardEntry) -> String {
     match clock(entry.timestamp) {
@@ -146,16 +152,32 @@ const TIMELINE_H: f64 = 120.0;
 /// Room at the chart's edges, so the outermost dots are not cut in half.
 const TIMELINE_PAD: f64 = 8.0;
 
+/// The best a group on the timeline: the top of its scale.
+fn timeline_top(points: &[TimelinePoint]) -> f64 {
+    points
+        .iter()
+        .map(|point| point.per_group)
+        .fold(0.0, f64::max)
+}
+
+/// How high `value` sits on a scale whose top is `top`.
+fn timeline_y(value: f64, top: f64) -> f64 {
+    if top > 0.0 {
+        TIMELINE_PAD + (1.0 - value / top) * (TIMELINE_H - 2.0 * TIMELINE_PAD)
+    } else {
+        TIMELINE_H - TIMELINE_PAD
+    }
+}
+
 /// Where each session sits on the timeline: across by when it was set, up
-/// by its score, against the best.
+/// by what it earned a group, against the best.
 fn timeline_xy(points: &[TimelinePoint]) -> Vec<(f64, f64)> {
     let (Some(first), Some(last)) = (points.first(), points.last()) else {
         return Vec::new();
     };
     let span = last.timestamp.saturating_sub(first.timestamp) as f64;
-    let best = points.iter().map(|point| point.score).fold(0.0, f64::max);
+    let top = timeline_top(points);
     let width = TIMELINE_W - 2.0 * TIMELINE_PAD;
-    let height = TIMELINE_H - 2.0 * TIMELINE_PAD;
     points
         .iter()
         .map(|point| {
@@ -164,12 +186,21 @@ fn timeline_xy(points: &[TimelinePoint]) -> Vec<(f64, f64)> {
             } else {
                 TIMELINE_W / 2.0
             };
-            let y = if best > 0.0 {
-                TIMELINE_PAD + (1.0 - point.score / best) * height
-            } else {
-                TIMELINE_H - TIMELINE_PAD
-            };
-            (x, y)
+            (x, timeline_y(point.per_group, top))
+        })
+        .collect()
+}
+
+/// The form as it went: a line through the median after each session.
+fn form_path(points: &[TimelinePoint], xy: &[(f64, f64)]) -> String {
+    let top = timeline_top(points);
+    points
+        .iter()
+        .zip(xy)
+        .enumerate()
+        .map(|(n, (point, (x, _)))| {
+            let y = timeline_y(point.form, top);
+            format!("{}{x:.1},{y:.1}", if n == 0 { "M" } else { " L" })
         })
         .collect()
 }
@@ -177,12 +208,11 @@ fn timeline_xy(points: &[TimelinePoint]) -> Vec<(f64, f64)> {
 /// The record as it stood over time: a step up at every session that set
 /// one, flat in between, on to the last session.
 fn record_path(points: &[TimelinePoint], xy: &[(f64, f64)]) -> String {
-    let best = points.iter().map(|point| point.score).fold(0.0, f64::max);
-    if best <= 0.0 {
+    let top = timeline_top(points);
+    if top <= 0.0 {
         return String::new();
     }
-    let height = TIMELINE_H - 2.0 * TIMELINE_PAD;
-    let y_of = |score: f64| TIMELINE_PAD + (1.0 - score / best) * height;
+    let y_of = |value: f64| timeline_y(value, top);
     let mut path = String::new();
     let mut level: Option<f64> = None;
     for (point, (x, _)) in points.iter().zip(xy) {
@@ -219,12 +249,28 @@ pub fn ScoresTab(sessions: Vec<SessionResult>) -> Element {
     let today = crate::time::local_date_string();
 
     let Some(best) = board.first().cloned() else {
+        let scored = sessions
+            .iter()
+            .any(|session| session.score.is_finite() && session.score > 0.0);
+        let (title, body) = if scored {
+            (
+                "No session long enough yet",
+                format!(
+                    "Sessions of {BOARD_MIN_GROUPS} groups or more go on the board, ranked by what they earn a group. Set a longer session under Settings → Session."
+                ),
+            )
+        } else {
+            (
+                "No scores yet",
+                format!(
+                    "Finish a session of {BOARD_MIN_GROUPS} groups or more and it goes on the board. The best one gets the gold."
+                ),
+            )
+        };
         return rsx! {
             div { class: "card",
-                CardHead { icon: IconName::Medal, title: "No scores yet" }
-                p { class: "muted", style: "margin: 0;",
-                    "Finish a session and its score goes on the board. The best one gets the gold."
-                }
+                CardHead { icon: IconName::Medal, title }
+                p { class: "muted", style: "margin: 0;", "{body}" }
             }
         };
     };
@@ -232,6 +278,9 @@ pub fn ScoresTab(sessions: Vec<SessionResult>) -> Element {
     let focused = board.iter().find(|entry| entry.timestamp == focus).cloned();
     let xy = timeline_xy(&timeline);
     let record = record_path(&timeline, &xy);
+    let form_line = form_path(&timeline, &xy);
+    let form = timeline.last().map(|point| point.form);
+    let form_over = timeline.len().min(FORM_SESSIONS);
     let marker = timeline
         .iter()
         .zip(&xy)
@@ -275,7 +324,13 @@ pub fn ScoresTab(sessions: Vec<SessionResult>) -> Element {
                 Medal { place: 1, large: true }
                 div { class: "best-copy",
                     div { class: "tiny", "Personal best" }
-                    div { class: "best-score", "{best.score.round()}" }
+                    div { class: "best-score",
+                        "{per_group_label(best.per_group)}"
+                        span { class: "best-unit", " points a group" }
+                    }
+                    p { class: "best-when",
+                        "{best.score.round()} points over {best.groups} groups"
+                    }
                     p { class: "best-when",
                         "{when_set(&best)}"
                         if let Some(set_ago) = set_ago {
@@ -285,9 +340,21 @@ pub fn ScoresTab(sessions: Vec<SessionResult>) -> Element {
                     div { class: "best-chips",
                         span { class: "chip", "{speed(&best)}" }
                         span { class: "chip good", "{(best.accuracy * 100.0).round()}% accuracy" }
-                        span { class: "chip", "{best.groups} groups" }
                         if current.is_none() {
                             span { class: "chip", "{mode_label(best.mode)}" }
+                        }
+                    }
+                }
+                if let Some(form) = form {
+                    div { class: "best-form",
+                        div { class: "tiny", "Form" }
+                        div { class: "best-form-value", "{per_group_label(form)}" }
+                        div { class: "best-form-note",
+                            if form_over == 1 {
+                                "your one session"
+                            } else {
+                                "median of your last {form_over}"
+                            }
                         }
                     }
                 }
@@ -295,7 +362,7 @@ pub fn ScoresTab(sessions: Vec<SessionResult>) -> Element {
             div { class: "card chart-card",
                 CardHead {
                     icon: IconName::Chart,
-                    title: "Score over time",
+                    title: "Points a group over time",
                     note: format!(
                         "{total} {noun} · the record set {}",
                         if records == 1 { "once".to_string() } else { format!("{records} times") }
@@ -304,6 +371,9 @@ pub fn ScoresTab(sessions: Vec<SessionResult>) -> Element {
                 svg {
                     class: "sparkline score-timeline",
                     view_box: "0 0 420 120",
+                    if timeline.len() > 1 {
+                        path { class: "form-line", d: "{form_line}" }
+                    }
                     if !record.is_empty() {
                         path { class: "record-line", d: "{record}" }
                     }
@@ -331,11 +401,15 @@ pub fn ScoresTab(sessions: Vec<SessionResult>) -> Element {
                 if let Some(entry) = focused.as_ref() {
                     p { class: "timeline-focus",
                         span { class: "timeline-focus-place", "{ordinal(entry.place)}" }
-                        " · {entry.score.round()} points · {short_date(&entry.date)}"
+                        " · {per_group_label(entry.per_group)} a group · {entry.score.round()} points over {entry.groups} groups · {short_date(&entry.date)}"
                         if let Some(time) = clock(entry.timestamp) {
                             " {time}"
                         }
                     }
+                }
+                div { class: "timeline-legend",
+                    span { class: "legend-record", "Record" }
+                    span { class: "legend-form", "Form: median of the last {FORM_SESSIONS}" }
                 }
                 div { class: "row-between",
                     span { class: "tiny", style: "text-transform: none; letter-spacing: 0.02em;",
@@ -350,7 +424,9 @@ pub fn ScoresTab(sessions: Vec<SessionResult>) -> Element {
                 CardHead {
                     icon: IconName::Medal,
                     title: "Best sessions",
-                    note: "Kept on this device. Deleting a session takes it off the board.",
+                    note: format!(
+                        "Ranked by points a group, over sessions of {BOARD_MIN_GROUPS} groups or more. Deleting a session takes it off."
+                    ),
                 }
                 div { class: "board-list",
                     for entry in rows {
@@ -363,11 +439,15 @@ pub fn ScoresTab(sessions: Vec<SessionResult>) -> Element {
                                 (true, false) => "board-row focused",
                                 (false, false) => "board-row",
                             };
-                            let detail = if current.is_none() {
-                                format!("{} · {}% · {}", speed(&entry), (entry.accuracy * 100.0).round(), mode_label(entry.mode))
-                            } else {
-                                format!("{} · {}%", speed(&entry), (entry.accuracy * 100.0).round())
-                            };
+                            let mut detail = format!(
+                                "{} groups · {} · {}%",
+                                entry.groups,
+                                speed(&entry),
+                                (entry.accuracy * 100.0).round()
+                            );
+                            if current.is_none() {
+                                detail.push_str(&format!(" · {}", mode_label(entry.mode)));
+                            }
                             let when = match clock(at) {
                                 Some(time) => format!("{} · {time}", short_date(&entry.date)),
                                 None => short_date(&entry.date),
@@ -399,7 +479,7 @@ pub fn ScoresTab(sessions: Vec<SessionResult>) -> Element {
                                         }
                                     }
                                     span { class: "board-main",
-                                        span { class: "board-score", "{entry.score.round()}" }
+                                        span { class: "board-score", "{per_group_label(entry.per_group)}" }
                                         span { class: "board-when", "{when}" }
                                     }
                                     span { class: "board-detail", "{detail}" }
@@ -474,13 +554,14 @@ mod tests {
         }
     }
 
-    fn point(timestamp: u64, score: f64, record: f64, set_record: bool) -> TimelinePoint {
+    fn point(timestamp: u64, per_group: f64, record: f64, set_record: bool) -> TimelinePoint {
         TimelinePoint {
             index: 0,
             timestamp,
-            score,
+            per_group,
             record,
             set_record,
+            form: per_group,
         }
     }
 
@@ -526,10 +607,29 @@ mod tests {
     }
 
     #[test]
+    fn the_form_line_runs_through_every_session() {
+        let mut points = [
+            point(0, 100.0, 100.0, true),
+            point(50, 50.0, 100.0, false),
+            point(100, 200.0, 200.0, true),
+        ];
+        points[2].form = 100.0;
+        let xy = timeline_xy(&points);
+        let path = form_path(&points, &xy);
+        assert!(path.starts_with("M8.0,"), "{path}");
+        assert_eq!(path.matches(" L").count(), 2, "{path}");
+        // The last form sits halfway up a scale topped by 200.
+        let half = timeline_y(100.0, 200.0);
+        assert!(path.ends_with(&format!("{half:.1}")), "{path}");
+        assert_eq!(per_group_label(72.44), "72.4");
+    }
+
+    #[test]
     fn a_farnsworth_speed_says_both() {
         let mut entry = BoardEntry {
             place: 1,
             index: 0,
+            per_group: 25.0,
             score: 500.0,
             timestamp: 0,
             date: "2026-10-16".to_string(),
@@ -550,17 +650,18 @@ mod board_tests {
     use super::*;
     use crate::testing::{Ui, stored_session};
 
-    /// A session on the `day`th of October 2026, scored `score`.
-    fn run_of(day: u32, score: f64, mode: CharSetMode) -> SessionResult {
-        let mut session = stored_session(&format!("2026-10-{day:02}"), &[("KM", "KM")]);
+    /// A session of ten groups on the `day`th of October 2026, that earned
+    /// `per_group` each.
+    fn run_of(day: u32, per_group: f64, mode: CharSetMode) -> SessionResult {
+        let mut session = stored_session(&format!("2026-10-{day:02}"), &[("KM", "KM"); 10]);
         session.timestamp = 1_790_000_000_000 + u64::from(day) * 86_400_000;
-        session.score = score;
+        session.score = per_group * 10.0;
         session.char_set_mode = mode;
         session
     }
 
-    fn koch(day: u32, score: f64) -> SessionResult {
-        run_of(day, score, CharSetMode::Koch)
+    fn koch(day: u32, per_group: f64) -> SessionResult {
+        run_of(day, per_group, CharSetMode::Koch)
     }
 
     fn board(sessions: Vec<SessionResult>) -> Ui {
@@ -570,13 +671,13 @@ mod board_tests {
     #[test]
     fn the_best_session_gets_the_gold_and_the_rest_follow() {
         let ui = board(vec![
-            koch(1, 300.0),
-            koch(2, 900.0),
-            koch(3, 500.0),
-            koch(4, 100.0),
+            koch(1, 30.0),
+            koch(2, 90.0),
+            koch(3, 50.0),
+            koch(4, 10.0),
         ]);
         assert!(ui.has("Personal best"));
-        assert!(ui.has(">900<"));
+        assert!(ui.has(">90.0<"));
         assert!(ui.has("Friday 2 October 2026"));
         assert_eq!(ui.controls("board-").len(), 4);
         for place in ["1st", "2nd", "3rd"] {
@@ -588,46 +689,46 @@ mod board_tests {
         assert!(ui.has("the record set 2 times"));
         assert!(ui.has("record-line"));
         // The timeline marks the personal best until a row is chosen.
-        assert!(ui.has("1st</span> · 900 points"));
+        assert!(ui.has("1st</span> · 90.0 a group"));
     }
 
     /// Pointing at a row marks when it was set; a tap keeps it marked.
     #[test]
     fn a_row_marks_its_session_on_the_timeline() {
         let mut ui = board(vec![
-            koch(1, 300.0),
-            koch(2, 900.0),
-            koch(3, 500.0),
-            koch(4, 100.0),
+            koch(1, 30.0),
+            koch(2, 90.0),
+            koch(3, 50.0),
+            koch(4, 10.0),
         ]);
         ui.point_at("board-3", "mouse", (0.0, 0.0), (0.0, 0.0));
-        assert!(ui.has("3rd</span> · 300 points"));
+        assert!(ui.has("3rd</span> · 30.0 a group"));
         ui.point_away("board-3");
-        assert!(ui.has("1st</span> · 900 points"));
+        assert!(ui.has("1st</span> · 90.0 a group"));
 
         ui.click("board-2");
         assert!(ui.input_tag("board-2").contains("pinned"));
-        assert!(ui.has("2nd</span> · 500 points"));
+        assert!(ui.has("2nd</span> · 50.0 a group"));
         ui.point_at("board-4", "mouse", (0.0, 0.0), (0.0, 0.0));
-        assert!(ui.has("4th</span> · 100 points"));
+        assert!(ui.has("4th</span> · 10.0 a group"));
         ui.point_away("board-4");
         assert!(
-            ui.has("2nd</span> · 500 points"),
+            ui.has("2nd</span> · 50.0 a group"),
             "the tapped row stays marked"
         );
         ui.click("board-2");
-        assert!(ui.has("1st</span> · 900 points"));
+        assert!(ui.has("1st</span> · 90.0 a group"));
         // A finger does not point.
         ui.point_at("board-4", "touch", (0.0, 0.0), (0.0, 0.0));
-        assert!(ui.has("1st</span> · 900 points"));
+        assert!(ui.has("1st</span> · 90.0 a group"));
     }
 
     #[test]
     fn a_board_can_be_narrowed_to_one_mode() {
         let mut ui = board(vec![
-            koch(1, 300.0),
-            run_of(2, 900.0, CharSetMode::Callsign),
-            koch(3, 500.0),
+            koch(1, 30.0),
+            run_of(2, 90.0, CharSetMode::Callsign),
+            koch(3, 50.0),
         ]);
         assert!(ui.shows("pill-all-modes"));
         assert!(ui.shows("pill-koch"));
@@ -641,14 +742,14 @@ mod board_tests {
 
         ui.click("pill-koch");
         assert_eq!(ui.controls("board-").len(), 2);
-        assert!(ui.has("1st</span> · 500 points"));
+        assert!(ui.has("1st</span> · 50.0 a group"));
         ui.click("pill-all-modes");
         assert_eq!(ui.controls("board-").len(), 3);
     }
 
     #[test]
     fn one_mode_needs_no_choice_of_mode() {
-        let ui = board(vec![koch(1, 300.0), koch(2, 500.0)]);
+        let ui = board(vec![koch(1, 30.0), koch(2, 50.0)]);
         assert!(!ui.shows("pill-all-modes"));
     }
 
@@ -668,6 +769,21 @@ mod board_tests {
         ui.click("board-all");
         assert_eq!(ui.controls("board-").len(), 12 + 1);
         assert!(ui.has("Show the top 10"));
+    }
+
+    /// A session too short to say much is kept, but not placed, and the
+    /// empty board says why.
+    #[test]
+    fn a_short_session_is_not_on_the_board() {
+        let mut short = koch(1, 50.0);
+        short.groups.truncate(BOARD_MIN_GROUPS - 1);
+        let ui = board(vec![short.clone()]);
+        assert!(ui.has("No session long enough yet"));
+        assert!(ui.controls("board-").is_empty());
+        let ui = board(vec![short, koch(2, 40.0)]);
+        assert_eq!(ui.controls("board-").len(), 1);
+        assert!(ui.has("Form"));
+        assert!(ui.has("your one session"));
     }
 
     #[test]

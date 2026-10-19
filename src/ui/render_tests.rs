@@ -557,13 +557,19 @@ fn results_renders_the_score_ring_and_rows() {
 }
 
 /// A session that tops the board says so with the gold medal; one further
-/// down says where it came.
+/// down says where it came; one too short to place says what would.
 #[test]
 fn results_say_where_the_session_stands_on_the_board() {
+    fn long() -> SessionResult {
+        let mut result = session("2026-09-03", 0.9);
+        result.groups = (0..5).flat_map(|_| result.groups.clone()).collect();
+        result.score = 600.0;
+        result
+    }
     let best = render(|| {
         rsx! {
             ResultsView {
-                result: session("2026-09-03", 0.9),
+                result: long(),
                 place: Some((1, 5)),
                 auto_message: None,
                 on_again: move |_| {},
@@ -571,13 +577,16 @@ fn results_say_where_the_session_stands_on_the_board() {
             }
         }
     });
-    assert!(best.contains("New personal best — the top of your 5 mixed sessions"));
+    assert!(
+        best.contains("New personal best — 60.0 points a group, the top of your 5 mixed sessions"),
+        "{best}"
+    );
     assert!(best.contains("place-banner best"));
     assert!(best.contains("aria-label=\"1st place\""));
     let fourth = render(|| {
         rsx! {
             ResultsView {
-                result: session("2026-09-03", 0.9),
+                result: long(),
                 place: Some((4, 5)),
                 auto_message: None,
                 on_again: move |_| {},
@@ -585,8 +594,20 @@ fn results_say_where_the_session_stands_on_the_board() {
             }
         }
     });
-    assert!(fourth.contains("4th best of your 5 mixed sessions"));
+    assert!(fourth.contains("4th best of your 5 mixed sessions — 60.0 points a group"));
     assert!(!fourth.contains("class=\"medal"), "no medal below third");
+    let short = render(|| {
+        rsx! {
+            ResultsView {
+                result: session("2026-09-03", 0.9),
+                place: None,
+                auto_message: None,
+                on_again: move |_| {},
+                on_home: move |_| {},
+            }
+        }
+    });
+    assert!(short.contains("Sessions of 10 groups or more go on the score board."));
 }
 
 #[test]

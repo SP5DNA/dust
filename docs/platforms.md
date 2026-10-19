@@ -236,14 +236,20 @@ few seconds. Deleting a session takes it out of every stat, the calendar,
 the streak and the score board, and out of what the sampler learns from; the
 level you have reached stays where it is.
 
-**Stats → Scores** is the score board: every session kept on this device,
-best score first, with gold, silver and bronze for the top three and the
-personal best on its own card. There is one player, so a row is a place, a
-score and when it was set. A chart of the score over time steps up wherever
-a new record was set, and pointing at a row (or tapping it) marks when that
-session was. With more than one mode in the history, the board can show one
-at a time; a finished session's results say where it came among the
-sessions of its own mode.
+**Stats → Scores** is the score board: the sessions kept on this device,
+ranked by what they earned a group, with gold, silver and bronze for the top
+three and the personal best on its own card. A session's score is its groups'
+points added up, so a longer session scores more for the same copy; points a
+group compares a 15-group session with a 50-group one fairly. It is the mean,
+so every miss counts, and only sessions of 10 groups or more go on the board,
+since a handful of lucky groups says little. Beside the best is your form:
+the median of your last 10 sessions, which one bad day hardly moves. A chart
+of points a group over time draws the record as it stepped up and the form
+as it went, and pointing at a row (or tapping it) marks when that session
+was. There is one player, so a row is a place, a score and when it was set.
+With more than one mode in the history, the board can show one at a time; a
+finished session's results say where it came among the sessions of its own
+mode.
 
 Stats are computed across your whole history. Changing course — Koch to Mixed,
 a new sequence, a custom alphabet — does not hide what you already did:

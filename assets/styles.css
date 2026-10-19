@@ -1494,8 +1494,35 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
   font-variant-numeric: tabular-nums;
 }
 .best-when { margin: 0; font-size: 0.86rem; color: var(--ink-soft); }
+.best-unit { font-family: Figtree, system-ui, sans-serif; font-size: 0.9rem; font-weight: 600; letter-spacing: 0; color: var(--ink-soft); }
+.best-form {
+  flex: none;
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 0.15rem;
+  padding-left: 1rem;
+  border-left: 1px solid var(--line);
+  text-align: right;
+}
+.best-form-value {
+  font-family: Fraunces, Georgia, serif;
+  font-size: 1.5rem;
+  font-weight: 700;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+.best-form-note { font-size: 0.75rem; color: var(--ink-dim); }
 .best-chips { display: flex; flex-wrap: wrap; gap: 0.35rem; margin-top: 0.35rem; }
 .record-line { fill: none; stroke: var(--warn); stroke-width: 2; stroke-linejoin: round; opacity: 0.85; }
+.form-line { fill: none; stroke: var(--info); stroke-width: 1.6; stroke-linejoin: round; stroke-linecap: round; opacity: 0.8; }
+.timeline-legend { display: flex; flex-wrap: wrap; gap: 0.35rem 1rem; font-size: 0.75rem; color: var(--ink-dim); }
+.legend-record, .legend-form { display: inline-flex; align-items: center; gap: 0.35rem; }
+.legend-record::before, .legend-form::before { content: ""; width: 1rem; height: 2px; border-radius: var(--pill); }
+.legend-record::before { background: var(--warn); }
+.legend-form::before { background: var(--info); }
+.place-note { margin: 0; text-align: center; font-size: 0.84rem; }
 .timeline-dot { fill: var(--ink-dim); opacity: 0.55; }
 .timeline-dot.record { fill: var(--warn); opacity: 1; stroke: var(--surface); stroke-width: 1.2; }
 .timeline-guide { stroke: var(--copper); stroke-width: 1; stroke-dasharray: 3 4; opacity: 0.7; }
@@ -1542,6 +1569,18 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
   .board-row { grid-template-columns: 2rem minmax(0, 1fr); row-gap: 0.1rem; }
   .board-place { grid-row: span 2; }
   .board-detail { grid-column: 2; text-align: left; }
+  .best-card { flex-wrap: wrap; }
+  .best-form {
+    flex: 1 1 100%;
+    flex-direction: row;
+    align-items: baseline;
+    justify-content: flex-start;
+    gap: 0.5rem;
+    padding: 0.6rem 0 0;
+    border-left: 0;
+    border-top: 1px solid var(--line);
+    text-align: left;
+  }
 }
 .place-banner {
   display: flex;

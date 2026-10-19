@@ -43,7 +43,14 @@ fn open_history(sessions: &[SessionResult]) -> (Ui, std::rc::Rc<crate::audio::fa
 #[test]
 fn a_deleted_session_leaves_the_score_board() {
     run(|| async {
-        let (mut ui, _recorder) = open_history(&history());
+        let long: Vec<SessionResult> = (1..=5u64)
+            .map(|day| {
+                let mut session = stored_session(&format!("2026-10-0{day}"), &[("KM", "KM"); 10]);
+                session.timestamp = day * 86_400_000;
+                session
+            })
+            .collect();
+        let (mut ui, _recorder) = open_history(&long);
         ui.click("seg-scores");
         assert_eq!(ui.controls("board-").len(), 5);
         assert!(ui.has("Fri 2 Oct 2026"));
