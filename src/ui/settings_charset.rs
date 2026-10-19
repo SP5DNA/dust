@@ -7,6 +7,7 @@ use cw_core::{
 use dioxus::html::FileData;
 use dioxus::prelude::*;
 
+use crate::ui::format::counted;
 use crate::ui::widgets::{
     CardHead, DISCLOSURE, Icon, IconName, NumberField, SectionReset, Seg, control_id,
 };
@@ -269,11 +270,7 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
 
 /// "1 word", "412 words".
 fn count_words(count: usize) -> String {
-    if count == 1 {
-        "1 word".to_string()
-    } else {
-        format!("{count} words")
-    }
+    counted(count, "word")
 }
 
 /// What reading a list came to, in a line: how many words it holds, and why

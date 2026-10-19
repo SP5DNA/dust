@@ -7,6 +7,7 @@ use cw_core::{
 use dioxus::prelude::*;
 
 use crate::state::SessionPick;
+use crate::ui::format::counted;
 use crate::ui::widgets::{CardHead, Icon, IconName, control_id, html_bool};
 
 #[component]
@@ -238,7 +239,6 @@ pub fn HistoryTab(
         .collect();
     let count = picked.len();
     let everything = count == total;
-    let noun = if total == 1 { "session" } else { "sessions" };
     let mut finish = move || {
         selecting.set(false);
         chosen.write().clear();
@@ -251,7 +251,7 @@ pub fn HistoryTab(
             CardHead {
                 icon: IconName::Repeat,
                 title: "Session history",
-                note: format!("{total} {noun} on this device"),
+                note: format!("{} on this device", counted(total, "session")),
                 if on_delete.is_some() && total > 0 {
                     if selecting_now {
                         button {

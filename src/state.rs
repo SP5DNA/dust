@@ -222,9 +222,10 @@ impl AppCtx {
         match saved.problem() {
             Some(problem) => self.toasts.show(problem),
             None => {
-                let noun = if count == 1 { "session" } else { "sessions" };
-                self.toasts
-                    .show_with(format!("{count} {noun} deleted"), ToastAction::UndoDelete);
+                self.toasts.show_with(
+                    format!("{} deleted", crate::ui::format::counted(count, "session")),
+                    ToastAction::UndoDelete,
+                );
             }
         }
     }

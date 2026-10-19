@@ -5,6 +5,7 @@ use cw_core::{
 use dioxus::prelude::*;
 
 use crate::state::SessionPick;
+use crate::ui::format::counted;
 use crate::ui::scores::ScoresTab;
 use crate::ui::settings::aim_label;
 use crate::ui::stats_detail::{HistoryTab, LettersTab, MistakesTab, SamplingTab};
@@ -311,12 +312,6 @@ fn OverviewTab(settings: TrainingSettings, sessions: Vec<SessionResult>) -> Elem
         .filter(|d| d.status == MasteryStatus::Mastered)
         .count();
     let geometry = chart_geometry(&chart, threshold);
-    let session_count = sessions.len();
-    let session_noun = if session_count == 1 {
-        "session"
-    } else {
-        "sessions"
-    };
     let latest = chart.last().map(|p| p.accuracy_pct).unwrap_or(0.0);
     rsx! {
         div { class: "stack",
@@ -347,7 +342,7 @@ fn OverviewTab(settings: TrainingSettings, sessions: Vec<SessionResult>) -> Elem
                         CardHead {
                             icon: IconName::Chart,
                             title: "Accuracy over time",
-                            note: format!("{session_count} {session_noun} · latest {}%", latest.round()),
+                            note: format!("{} · latest {}%", counted(sessions.len(), "session"), latest.round()),
                         }
                         svg {
                             class: "sparkline",

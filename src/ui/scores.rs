@@ -5,30 +5,18 @@
 //! no name, no callsign. The board is read off the stored history, so a
 //! deleted session leaves it.
 
-use chrono::{NaiveDate, TimeZone};
 use cw_core::{
     BOARD_MIN_GROUPS, BoardEntry, CharSetMode, FORM_SESSIONS, SessionResult, TimelinePoint,
     board_modes, score_board, score_timeline,
 };
 use dioxus::prelude::*;
 
+use crate::ui::format::{ago, clock, counted, long_date, ordinal, short_date};
 use crate::ui::settings_charset::CHAR_SET_MODES;
 use crate::ui::widgets::{CardHead, IconName, Seg, control_id};
 
 /// The rows the board shows before it is asked for all of them.
 const BOARD_TOP: usize = 10;
-
-/// "1st", "2nd", "3rd", "4th", "11th", "21st".
-pub fn ordinal(place: usize) -> String {
-    let suffix = match (place % 10, place % 100) {
-        (_, 11..=13) => "th",
-        (1, _) => "st",
-        (2, _) => "nd",
-        (3, _) => "rd",
-        _ => "th",
-    };
-    format!("{place}{suffix}")
-}
 
 fn mode_label(mode: CharSetMode) -> &'static str {
     CHAR_SET_MODES
@@ -46,47 +34,6 @@ pub fn mode_noun(mode: CharSetMode) -> &'static str {
         CharSetMode::Mixed => "mixed",
         CharSetMode::Callsign => "callsign",
         CharSetMode::Words => "word",
-    }
-}
-
-fn parse_date(date: &str) -> Option<NaiveDate> {
-    NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()
-}
-
-/// "Fri 16 Oct 2026", or the date as stored if it cannot be read.
-fn short_date(date: &str) -> String {
-    parse_date(date).map_or_else(
-        || date.to_string(),
-        |day| day.format("%a %-d %b %Y").to_string(),
-    )
-}
-
-/// "Friday 16 October 2026".
-fn long_date(date: &str) -> String {
-    parse_date(date).map_or_else(
-        || date.to_string(),
-        |day| day.format("%A %-d %B %Y").to_string(),
-    )
-}
-
-/// The local time of day a session finished, "14:32".
-fn clock(timestamp: u64) -> Option<String> {
-    let millis = i64::try_from(timestamp).ok()?;
-    chrono::Local
-        .timestamp_millis_opt(millis)
-        .single()
-        .map(|at| at.format("%H:%M").to_string())
-}
-
-/// How long ago `date` was, seen from `today`: "today", "yesterday", "12 days
-/// ago". Nothing for a date that cannot be read or is still to come.
-fn ago(date: &str, today: &str) -> Option<String> {
-    let days = (parse_date(today)? - parse_date(date)?).num_days();
-    match days {
-        0 => Some("today".to_string()),
-        1 => Some("yesterday".to_string()),
-        2.. => Some(format!("{days} days ago")),
-        _ => None,
     }
 }
 
@@ -303,7 +250,6 @@ pub fn ScoresTab(sessions: Vec<SessionResult>) -> Element {
     if !show_all() {
         rows.truncate(BOARD_TOP);
     }
-    let noun = if total == 1 { "session" } else { "sessions" };
 
     rsx! {
         div { class: "stack",
@@ -364,7 +310,8 @@ pub fn ScoresTab(sessions: Vec<SessionResult>) -> Element {
                     icon: IconName::Chart,
                     title: "Points a group over time",
                     note: format!(
-                        "{total} {noun} · the record set {}",
+                        "{} · the record set {}",
+                        counted(total, "session"),
                         if records == 1 { "once".to_string() } else { format!("{records} times") }
                     ),
                 }
@@ -508,43 +455,6 @@ pub fn ScoresTab(sessions: Vec<SessionResult>) -> Element {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn places_are_said_as_ordinals() {
-        let said: Vec<String> = [1, 2, 3, 4, 11, 12, 13, 21, 22, 23, 101, 111]
-            .into_iter()
-            .map(ordinal)
-            .collect();
-        assert_eq!(
-            said,
-            [
-                "1st", "2nd", "3rd", "4th", "11th", "12th", "13th", "21st", "22nd", "23rd",
-                "101st", "111th"
-            ]
-        );
-    }
-
-    #[test]
-    fn a_date_reads_in_words() {
-        assert_eq!(short_date("2026-10-16"), "Fri 16 Oct 2026");
-        assert_eq!(long_date("2026-10-16"), "Friday 16 October 2026");
-        assert_eq!(short_date("not a date"), "not a date");
-    }
-
-    #[test]
-    fn how_long_ago_is_said_in_days() {
-        assert_eq!(ago("2026-10-16", "2026-10-16").as_deref(), Some("today"));
-        assert_eq!(
-            ago("2026-10-15", "2026-10-16").as_deref(),
-            Some("yesterday")
-        );
-        assert_eq!(
-            ago("2026-10-04", "2026-10-16").as_deref(),
-            Some("12 days ago")
-        );
-        assert_eq!(ago("2026-10-17", "2026-10-16"), None, "still to come");
-        assert_eq!(ago("garbled", "2026-10-16"), None);
-    }
 
     #[test]
     fn every_mode_has_a_name() {
