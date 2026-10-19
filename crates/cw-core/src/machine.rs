@@ -6,8 +6,9 @@
 //! the sampler learns from each answer. The runtime only plays, waits, and
 //! reports back.
 
-use crate::alignment::CopyTally;
-use crate::session::{GroupSession, MonoMs, SessionId, SessionPhase, answer_length_matches};
+use crate::session::{
+    Answered, GroupSession, MonoMs, SessionId, SessionPhase, answer_length_matches,
+};
 use crate::settings::TrainingSettings;
 use crate::timing::{compute_after_group_gap_ms, compute_group_gap_for_wpm};
 
@@ -22,16 +23,13 @@ pub trait GroupSource {
     /// The next group to send, never empty, and how many times to send it
     /// before the answer window opens.
     fn next_group(&mut self, settings: &TrainingSettings) -> (String, u32);
-    /// What was copied of a group the user has just answered.
-    fn learn(&mut self, copied: &CopyTally);
+    /// A group the user has just answered.
+    fn learn(&mut self, answered: Answered<'_>);
     /// The character and effective speed to send the group just drawn at,
     /// if the source chooses it. Otherwise the station sending it does.
     fn next_speed(&mut self, _settings: &TrainingSettings) -> Option<(f64, f64)> {
         None
     }
-    /// What was sent and typed of a group just answered, and the character
-    /// and effective speed it was sent at.
-    fn learn_speed(&mut self, _sent: &str, _received: &str, _played: (f64, f64)) {}
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -435,13 +433,8 @@ impl<S: GroupSource> SessionMachine<S> {
             return false;
         }
         match self.session.confirm(index, now) {
-            Some(copied) => {
-                self.source.learn(copied);
-                if let Some(group) = self.session.group(index)
-                    && let Some(played) = self.session.played_wpm(index)
-                {
-                    self.source.learn_speed(group.sent(), group.input(), played);
-                }
+            Some(answered) => {
+                self.source.learn(answered);
                 true
             }
             None => false,
@@ -514,6 +507,7 @@ mod tests {
     use std::collections::VecDeque;
 
     use super::*;
+    use crate::alignment::CopyTally;
 
     /// Hands out the groups it is given, then "KM" for ever, and remembers
     /// what it was taught.
@@ -534,17 +528,19 @@ mod tests {
             (text, self.repeats.max(1))
         }
 
-        fn learn(&mut self, copied: &CopyTally) {
-            self.learned.push(copied.clone());
+        fn learn(&mut self, answered: Answered<'_>) {
+            self.learned.push(answered.copied.clone());
+            if let Some(played) = answered.played {
+                self.heard.push((
+                    answered.sent.to_string(),
+                    answered.received.to_string(),
+                    played,
+                ));
+            }
         }
 
         fn next_speed(&mut self, _: &TrainingSettings) -> Option<(f64, f64)> {
             self.speed
-        }
-
-        fn learn_speed(&mut self, sent: &str, received: &str, played: (f64, f64)) {
-            self.heard
-                .push((sent.to_string(), received.to_string(), played));
         }
     }
 

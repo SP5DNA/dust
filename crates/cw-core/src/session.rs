@@ -91,6 +91,17 @@ pub enum SessionPhase {
     Aborted,
 }
 
+/// A group just answered, as its source learns from it: what was sent and
+/// typed, what was copied of it, and the character and effective speed it
+/// was played at, once measured.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Answered<'a> {
+    pub sent: &'a str,
+    pub received: &'a str,
+    pub copied: &'a CopyTally,
+    pub played: Option<(f64, f64)>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Group {
     sent: String,
@@ -141,6 +152,16 @@ impl Group {
 
     pub fn confirmed(&self) -> bool {
         self.tally.is_some()
+    }
+
+    /// The group as it was answered, once it is.
+    pub fn answered(&self) -> Option<Answered<'_>> {
+        Some(Answered {
+            sent: &self.sent,
+            received: &self.input,
+            copied: self.tally.as_ref()?,
+            played: self.played_wpm,
+        })
     }
 
     /// How long the answer took, from the end of the send — never quicker
@@ -415,9 +436,9 @@ impl GroupSession {
         }
     }
 
-    /// Answer the current group with what is in its box. Returns what was
-    /// copied, the first time only.
-    pub(crate) fn confirm(&mut self, index: usize, now: MonoMs) -> Option<&CopyTally> {
+    /// Answer the current group with what is in its box. Returns the group
+    /// as answered, the first time only.
+    pub(crate) fn confirm(&mut self, index: usize, now: MonoMs) -> Option<Answered<'_>> {
         if index != self.current_group {
             return None;
         }
@@ -428,7 +449,8 @@ impl GroupSession {
         }
         group.answer_at = group.answer_at.or(Some(now));
         self.focused_group = (index + 1).min(last);
-        Some(group.tally.insert(CopyTally::of(&group.sent, &group.input)))
+        group.tally = Some(CopyTally::of(&group.sent, &group.input));
+        group.answered()
     }
 
     /// The finished session, scored, as it is stored. `finished_at` is wall

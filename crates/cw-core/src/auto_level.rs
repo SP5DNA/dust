@@ -738,7 +738,7 @@ mod tests {
             fn next_group(&mut self, _: &TrainingSettings) -> (String, u32) {
                 ("KM".into(), 1)
             }
-            fn learn(&mut self, _: &CopyTally) {}
+            fn learn(&mut self, _: crate::session::Answered<'_>) {}
         }
 
         let groups = settings.curriculum.num_groups as usize;

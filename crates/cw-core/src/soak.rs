@@ -14,7 +14,7 @@ use crate::machine::{GroupSource, SessionEffect, SessionEvent, SessionMachine};
 use crate::session::MIN_RESPONSE_MS_PER_CHAR;
 use crate::timing::resolve_pileup;
 use crate::{
-    AutoLevelCounters, CALLSIGN_TIER_MAX, CharSamplingState, CharSetMode, CopyTally,
+    Answered, AutoLevelCounters, CALLSIGN_TIER_MAX, CharSamplingState, CharSetMode, CopyTally,
     FILTER_WIDTH_MAX, FILTER_WIDTH_MIN, GroupSizeTarget, MonoMs, PILEUP_LEVEL_MAX_DB,
     PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN, Rng, STATIONS_MAX, STATIONS_MIN,
     Sampler, SessionId, SessionPhase, SplitMix64, TrainingSettings, Transmission, align_group,
@@ -347,7 +347,12 @@ fn adaptive_lengths_never_leave_the_range() {
             if rng.f64() < 0.1 {
                 answer.push('X');
             }
-            sampler.learn(&CopyTally::of(&group, &answer));
+            sampler.learn(Answered {
+                sent: &group,
+                received: &answer,
+                copied: &CopyTally::of(&group, &answer),
+                played: None,
+            });
         }
     }
 }

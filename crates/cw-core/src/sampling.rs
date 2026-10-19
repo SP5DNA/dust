@@ -7,7 +7,7 @@ use crate::callsign::generate_callsign;
 use crate::machine::GroupSource;
 use crate::pool::compute_char_pool;
 use crate::rng::{Rng, SplitMix64, weighted_random_pick};
-use crate::session::SessionResult;
+use crate::session::{Answered, SessionResult};
 use crate::settings::{CharSetMode, LevelAxis, TrainingSettings};
 use crate::span::SpanBelief;
 use crate::speed::{SpeedBelief, SpeedPath};
@@ -105,9 +105,13 @@ impl GroupSource for Sampler {
         (group, resolve_group_repeats(settings, &mut self.rng))
     }
 
-    fn learn(&mut self, copied: &CopyTally) {
-        self.state.learn(copied);
-        self.span.learn_copy(copied);
+    fn learn(&mut self, answered: Answered<'_>) {
+        self.state.learn(answered.copied);
+        self.span.learn_copy(answered.copied);
+        if let Some((char_wpm, effective_wpm)) = answered.played {
+            let copy = crate::score::copy_speed(char_wpm, effective_wpm);
+            self.speed.learn(answered.sent, answered.received, copy);
+        }
     }
 
     fn next_speed(&mut self, settings: &TrainingSettings) -> Option<(f64, f64)> {
@@ -116,11 +120,6 @@ impl GroupSource for Sampler {
         let target = settings.curriculum.group_size_target.char_rate();
         let copy = self.speed.draw_speed(low, high, target, &mut self.rng);
         Some(path.voice_at(copy))
-    }
-
-    fn learn_speed(&mut self, sent: &str, received: &str, played: (f64, f64)) {
-        self.speed
-            .learn(sent, received, crate::score::copy_speed(played.0, played.1));
     }
 }
 
@@ -505,6 +504,17 @@ fn generate_group(
 mod tests {
     use super::*;
     use crate::session::GroupResult;
+
+    /// Teach `sampler` that `typed` was the answer to `sent`, played at
+    /// `played` if it was measured.
+    fn answer(sampler: &mut Sampler, sent: &str, typed: &str, played: Option<(f64, f64)>) {
+        sampler.learn(Answered {
+            sent,
+            received: typed,
+            copied: &CopyTally::of(sent, typed),
+            played,
+        });
+    }
 
     /// A generator stuck on one value: the worst a broken stub can do.
     struct Stuck(f64);
@@ -901,7 +911,7 @@ mod tests {
         let (group, repeats) = sampler.next_group(&settings);
         assert!(!group.is_empty());
         assert_eq!(repeats, 1);
-        sampler.learn(&CopyTally::of("MMMMM", "XXXXX"));
+        answer(&mut sampler, "MMMMM", "XXXXX", None);
         let missed = sampler.state.beliefs[&'M'];
         assert_eq!(missed.beta, CHAR_SAMPLING_PRIOR_BETA + 5.0);
     }
@@ -1068,7 +1078,7 @@ mod tests {
         let mut struggling = fresh.clone();
         for _ in 0..30 {
             let (group, _) = struggling.next_group(&settings);
-            struggling.learn(&CopyTally::of(&group, ""));
+            answer(&mut struggling, &group, "", None);
         }
         let mean = |sampler: &mut Sampler| {
             (0..100)
@@ -1179,14 +1189,18 @@ mod tests {
                 speeds += speed;
                 lengths += sent.chars().count();
             }
-            sampler.learn(&CopyTally::of(&sent, &typed));
-            if naive {
-                let all_wrong: String = sent.chars().map(|_| '#').collect();
-                let judged = if typed == sent { &sent } else { &all_wrong };
-                sampler.learn_speed(&sent, judged, played);
+            let all_wrong: String = sent.chars().map(|_| '#').collect();
+            let heard = if naive && typed != sent {
+                &all_wrong
             } else {
-                sampler.learn_speed(&sent, &typed, played);
-            }
+                &typed
+            };
+            sampler.learn(Answered {
+                sent: &sent,
+                received: heard,
+                copied: &CopyTally::of(&sent, &typed),
+                played: Some(played),
+            });
         }
         let counted_groups = (groups - half) as f64;
         Run {
