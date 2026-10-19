@@ -43,6 +43,7 @@ use crate::rng::Rng;
 use crate::score::copy_speed;
 use crate::session::SessionResult;
 use crate::settings::TrainingSettings;
+use crate::timing::station_speed_grid;
 
 /// The chance of fumbling a character however slowly it was sent.
 const LAPSE: f64 = 0.02;
@@ -71,6 +72,11 @@ const LEANING: Leaning = Leaning {
 };
 /// How far apart, in log speed, the speeds the draw chooses from are.
 const CANDIDATE_STEP: f64 = 0.01;
+/// The most speeds a forecast lists.
+const FORECAST_ROWS_MAX: usize = 12;
+/// How much of the posterior a forecast of the draw goes through: the rest
+/// is cells too unlikely to move a share by a tenth of a percent.
+const FORECAST_MASS: f64 = 0.999;
 
 fn ln_speed_of(cell: usize) -> f64 {
     SPEED_FROM.ln() + (cell / SLOPES.len()) as f64 * LOG_STEP
@@ -213,6 +219,19 @@ impl SpeedPath {
     }
 }
 
+/// One speed the next group can be sent at, as it sees it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SpeedForecast {
+    /// The speed in WPM, as the score counts it: with Farnsworth spacing,
+    /// the characters and the spacing together.
+    pub wpm: f64,
+    /// The chance the next group is sent nearer this speed than any other
+    /// in the forecast.
+    pub drawn: f64,
+    /// The share of characters copied right at this speed.
+    pub right: f64,
+}
+
 /// What the history and this session say about your copy speed.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SpeedBelief {
@@ -324,6 +343,54 @@ impl SpeedBelief {
         self.belief.estimate(|cell| ln_speed_at(rate, cell).exp())
     }
 
+    /// The share of characters copied right at `wpm`, over everything the
+    /// posterior allows.
+    pub fn right_at(&self, wpm: f64) -> f64 {
+        let ln_speed = wpm.max(1.0).ln();
+        self.belief.estimate(|cell| p_right(ln_speed, cell)).mean
+    }
+
+    /// How the next group's speed spreads over `speeds`, as [`Self::draw_speed`]
+    /// draws it between `low` and `high` aiming for `target`: for each, the
+    /// chance the speed drawn is nearer it than any other.
+    pub fn drawn_near(&self, speeds: &[f64], low: f64, high: f64, target: f64) -> Vec<f64> {
+        let mut drawn = vec![0.0; speeds.len()];
+        if speeds.is_empty() {
+            return drawn;
+        }
+        let (low, high) = (low.min(high).max(1.0), high.max(low).max(1.0));
+        let candidates = candidates(low, high);
+        if candidates.len() < 2 {
+            drawn[nearest(speeds, low)] = 1.0;
+            return drawn;
+        }
+        let row_of: Vec<usize> = candidates
+            .iter()
+            .map(|ln_speed| nearest(speeds, ln_speed.exp().clamp(low, high)))
+            .collect();
+        let mut cells: Vec<(usize, f64)> =
+            self.belief.posterior().into_iter().enumerate().collect();
+        cells.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let mut covered = 0.0;
+        for (cell, p) in cells {
+            if covered >= FORECAST_MASS {
+                break;
+            }
+            covered += p;
+            let right: Vec<f64> = candidates.iter().map(|v| p_right(*v, cell)).collect();
+            let weights = aim::lean(&candidates, &right, target, &LEANING);
+            for (weight, row) in weights.into_iter().zip(&row_of) {
+                drawn[*row] += p * weight;
+            }
+        }
+        if covered > 0.0 {
+            for share in &mut drawn {
+                *share /= covered;
+            }
+        }
+        drawn
+    }
+
     /// The next group's copy speed, between `low` and `high` WPM, aiming for
     /// `target` of characters right.
     pub fn draw_speed(&self, low: f64, high: f64, target: f64, rng: &mut impl Rng) -> f64 {
@@ -339,6 +406,58 @@ impl SpeedBelief {
             .get(pick_index(&weights, rng))
             .map_or(low, |ln_speed| ln_speed.exp().clamp(low, high))
     }
+}
+
+/// Round speeds from about `low` to about `high`, 1, 2, 5, 10 or 20 WPM
+/// apart: as close together as keeps them to a dozen.
+pub(crate) fn forecast_speeds(low: f64, high: f64) -> Vec<f64> {
+    if !(low.is_finite() && high.is_finite()) {
+        return Vec::new();
+    }
+    let (low, high) = (low.min(high).max(1.0), high.max(low).max(1.0));
+    let ends = |step: f64| {
+        let first = (low / step).round().max(1.0);
+        (first, (high / step).round().max(first))
+    };
+    let fits = |step: f64| {
+        let (first, last) = ends(step);
+        last - first < FORECAST_ROWS_MAX as f64
+    };
+    let step = [1.0, 2.0, 5.0, 10.0, 20.0]
+        .into_iter()
+        .find(|step| fits(*step))
+        .unwrap_or_else(|| ((high - low) / (FORECAST_ROWS_MAX - 1) as f64).ceil());
+    let (first, last) = ends(step);
+    (0..=(last - first) as usize)
+        .map(|n| (first + n as f64) * step)
+        .collect()
+}
+
+/// Which of `speeds` is nearest `wpm`: the first, if two are as near.
+fn nearest(speeds: &[f64], wpm: f64) -> usize {
+    speeds
+        .iter()
+        .enumerate()
+        .min_by(|(_, a), (_, b)| (*a - wpm).abs().total_cmp(&(*b - wpm).abs()))
+        .map_or(0, |(index, _)| index)
+}
+
+/// How the speeds stations are sent at spread over `speeds`, when adaptive
+/// speed does not choose them: for each, the share of stations nearer it
+/// than any other.
+pub(crate) fn station_shares(settings: &TrainingSettings, speeds: &[f64]) -> Vec<f64> {
+    if speeds.is_empty() {
+        return Vec::new();
+    }
+    let mut stations = vec![0_usize; speeds.len()];
+    for (char_wpm, effective_wpm) in station_speed_grid(settings) {
+        stations[nearest(speeds, copy_speed(char_wpm, effective_wpm))] += 1;
+    }
+    let total = stations.iter().sum::<usize>().max(1) as f64;
+    stations
+        .into_iter()
+        .map(|count| count as f64 / total)
+        .collect()
 }
 
 /// The speeds the draw chooses from, in log WPM: from `low` to `high`, a
@@ -607,5 +726,103 @@ mod tests {
         let comfortable = belief.estimate(0.97).mean;
         let stretch = belief.estimate(0.90).mean;
         assert!(comfortable < stretch, "{comfortable} vs {stretch}");
+    }
+    /// Round speeds, as close together as keeps them to a dozen, from about
+    /// the slowest to about the fastest.
+    #[test]
+    fn a_forecast_lists_round_speeds_across_the_range() {
+        assert_eq!(
+            forecast_speeds(18.0, 25.0),
+            [18.0, 19.0, 20.0, 21.0, 22.0, 23.0, 24.0, 25.0]
+        );
+        assert_eq!(
+            forecast_speeds(18.0, 30.0),
+            [18.0, 20.0, 22.0, 24.0, 26.0, 28.0, 30.0]
+        );
+        assert_eq!(
+            forecast_speeds(10.0, 50.0),
+            [10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 40.0, 45.0, 50.0]
+        );
+        assert_eq!(forecast_speeds(5.0, 80.0).len(), 8);
+        // Farnsworth spacing makes a speed that is not a whole number.
+        assert_eq!(forecast_speeds(19.36, 25.0).first(), Some(&19.0));
+        assert_eq!(forecast_speeds(20.0, 20.0), [20.0]);
+        assert!(forecast_speeds(1.0, 5_000.0).len() <= FORECAST_ROWS_MAX + 1);
+        assert!(forecast_speeds(f64::NAN, 20.0).is_empty());
+        assert_eq!(nearest(&[10.0, 15.0], 12.5), 0, "a tie goes to the slower");
+    }
+
+    /// Without adaptive speed the station draws the speed, evenly across the
+    /// range: the grid spreads the way its draws do.
+    #[test]
+    fn stations_spread_over_the_forecast_the_way_they_are_drawn() {
+        let mut farnsworth = settings(15.0, 40.0);
+        farnsworth.playback.link_char_to_effective = false;
+        farnsworth.playback.effective_wpm_min = 10.0;
+        farnsworth.playback.effective_wpm_max = 30.0;
+        for settings in [settings(10.0, 50.0), farnsworth] {
+            let (low, high) = SpeedPath::of(&settings).bounds();
+            let speeds = forecast_speeds(low, high);
+            let shares = station_shares(&settings, &speeds);
+            assert!((shares.iter().sum::<f64>() - 1.0).abs() < 1e-9);
+            let mut drawn = vec![0.0; speeds.len()];
+            let mut rng = SplitMix64::new(5);
+            let draws = 40_000;
+            for _ in 0..draws {
+                let voice = crate::timing::resolve_station(&settings, &mut rng);
+                drawn[nearest(&speeds, copy_speed(voice.char_wpm, voice.effective_wpm))] +=
+                    1.0 / f64::from(draws);
+            }
+            for ((speed, share), seen) in speeds.iter().zip(&shares).zip(&drawn) {
+                assert!(
+                    (share - seen).abs() < 0.01,
+                    "{speed}: {share} worked out, {seen} drawn"
+                );
+            }
+        }
+        // Tied to the characters, every speed between the ends is as likely.
+        let even = station_shares(&settings(10.0, 50.0), &forecast_speeds(10.0, 50.0));
+        assert!(
+            even[1..8].iter().all(|share| (share - 0.125).abs() < 1e-9),
+            "{even:?}"
+        );
+    }
+
+    /// With adaptive speed, the forecast is what the draw itself does.
+    #[test]
+    fn the_forecast_of_the_draw_is_what_the_draw_does() {
+        let mut belief = SpeedBelief::new(24.0);
+        let mut rng = SplitMix64::new(11);
+        for _ in 0..30 {
+            let (sent, received) = copy_group(24.0, 0.08, 22.0, &mut rng);
+            belief.learn(&sent, &received, 22.0);
+        }
+        let speeds = forecast_speeds(10.0, 50.0);
+        let forecast = belief.drawn_near(&speeds, 10.0, 50.0, 0.94);
+        assert!((forecast.iter().sum::<f64>() - 1.0).abs() < 1e-9);
+        let mut drawn = vec![0.0; speeds.len()];
+        let draws = 6_000;
+        for _ in 0..draws {
+            let speed = belief.draw_speed(10.0, 50.0, 0.94, &mut rng);
+            drawn[nearest(&speeds, speed)] += 1.0 / f64::from(draws);
+        }
+        for ((speed, share), seen) in speeds.iter().zip(&forecast).zip(&drawn) {
+            assert!(
+                (share - seen).abs() < 0.03,
+                "{speed}: {share} forecast, {seen} drawn"
+            );
+        }
+        let busiest = forecast
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.total_cmp(b.1))
+            .map(|(index, _)| speeds[index]);
+        assert_eq!(busiest, Some(20.0), "{forecast:?}");
+        // Faster is copied less well.
+        assert!(belief.right_at(15.0) > belief.right_at(25.0));
+        assert!(belief.right_at(25.0) > belief.right_at(40.0));
+        // One speed is the only one drawn.
+        assert_eq!(belief.drawn_near(&[20.0], 20.0, 20.0, 0.94), [1.0]);
+        assert!(belief.drawn_near(&[], 10.0, 50.0, 0.94).is_empty());
     }
 }

@@ -20,7 +20,8 @@ when you miss:
 - With it off, nothing changes, down to the random draws.
 
 The training screen shows each group's speed, with ▲ or ▼ when it moved
-from the group before. Stats → Overview has a "Copy speed" card.
+from the group before. Stats → Overview has a "Copy speed" card, and Stats →
+Sampling a "Speed" card beside "Group length".
 
 ## Why not a staircase
 
@@ -190,9 +191,10 @@ Reproduce with `cargo test -p cw-core --release adaptive_speed_simulation --
 **cw-core**
 
 - `speed.rs`: `SpeedBelief` (the speed's grid and curve on a `GridBelief`:
-  history replay, learning from each group, `draw_speed`, `estimate`),
-  `speed_evidence` (which characters count against the speed), and
-  `SpeedPath` (the line through the speed settings).
+  history replay, learning from each group, `draw_speed`, `estimate`, and for
+  the Sampling card `drawn_near` and `right_at`), `speed_evidence` (which
+  characters count against the speed), and `SpeedPath` (the line through the
+  speed settings).
 - `belief.rs` and `aim.rs`: the grid posterior and the aim found by
   bisection, shared with the span. The speed's `Leaning` keeps its wider
   share around the aim (`Spread::Around`).
@@ -212,7 +214,11 @@ Reproduce with `cargo test -p cw-core --release adaptive_speed_simulation --
   source, and `SessionView::speed` (`ChosenSpeed`) for the screen.
 - `settings/mod.rs`: `adaptive_speed` (default `false`) in the Speed section;
   `Aim::chars_right` for the character targets.
-- `stats.rs`: `speed_history`.
+- `stats.rs`: `speed_history`, and `speed_forecast` for the Sampling card:
+  round speeds across the range, with the chance of each and the share of
+  characters copied right at it. With adaptive speed off the chances are the
+  station's even draw, worked out by `station_speed_grid` in
+  `timing/station.rs` from the same rules `resolve_station` draws by.
 
 **App**
 
@@ -225,6 +231,8 @@ Reproduce with `cargo test -p cw-core --release adaptive_speed_simulation --
 - **Stats → Overview:** "Copy speed": the speed at the aim's share of
   characters, ± one standard deviation, over the last 30 sessions, and a chip
   saying whether adaptive speed is steering.
+- **Stats → Sampling:** "Speed, WPM": round speeds across the range, each with
+  its chance of coming next and the share of characters copied right at it.
 
 ## Tests
 
@@ -237,11 +245,13 @@ Reproduce with `cargo test -p cw-core --release adaptive_speed_simulation --
   stricter aim is a slower speed; both features together settle without
   either running away; the machine keeps a chosen speed with its group and
   learns at the speed played; old saves load with it off; the soak test runs
-  with it on and off.
+  with it on and off; the Sampling forecast matches the draw it describes,
+  adaptive or the station's own.
 - **App:** the switch is off by default, the aim shows in the right card and
   only once, one speed explains why there is nothing to adapt; a session sends
   every group and every repeat at its chosen speed, inside the range; the
-  overview shows the copy speed card; the chip says which way the speed moved.
+  overview shows the copy speed card and the Sampling tab a speed card, for
+  callsigns too; the chip says which way the speed moved.
 
 ## Open questions
 

@@ -7,14 +7,14 @@ use crate::belief::EstimatePoint;
 use crate::morse::LCWO_SEQUENCE;
 use crate::pool::compute_char_pool;
 use crate::sampling::{
-    CharSamplingConfig, CharSamplingState, adaptive_bounds, belief_for, beta_posterior_mean_error,
-    compute_raw_sampling_weights, config_from_settings, generate_callsign_group,
-    generate_word_group, group_size_bounds, normalize_weights,
+    CharSamplingConfig, CharSamplingState, adaptive_bounds, adapts_speed, belief_for,
+    beta_posterior_mean_error, compute_raw_sampling_weights, config_from_settings,
+    generate_callsign_group, generate_word_group, group_size_bounds, normalize_weights,
 };
 use crate::session::SessionResult;
 use crate::settings::{CharSetMode, TrainingSettings};
 use crate::span::{LengthForecast, SpanBelief};
-use crate::speed::SpeedBelief;
+use crate::speed::{SpeedBelief, SpeedForecast, SpeedPath, forecast_speeds, station_shares};
 
 pub const MASTERED_MIN_ATTEMPTS: u32 = 5;
 pub const MASTERED_MIN_ACCURACY: f64 = 0.9;
@@ -424,6 +424,33 @@ pub fn group_length_forecast(
     SpanBelief::from_history(sessions, settings).forecast(shortest, longest, target)
 }
 
+/// Round speeds across the speed settings, and for each how likely the next
+/// group is to be sent at about that speed, and the share of characters you
+/// copy right at it. With adaptive speed off, the speed is the station's to
+/// draw, evenly across the range.
+pub fn speed_forecast(
+    settings: &TrainingSettings,
+    sessions: &[SessionResult],
+) -> Vec<SpeedForecast> {
+    let (low, high) = SpeedPath::of(settings).bounds();
+    let speeds = forecast_speeds(low, high);
+    let belief = SpeedBelief::from_history(sessions, settings);
+    let drawn = if adapts_speed(settings) {
+        belief.drawn_near(&speeds, low, high, settings.curriculum.aim.chars_right())
+    } else {
+        station_shares(settings, &speeds)
+    };
+    speeds
+        .into_iter()
+        .zip(drawn)
+        .map(|(wpm, drawn)| SpeedForecast {
+            wpm,
+            drawn,
+            right: belief.right_at(wpm),
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -772,6 +799,48 @@ mod tests {
         let total: f64 = rows.iter().map(|row| row.drawn).sum();
         assert!((total - 1.0).abs() < 1e-9);
         assert!(rows.iter().any(|row| (row.drawn - 1.0 / 6.0).abs() > 0.01));
+    }
+
+    fn speed_settings(adaptive: bool) -> TrainingSettings {
+        let mut settings = length_settings(false);
+        settings.playback.char_wpm_min = 10.0;
+        settings.playback.char_wpm_max = 50.0;
+        settings.playback.link_char_to_effective = true;
+        settings.playback.adaptive_speed = adaptive;
+        settings
+    }
+
+    #[test]
+    fn with_adaptive_speed_off_the_station_draws_evenly() {
+        let rows = speed_forecast(&speed_settings(false), &[session()]);
+        assert_eq!(
+            rows.iter().map(|row| row.wpm).collect::<Vec<_>>(),
+            [10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 40.0, 45.0, 50.0]
+        );
+        assert!((rows.iter().map(|row| row.drawn).sum::<f64>() - 1.0).abs() < 1e-9);
+        assert!(
+            rows[1..8]
+                .iter()
+                .all(|row| (row.drawn - 0.125).abs() < 1e-9)
+        );
+        // What is copied right is still the model's to say.
+        assert!(rows.windows(2).all(|pair| pair[0].right > pair[1].right));
+    }
+
+    #[test]
+    fn with_adaptive_speed_on_the_speeds_lean_and_still_add_up() {
+        let rows = speed_forecast(&speed_settings(true), &[session()]);
+        assert!((rows.iter().map(|row| row.drawn).sum::<f64>() - 1.0).abs() < 1e-9);
+        assert!(rows.iter().any(|row| (row.drawn - 0.125).abs() > 0.05));
+    }
+
+    #[test]
+    fn one_speed_is_the_only_one_sent() {
+        let mut settings = speed_settings(true);
+        settings.playback.char_wpm_max = 10.0;
+        let rows = speed_forecast(&settings, &[session()]);
+        assert_eq!(rows.len(), 1);
+        assert_eq!((rows[0].wpm, rows[0].drawn), (10.0, 1.0));
     }
 
     #[test]

@@ -1,8 +1,9 @@
 use std::collections::BTreeSet;
 
 use cw_core::{
-    GROUP_START_BIGRAM_TOKEN, MasteryStatus, SessionResult, TrainingSettings,
+    GROUP_START_BIGRAM_TOKEN, MasteryStatus, SessionResult, SpeedPath, TrainingSettings,
     character_diagnostics, group_length_forecast, mistake_stats, sampling_rows, session_history,
+    speed_forecast,
 };
 use dioxus::prelude::*;
 
@@ -117,6 +118,7 @@ pub fn SamplingTab(settings: TrainingSettings, sessions: Vec<SessionResult>) -> 
         div { class: "stack",
             {character_sampling_card(&settings, &sessions)}
             {group_length_card(&settings, &sessions)}
+            {speed_card(&settings, &sessions)}
         }
     }
 }
@@ -194,6 +196,56 @@ fn group_length_card(settings: &TrainingSettings, sessions: &[SessionResult]) ->
                             }
                             span { class: "mono muted", "{(row.drawn * 100.0).round()}%" }
                             span { class: "tiny", style: "text-transform: none; letter-spacing: 0;", "whole {(row.whole * 100.0).round()}%" }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The speeds the next session can send at: how likely the next group is to
+/// be sent at about each, and the share of characters copied right at it. A
+/// plain function, like the length card.
+fn speed_card(settings: &TrainingSettings, sessions: &[SessionResult]) -> Element {
+    let rows = speed_forecast(settings, sessions);
+    if rows.is_empty() {
+        return rsx! {};
+    }
+    let max_drawn = rows
+        .iter()
+        .map(|row| row.drawn)
+        .fold(0.0_f64, f64::max)
+        .max(0.0001);
+    let playback = &settings.playback;
+    let mut note = if !playback.adaptive_speed {
+        "Adaptive speed is off, so each group's speed is drawn evenly from your range. Right is the share of characters you copy at that speed."
+    } else if !SpeedPath::of(settings).has_room() {
+        "One speed is set, so there is no speed to choose. Right is the share of characters you copy at it."
+    } else {
+        "Chance of each speed in the next group, and the share of characters you copy right at it."
+    }
+    .to_string();
+    if !playback.link_char_to_effective {
+        note.push_str(
+            " With Farnsworth spacing, a speed counts the spacing too, as the score does.",
+        );
+    }
+    rsx! {
+        div { class: "card stack",
+            div { class: "tiny", "Speed, WPM" }
+            p { class: "muted", "{note}" }
+            for row in rows.iter() {
+                {
+                    let width = (row.drawn / max_drawn * 100.0).clamp(4.0, 100.0);
+                    rsx! {
+                        div { class: "letter-row",
+                            span { class: "letter-key mono", "{row.wpm:.0}" }
+                            div { class: "bar-track",
+                                span { class: "bar-fill sample", style: "width: {width}%;" }
+                            }
+                            span { class: "mono muted", "{(row.drawn * 100.0).round()}%" }
+                            span { class: "tiny", style: "text-transform: none; letter-spacing: 0;", "right {(row.right * 100.0).round()}%" }
                         }
                     }
                 }

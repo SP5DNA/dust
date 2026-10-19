@@ -31,18 +31,11 @@ const DASH_RATIO_SPREAD: f64 = 0.45;
 
 /// Tune in a station, within whatever range the settings allow.
 pub fn resolve_station(settings: &TrainingSettings, rng: &mut impl Rng) -> StationVoice {
-    let char_wpm = resolve_char_wpm(settings, rng);
+    let (char_wpm, effective_wpm) = speeds_from(settings, |min, max| rng.pick_in_range(min, max));
     // Every station is somebody, and on the air most of them are not keyers.
     // Drawn once per station and carried, so a repeat is the same operator
     // sending again rather than a different one with the same call.
     let spread = settings.playback.fist_variation.clamp(0.0, 1.0);
-    // Tied means no Farnsworth spacing: the gaps go at the character speed.
-    // Drawn again from the copied range they would not, about half the time.
-    let effective_wpm = if settings.playback.link_char_to_effective {
-        char_wpm
-    } else {
-        resolve_effective_wpm(settings, char_wpm, rng)
-    };
     StationVoice {
         tone_hz: resolve_tone_hz(settings, rng),
         char_wpm,
@@ -53,22 +46,53 @@ pub fn resolve_station(settings: &TrainingSettings, rng: &mut impl Rng) -> Stati
     }
 }
 
-fn resolve_char_wpm(settings: &TrainingSettings, rng: &mut impl Rng) -> f64 {
-    rng.pick_in_range(
-        settings.playback.char_wpm_min.max(1.0),
-        settings.playback.char_wpm_max.max(1.0),
-    )
-    .max(1.0)
+/// A station's character speed and the pace of its spacing, `pick` choosing
+/// a value between two bounds: the character speed first, then the spacing,
+/// never faster than the characters.
+fn speeds_from(settings: &TrainingSettings, mut pick: impl FnMut(f64, f64) -> f64) -> (f64, f64) {
+    let p = &settings.playback;
+    let char_wpm = pick(p.char_wpm_min.max(1.0), p.char_wpm_max.max(1.0)).max(1.0);
+    // Tied means no Farnsworth spacing: the gaps go at the character speed.
+    // Drawn again from the copied range they would not, about half the time.
+    let effective_wpm = if p.link_char_to_effective {
+        char_wpm
+    } else {
+        pick(p.effective_wpm_min.max(1.0), p.effective_wpm_max.max(1.0))
+            .max(1.0)
+            .min(char_wpm)
+    };
+    (char_wpm, effective_wpm)
 }
 
-fn resolve_effective_wpm(settings: &TrainingSettings, char_wpm: f64, rng: &mut impl Rng) -> f64 {
-    let sampled = rng
-        .pick_in_range(
-            settings.playback.effective_wpm_min.max(1.0),
-            settings.playback.effective_wpm_max.max(1.0),
-        )
-        .max(1.0);
-    sampled.min(char_wpm)
+/// How many steps the character speed range, and the spacing's, are cut
+/// into to see how stations' speeds spread without drawing them: fine enough
+/// that a whole WPM of either range is as likely as the next to a tenth of a
+/// percent.
+const CHAR_GRID_STEPS: usize = 1_000;
+const SPACING_GRID_STEPS: usize = 200;
+
+/// The speeds stations are sent at, as a grid of character speed and spacing
+/// pairs, each as likely as the next: what [`resolve_station`] draws, spread
+/// evenly the way its draw is, rather than drawn.
+pub(crate) fn station_speed_grid(
+    settings: &TrainingSettings,
+) -> impl Iterator<Item = (f64, f64)> + '_ {
+    let steps = |n: usize| (0..n).map(move |i| (i as f64 + 0.5) / n as f64);
+    let spacings = if settings.playback.link_char_to_effective {
+        1
+    } else {
+        SPACING_GRID_STEPS
+    };
+    steps(CHAR_GRID_STEPS)
+        .flat_map(move |along_char| {
+            steps(spacings).map(move |along_spacing| (along_char, along_spacing))
+        })
+        .map(|(along_char, along_spacing)| {
+            let mut along = [along_char, along_spacing].into_iter();
+            speeds_from(settings, |min, max| {
+                min + along.next().unwrap_or(0.5) * (max - min)
+            })
+        })
 }
 
 fn resolve_volume(settings: &TrainingSettings, rng: &mut impl Rng) -> f64 {
