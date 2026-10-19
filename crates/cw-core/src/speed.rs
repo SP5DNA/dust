@@ -36,12 +36,13 @@
 
 use std::sync::OnceLock;
 
+use crate::aim::{self, Leaning, Spread};
 use crate::alignment::align_group;
+use crate::belief::{Estimate, EstimatePoint, GridBelief, Tally, pick_index, sessions_in_order};
 use crate::rng::Rng;
 use crate::score::copy_speed;
 use crate::session::SessionResult;
 use crate::settings::TrainingSettings;
-use crate::span::{SESSION_FADE, pick_index};
 
 /// The chance of fumbling a character however slowly it was sent.
 const LAPSE: f64 = 0.02;
@@ -58,17 +59,16 @@ const CELLS: usize = SPEED_POINTS * SLOPES.len();
 /// How far the first guess at a copy speed may be off, in log speed: half
 /// as fast again, or two thirds as fast.
 const PRIOR_SD: f64 = 0.4;
-/// The share of speeds drawn from a wider spread around the aim, so the
-/// slope keeps being learned. Not from the whole range: a 48 WPM group in a
-/// run at 18 teaches little and costs the run.
-const VARIETY: f64 = 0.15;
-/// How far, in log speed, a speed can be from the aim and still be favoured.
-const AIM_WIDTH: f64 = 0.05;
-/// The wider spread the variety is drawn from, in log speed: about a fifth
-/// either way.
-const VARIETY_WIDTH: f64 = 0.2;
-/// How far past either end of the range the aim may go, in log speed.
-const AIM_REACH: f64 = 0.15;
+/// How the speeds lean towards the aim, in log speed: within about five
+/// percent of it, with 15% of them from a wider spread, about a fifth either
+/// way, so the slope keeps being learned. Not from the whole range: a 48 WPM
+/// group in a run at 18 teaches little and costs the run.
+const LEANING: Leaning = Leaning {
+    width: 0.05,
+    variety: 0.15,
+    spread: Spread::Around(0.2),
+    reach: 0.15,
+};
 /// How far apart, in log speed, the speeds the draw chooses from are.
 const CANDIDATE_STEP: f64 = 0.01;
 
@@ -240,28 +240,10 @@ impl SpeedPath {
     }
 }
 
-/// The estimate of the copy speed at some accuracy: its posterior mean and
-/// standard deviation, in WPM.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct SpeedEstimate {
-    pub mean: f64,
-    pub sd: f64,
-}
-
-/// The copy speed after one session of the history.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct SpeedPoint {
-    pub timestamp: u64,
-    pub estimate: SpeedEstimate,
-}
-
 /// What the history and this session say about your copy speed.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SpeedBelief {
-    /// Log prior, one per (speed, slope) cell.
-    prior: Vec<f64>,
-    /// Log likelihood of everything observed, faded by age.
-    evidence: Vec<f64>,
+    belief: GridBelief,
 }
 
 impl SpeedBelief {
@@ -273,8 +255,7 @@ impl SpeedBelief {
             .map(|cell| -0.5 * ((ln_speed_of(cell) - centre) / PRIOR_SD).powi(2))
             .collect();
         Self {
-            prior,
-            evidence: vec![0.0; CELLS],
+            belief: GridBelief::new(prior),
         }
     }
 
@@ -287,9 +268,9 @@ impl SpeedBelief {
     /// The belief a new session starts from: the history's, all of it one
     /// session older.
     pub fn for_session(history: &[SessionResult], settings: &TrainingSettings) -> Self {
-        let mut belief = Self::from_history(history, settings);
-        belief.fade();
-        belief
+        let mut speed = Self::from_history(history, settings);
+        speed.belief.fade();
+        speed
     }
 
     /// The copy speed at `rate` of characters right after each session of
@@ -298,12 +279,12 @@ impl SpeedBelief {
         history: &[SessionResult],
         settings: &TrainingSettings,
         rate: f64,
-    ) -> Vec<SpeedPoint> {
+    ) -> Vec<EstimatePoint> {
         let mut points = Vec::new();
-        Self::replay(history, settings, |session, belief| {
-            points.push(SpeedPoint {
+        Self::replay(history, settings, |session, speed| {
+            points.push(EstimatePoint {
                 timestamp: session.timestamp,
-                estimate: belief.estimate(rate),
+                estimate: speed.estimate(rate),
             });
         });
         points
@@ -319,18 +300,10 @@ impl SpeedBelief {
         mut after: impl FnMut(&SessionResult, &Self),
     ) -> Self {
         let (low, high) = SpeedPath::of(settings).bounds();
-        let mut belief = Self::new((low * high).sqrt());
-        let mode = settings.curriculum.char_set_mode;
-        let mut sessions: Vec<&SessionResult> = history
-            .iter()
-            .filter(|session| session.char_set_mode == mode && !session.groups.is_empty())
-            .collect();
-        sessions.sort_by_key(|session| session.timestamp);
-        for session in sessions {
-            belief.fade();
-            // Counted per speed first: one update for each speed a session
-            // sent at, rather than one for each group.
-            let mut tally: Vec<(usize, f64, f64)> = Vec::new();
+        let mut speed = Self::new((low * high).sqrt());
+        for session in sessions_in_order(history, settings.curriculum.char_set_mode) {
+            speed.belief.fade();
+            let mut tally = Tally::new();
             for (index, group) in session.groups.iter().enumerate() {
                 let timing = session.group_timings.get(index);
                 let char_wpm = timing
@@ -339,33 +312,18 @@ impl SpeedBelief {
                 let effective_wpm = timing
                     .and_then(|timing| timing.effective_wpm)
                     .unwrap_or(session.effective_wpm);
-                let Some((right, counted)) = speed_evidence(&group.sent, &group.received) else {
-                    continue;
-                };
-                let bin = speed_bin(copy_speed(char_wpm, effective_wpm).ln());
-                let share = f64::from(right) / f64::from(counted);
-                match tally.iter_mut().find(|(seen, _, _)| *seen == bin) {
-                    Some((_, hits, misses)) => {
-                        *hits += share;
-                        *misses += 1.0 - share;
-                    }
-                    None => tally.push((bin, share, 1.0 - share)),
+                if let Some((right, counted)) = speed_evidence(&group.sent, &group.received) {
+                    let share = f64::from(right) / f64::from(counted);
+                    let bin = speed_bin(copy_speed(char_wpm, effective_wpm).ln());
+                    tally.add(bin, share, 1.0 - share);
                 }
             }
-            for (bin, hits, misses) in tally {
-                belief.observe(bin, hits, misses);
+            for (bin, hits, misses) in tally.rows() {
+                speed.observe(bin, hits, misses);
             }
-            after(session, &belief);
+            after(session, &speed);
         }
-        belief
-    }
-
-    /// One more session has passed: everything learned so far counts for a
-    /// little less.
-    fn fade(&mut self) {
-        for evidence in &mut self.evidence {
-            *evidence *= SESSION_FADE;
-        }
+        speed
     }
 
     /// Groups sent at grid speed `bin`: `hits` and `misses` are their shares
@@ -374,11 +332,8 @@ impl SpeedBelief {
         if hits + misses <= 0.0 {
             return;
         }
-        let Some(row) = log_chance_table().get(bin * CELLS..(bin + 1) * CELLS) else {
-            return;
-        };
-        for (evidence, [right, wrong]) in self.evidence.iter_mut().zip(row) {
-            *evidence += hits * right + misses * wrong;
+        if let Some(row) = log_chance_table().get(bin * CELLS..(bin + 1) * CELLS) {
+            self.belief.observe(row.iter().copied(), hits, misses);
         }
     }
 
@@ -391,43 +346,9 @@ impl SpeedBelief {
         }
     }
 
-    /// The posterior, one probability per cell.
-    fn posterior(&self) -> Vec<f64> {
-        let log: Vec<f64> = self
-            .prior
-            .iter()
-            .zip(&self.evidence)
-            .map(|(prior, evidence)| prior + evidence)
-            .collect();
-        let top = log.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-        let mut weights: Vec<f64> = log.iter().map(|value| (value - top).exp()).collect();
-        let total: f64 = weights.iter().sum();
-        if total.is_finite() && total > 0.0 {
-            for weight in &mut weights {
-                *weight /= total;
-            }
-        } else {
-            weights = vec![1.0 / CELLS as f64; CELLS];
-        }
-        weights
-    }
-
-    /// The speed at which `rate` of characters are copied right.
-    pub fn estimate(&self, rate: f64) -> SpeedEstimate {
-        let posterior = self.posterior();
-        let speeds: Vec<f64> = (0..CELLS)
-            .map(|cell| ln_speed_at(rate, cell).exp())
-            .collect();
-        let mean: f64 = posterior.iter().zip(&speeds).map(|(p, v)| p * v).sum();
-        let variance: f64 = posterior
-            .iter()
-            .zip(&speeds)
-            .map(|(p, v)| p * (v - mean).powi(2))
-            .sum();
-        SpeedEstimate {
-            mean,
-            sd: variance.max(0.0).sqrt(),
-        }
+    /// The speed, in WPM, at which `rate` of characters are copied right.
+    pub fn estimate(&self, rate: f64) -> Estimate {
+        self.belief.estimate(|cell| ln_speed_at(rate, cell).exp())
     }
 
     /// The next group's copy speed, between `low` and `high` WPM, aiming for
@@ -438,8 +359,9 @@ impl SpeedBelief {
         if candidates.len() < 2 {
             return low;
         }
-        let cell = pick_index(&self.posterior(), rng);
-        let weights = speed_weights(&candidates, target, cell);
+        let cell = self.belief.draw(rng);
+        let right: Vec<f64> = candidates.iter().map(|v| p_right(*v, cell)).collect();
+        let weights = aim::lean(&candidates, &right, target, &LEANING);
         candidates
             .get(pick_index(&weights, rng))
             .map_or(low, |ln_speed| ln_speed.exp().clamp(low, high))
@@ -454,88 +376,10 @@ fn candidates(low: f64, high: f64) -> Vec<f64> {
     if width.is_nan() || width <= 1e-9 {
         return vec![from];
     }
-    let steps = ((to - from) / CANDIDATE_STEP).ceil().max(1.0) as usize;
+    let steps = (width / CANDIDATE_STEP).ceil().max(1.0) as usize;
     (0..=steps)
-        .map(|step| from + (to - from) * step as f64 / steps as f64)
+        .map(|step| from + width * step as f64 / steps as f64)
         .collect()
-}
-
-/// How strongly each candidate speed is favoured for one cell of the
-/// posterior: leaning towards an aim, set so that over the speeds drawn
-/// `target` of characters are copied right, with a share spread evenly over
-/// them all. A range that is all too easy leans on its fastest speeds, and
-/// one that is all too hard on its slowest.
-fn speed_weights(candidates: &[f64], target: f64, cell: usize) -> Vec<f64> {
-    let right: Vec<f64> = candidates.iter().map(|v| p_right(*v, cell)).collect();
-    let (Some(first), Some(last)) = (candidates.first(), candidates.last()) else {
-        return Vec::new();
-    };
-    let expected = |aim: f64| expected_right(candidates, aim, &right);
-    let (mut slow, mut fast) = (first - AIM_REACH, last + AIM_REACH);
-    let aim = if expected(fast) >= target {
-        fast
-    } else if expected(slow) <= target {
-        slow
-    } else {
-        // Aiming faster only ever copies less, so halve towards it.
-        for _ in 0..30 {
-            let middle = (slow + fast) / 2.0;
-            if expected(middle) > target {
-                slow = middle;
-            } else {
-                fast = middle;
-            }
-        }
-        (slow + fast) / 2.0
-    };
-    weights_around(candidates, aim)
-}
-
-fn nearness(ln_speed: f64, aim: f64, width: f64) -> f64 {
-    let off = ln_speed - aim;
-    (-off * off / (2.0 * width * width)).exp()
-}
-
-/// The candidates leaning towards `aim`, a share of them from a wider
-/// spread around it. Should every nearness underflow, the end nearest the
-/// aim takes all of it.
-fn weights_around(candidates: &[f64], aim: f64) -> Vec<f64> {
-    let end = if candidates.last().is_some_and(|last| aim > *last) {
-        candidates.len().saturating_sub(1)
-    } else {
-        0
-    };
-    let shared = |width: f64| -> Vec<f64> {
-        let near: Vec<f64> = candidates
-            .iter()
-            .map(|v| nearness(*v, aim, width))
-            .collect();
-        let total: f64 = near.iter().sum();
-        near.iter()
-            .enumerate()
-            .map(|(index, weight)| {
-                if total > 0.0 {
-                    weight / total
-                } else {
-                    f64::from(u8::from(index == end))
-                }
-            })
-            .collect()
-    };
-    let (close, wide) = (shared(AIM_WIDTH), shared(VARIETY_WIDTH));
-    close
-        .iter()
-        .zip(&wide)
-        .map(|(close, wide)| (1.0 - VARIETY) * close + VARIETY * wide)
-        .collect()
-}
-
-/// How often a character is copied right over the speeds
-/// [`weights_around`] gives for `aim`, `right` holding each candidate's
-/// chance.
-fn expected_right(candidates: &[f64], aim: f64, right: &[f64]) -> f64 {
-    let weights = weights_around(candidates, aim);
-    weights.iter().zip(right).map(|(w, p)| w * p).sum()
 }
 
 #[cfg(test)]

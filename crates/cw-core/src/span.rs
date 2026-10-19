@@ -1,9 +1,9 @@
 //! How long a group you can copy whole: a Bayesian estimate of your copy span,
 //! and group lengths drawn near its edge.
 //!
-//! The model is a psychometric curve over group length, the way adaptive
-//! testing models a threshold (QUEST, the Ψ method). A group of `L`
-//! characters is copied whole with probability
+//! The model is a psychometric curve over group length, held as a grid
+//! belief ([`crate::belief`]). A group of `L` characters is copied whole with
+//! probability
 //!
 //! ```text
 //! P(whole | L) = (1 − λ) · σ((S − L) / w)
@@ -11,18 +11,19 @@
 //!
 //! `S` is the span, the length copied whole about half the time; `w` is how
 //! sharply that falls away past it; `λ` is a small lapse rate, so one slip on
-//! a short group is not read as a short span. The posterior over `(S, w)` is
-//! held exactly, as log weights on a fixed grid: there is no approximation to
-//! drift and nothing to diverge.
+//! a short group is not read as a short span.
 //!
 //! Each length is then drawn by Thompson sampling: one `(S, w)` is drawn from
-//! the posterior, and the lengths whose chance of being copied whole comes
-//! closest to the target are favoured. While the posterior is wide that
-//! explores; as it narrows it settles.
+//! the posterior, and the draw leans towards the lengths whose chance of
+//! being copied whole brings the groups drawn to the target
+//! ([`crate::aim`]). While the posterior is wide that explores; as it
+//! narrows it settles.
 
 use std::sync::OnceLock;
 
+use crate::aim::{self, Leaning, Spread};
 use crate::alignment::CopyTally;
+use crate::belief::{Estimate, EstimatePoint, GridBelief, Tally, sessions_in_order};
 use crate::rng::Rng;
 use crate::session::SessionResult;
 use crate::settings::{GROUP_SIZE_MAX, TrainingSettings};
@@ -38,18 +39,16 @@ const SPREADS: [f64; 5] = [0.4, 0.7, 1.0, 1.5, 2.5];
 const CELLS: usize = SPAN_POINTS * SPREADS.len();
 /// How far the first guess at a span may be off, in characters.
 const PRIOR_SD: f64 = 3.0;
-/// What a session's evidence is worth once another has followed it: half,
-/// ten sessions on, so the span follows you as you improve.
-pub(crate) const SESSION_FADE: f64 = 0.933_032_991_536_807_4;
-/// The share of lengths drawn evenly from the whole range, so every length
-/// in it still comes round now and then.
-const VARIETY: f64 = 0.1;
-/// How far, in characters, a length can be from the aim and still be
-/// favoured.
-const AIM_WIDTH: f64 = 1.0;
-/// How far past either end of the range the aim may go, in characters: far
-/// enough that the end itself takes nearly all of the leaning.
-const AIM_REACH: f64 = 3.0;
+/// How the lengths lean towards the aim, in characters: within about one of
+/// it, a tenth of them spread evenly over the whole range so every length in
+/// it still comes round now and then, and the aim free to go three past
+/// either end.
+const LEANING: Leaning = Leaning {
+    width: 1.0,
+    variety: 0.1,
+    spread: Spread::Even,
+    reach: 3.0,
+};
 
 fn span_of(cell: usize) -> f64 {
     SPAN_FROM + (cell / SPREADS.len()) as f64 * SPAN_STEP
@@ -82,38 +81,6 @@ fn log_chance_table() -> &'static [[f64; 2]] {
     })
 }
 
-/// One index, in proportion to `weights`. A table with no weight in it, or
-/// one that cannot be read, is drawn from evenly.
-pub(crate) fn pick_index(weights: &[f64], rng: &mut impl Rng) -> usize {
-    let total: f64 = weights.iter().sum();
-    if !(total.is_finite() && total > 0.0) {
-        return rng.usize_in(0, weights.len().saturating_sub(1));
-    }
-    let mut left = rng.f64() * total;
-    for (index, weight) in weights.iter().enumerate() {
-        if left < *weight {
-            return index;
-        }
-        left -= weight;
-    }
-    weights.len().saturating_sub(1)
-}
-
-/// The estimate of the span: its posterior mean and standard deviation, in
-/// characters.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct SpanEstimate {
-    pub mean: f64,
-    pub sd: f64,
-}
-
-/// The span after one session of the history.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct SpanPoint {
-    pub timestamp: u64,
-    pub estimate: SpanEstimate,
-}
-
 /// One group length in the range, as the next group sees it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LengthForecast {
@@ -127,10 +94,7 @@ pub struct LengthForecast {
 /// What the history and this session say about your copy span.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SpanBelief {
-    /// Log prior, one per (span, spread) cell.
-    prior: Vec<f64>,
-    /// Log likelihood of everything observed, faded by age.
-    evidence: Vec<f64>,
+    belief: GridBelief,
 }
 
 impl SpanBelief {
@@ -141,8 +105,7 @@ impl SpanBelief {
             .map(|cell| -0.5 * ((span_of(cell) - centre) / PRIOR_SD).powi(2))
             .collect();
         Self {
-            prior,
-            evidence: vec![0.0; CELLS],
+            belief: GridBelief::new(prior),
         }
     }
 
@@ -156,19 +119,19 @@ impl SpanBelief {
     /// one session older, so the last session counts for a little less than
     /// the one about to be sent.
     pub fn for_session(history: &[SessionResult], settings: &TrainingSettings) -> Self {
-        let mut belief = Self::from_history(history, settings);
-        belief.fade();
-        belief
+        let mut span = Self::from_history(history, settings);
+        span.belief.fade();
+        span
     }
 
     /// The span after each session of the history that counts towards it,
     /// oldest first.
-    pub fn history(history: &[SessionResult], settings: &TrainingSettings) -> Vec<SpanPoint> {
+    pub fn history(history: &[SessionResult], settings: &TrainingSettings) -> Vec<EstimatePoint> {
         let mut points = Vec::new();
-        Self::replay(history, settings, |session, belief| {
-            points.push(SpanPoint {
+        Self::replay(history, settings, |session, span| {
+            points.push(EstimatePoint {
                 timestamp: session.timestamp,
-                estimate: belief.estimate(),
+                estimate: span.estimate(),
             });
         });
         points
@@ -184,72 +147,46 @@ impl SpanBelief {
         mut after: impl FnMut(&SessionResult, &Self),
     ) -> Self {
         let (shortest, longest) = crate::sampling::group_size_bounds(settings);
-        let mut belief = Self::new((shortest + longest) as f64 / 2.0);
+        let mut span = Self::new((shortest + longest) as f64 / 2.0);
         let mode = settings.curriculum.char_set_mode;
         if !mode.draws_characters() {
-            return belief;
+            return span;
         }
-        // A session with no groups to read says nothing about length, and is
-        // not one more session for what came before it to fade behind.
-        let mut sessions: Vec<&SessionResult> = history
-            .iter()
-            .filter(|session| session.char_set_mode == mode && !session.groups.is_empty())
-            .collect();
-        sessions.sort_by_key(|session| session.timestamp);
-        for session in sessions {
-            belief.fade();
-            // Counted per length first: one update for each length a
-            // session sent, rather than one for each group.
-            let mut tally: Vec<(usize, u32, u32)> = Vec::new();
+        for session in sessions_in_order(history, mode) {
+            span.belief.fade();
+            let mut tally = Tally::new();
             for group in &session.groups {
-                let length = group.sent.chars().count();
-                match tally.iter_mut().find(|(seen, _, _)| *seen == length) {
-                    Some((_, whole, missed)) => {
-                        *whole += u32::from(group.correct);
-                        *missed += u32::from(!group.correct);
-                    }
-                    None => {
-                        tally.push((length, u32::from(group.correct), u32::from(!group.correct)))
-                    }
-                }
+                let whole = f64::from(u8::from(group.correct));
+                tally.add(group.sent.chars().count(), whole, 1.0 - whole);
             }
-            for (length, whole, missed) in tally {
-                belief.observe(length, whole, missed);
+            for (length, whole, missed) in tally.rows() {
+                span.observe(length, whole, missed);
             }
-            after(session, &belief);
+            after(session, &span);
         }
-        belief
-    }
-
-    /// One more session has passed: everything learned so far counts for a
-    /// little less.
-    fn fade(&mut self) {
-        for evidence in &mut self.evidence {
-            *evidence *= SESSION_FADE;
-        }
+        span
     }
 
     /// Groups of `length` characters: `whole` of them copied whole, `missed`
     /// not.
-    fn observe(&mut self, length: usize, whole: u32, missed: u32) {
-        if length == 0 || whole + missed == 0 {
+    fn observe(&mut self, length: usize, whole: f64, missed: f64) {
+        if length == 0 || whole + missed <= 0.0 {
             return;
         }
-        let (whole, missed) = (f64::from(whole), f64::from(missed));
         // A length past the table, from a save older than today's limit, is
         // worked out as it comes.
         let row = log_chance_table().get((length - 1) * CELLS..length * CELLS);
-        for (cell, evidence) in self.evidence.iter_mut().enumerate() {
-            let [hit, miss] = row
-                .and_then(|row| row.get(cell).copied())
-                .unwrap_or_else(|| log_chances(length as f64, cell));
-            *evidence += whole * hit + missed * miss;
-        }
+        let chances = (0..CELLS).map(|cell| {
+            row.and_then(|row| row.get(cell).copied())
+                .unwrap_or_else(|| log_chances(length as f64, cell))
+        });
+        self.belief.observe(chances, whole, missed);
     }
 
     /// Learn from one group of `length` characters.
     pub fn learn(&mut self, length: usize, whole: bool) {
-        self.observe(length, u32::from(whole), u32::from(!whole));
+        let whole = f64::from(u8::from(whole));
+        self.observe(length, whole, 1.0 - whole);
     }
 
     /// Learn from what was copied of one group: how long it was, and whether
@@ -260,43 +197,9 @@ impl SpanBelief {
         self.learn(sent as usize, right == sent && copied.inserted.is_empty());
     }
 
-    /// The posterior, one probability per cell.
-    fn posterior(&self) -> Vec<f64> {
-        let log: Vec<f64> = self
-            .prior
-            .iter()
-            .zip(&self.evidence)
-            .map(|(prior, evidence)| prior + evidence)
-            .collect();
-        let top = log.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-        let mut weights: Vec<f64> = log.iter().map(|value| (value - top).exp()).collect();
-        let total: f64 = weights.iter().sum();
-        if total.is_finite() && total > 0.0 {
-            for weight in &mut weights {
-                *weight /= total;
-            }
-        } else {
-            weights = vec![1.0 / CELLS as f64; CELLS];
-        }
-        weights
-    }
-
-    pub fn estimate(&self) -> SpanEstimate {
-        let posterior = self.posterior();
-        let mean: f64 = posterior
-            .iter()
-            .enumerate()
-            .map(|(cell, p)| p * span_of(cell))
-            .sum();
-        let variance: f64 = posterior
-            .iter()
-            .enumerate()
-            .map(|(cell, p)| p * (span_of(cell) - mean).powi(2))
-            .sum();
-        SpanEstimate {
-            mean,
-            sd: variance.max(0.0).sqrt(),
-        }
+    /// The span, in characters.
+    pub fn estimate(&self) -> Estimate {
+        self.belief.estimate(span_of)
     }
 
     /// The next group's length, between `shortest` and `longest` characters,
@@ -312,9 +215,9 @@ impl SpanBelief {
         if shortest == longest {
             return shortest;
         }
-        let cell = pick_index(&self.posterior(), rng);
+        let cell = self.belief.draw(rng);
         let weights = length_weights(shortest, longest, target, cell);
-        shortest + pick_index(&weights, rng)
+        shortest + crate::belief::pick_index(&weights, rng)
     }
 
     /// Each length between `shortest` and `longest`: how likely it is to be
@@ -336,7 +239,7 @@ impl SpanBelief {
                 whole: 0.0,
             })
             .collect();
-        for (cell, p) in self.posterior().into_iter().enumerate() {
+        for (cell, p) in self.belief.posterior().into_iter().enumerate() {
             if p < 1e-12 {
                 continue;
             }
@@ -355,103 +258,16 @@ impl SpanBelief {
 }
 
 /// How strongly each length from `shortest` to `longest` is favoured for one
-/// cell of the posterior.
-///
-/// The lengths lean towards an aim, counted in characters, with a share
-/// spread evenly over them all. The aim is set so that, over the lengths
-/// drawn, groups are copied whole `target` of the time. Aiming instead at
-/// the one length that is copied whole that often falls short of it: the
-/// curve bends down past the target faster than it climbs before it, so a
-/// spread of lengths around that length is copied whole less often than the
-/// length itself. A range that is all too easy leans on its longest groups,
-/// and one that is all too hard on its shortest.
+/// cell of the posterior: leaning towards an aim set so that, over the
+/// lengths drawn, groups are copied whole `target` of the time.
 fn length_weights(shortest: usize, longest: usize, target: f64, cell: usize) -> Vec<f64> {
     let (span, spread) = (span_of(cell), spread_of(cell));
-    let whole: Vec<f64> = (shortest..=longest)
-        .map(|length| p_whole(length as f64, span, spread))
+    let lengths: Vec<f64> = (shortest..=longest).map(|length| length as f64).collect();
+    let whole: Vec<f64> = lengths
+        .iter()
+        .map(|length| p_whole(*length, span, spread))
         .collect();
-    let expected = |aim: f64| expected_whole(shortest, longest, aim, &whole);
-    let (mut low, mut high) = (shortest as f64 - AIM_REACH, longest as f64 + AIM_REACH);
-    let aim = if expected(high) >= target {
-        high
-    } else if expected(low) <= target {
-        low
-    } else {
-        // Aiming longer only ever copies less whole, so halve towards it.
-        for _ in 0..30 {
-            let middle = (low + high) / 2.0;
-            if expected(middle) > target {
-                low = middle;
-            } else {
-                high = middle;
-            }
-        }
-        (low + high) / 2.0
-    };
-    weights_around(shortest, longest, aim)
-}
-
-/// How strongly a length is drawn towards `aim`, before the weights are
-/// shared out.
-fn nearness(length: usize, aim: f64) -> f64 {
-    let off = length as f64 - aim;
-    (-off * off / (2.0 * AIM_WIDTH * AIM_WIDTH)).exp()
-}
-
-/// Which of `count` lengths, the last being `longest`, takes all of the
-/// leaning when every nearness has underflowed to nothing: the end nearest
-/// the aim.
-fn nearest_end(count: usize, longest: usize, aim: f64) -> usize {
-    if aim > longest as f64 {
-        count.saturating_sub(1)
-    } else {
-        0
-    }
-}
-
-/// The lengths from `shortest` to `longest`, leaning towards `aim`, with a
-/// share spread evenly over them all.
-fn weights_around(shortest: usize, longest: usize, aim: f64) -> Vec<f64> {
-    let nearness: Vec<f64> = (shortest..=longest)
-        .map(|length| nearness(length, aim))
-        .collect();
-    let total: f64 = nearness.iter().sum();
-    let even = VARIETY / nearness.len() as f64;
-    let end = nearest_end(nearness.len(), longest, aim);
-    nearness
-        .into_iter()
-        .enumerate()
-        .map(|(index, weight)| {
-            let leaning = if total > 0.0 {
-                weight / total
-            } else {
-                f64::from(u8::from(index == end))
-            };
-            even + (1.0 - VARIETY) * leaning
-        })
-        .collect()
-}
-
-/// How often a group is copied whole over the lengths [`weights_around`]
-/// gives for `aim`, `whole` holding each length's chance. Worked out without
-/// building the weights, since the aim is searched for.
-fn expected_whole(shortest: usize, longest: usize, aim: f64, whole: &[f64]) -> f64 {
-    let (mut total, mut leaning) = (0.0, 0.0);
-    for (length, p) in (shortest..=longest).zip(whole) {
-        let near = nearness(length, aim);
-        total += near;
-        leaning += near * p;
-    }
-    let leaning = if total > 0.0 {
-        leaning / total
-    } else {
-        whole
-            .get(nearest_end(whole.len(), longest, aim))
-            .copied()
-            .unwrap_or(0.0)
-    };
-    let even = whole.iter().sum::<f64>() / whole.len().max(1) as f64;
-    VARIETY * even + (1.0 - VARIETY) * leaning
+    aim::lean(&lengths, &whole, target, &LEANING)
 }
 
 #[cfg(test)]
@@ -488,7 +304,7 @@ mod tests {
 
     impl SpanBelief {
         fn faded(mut self) -> Self {
-            self.fade();
+            self.belief.fade();
             self
         }
     }
@@ -627,9 +443,11 @@ mod tests {
         let mut past = SpanBelief::new(5.0);
         past.learn(GROUP_SIZE_MAX as usize + 5, true);
         let mut by_hand = SpanBelief::new(5.0);
-        for (cell, evidence) in by_hand.evidence.iter_mut().enumerate() {
-            *evidence += log_chances(f64::from(GROUP_SIZE_MAX + 5), cell)[0];
-        }
+        by_hand.belief.observe(
+            (0..CELLS).map(|cell| log_chances(f64::from(GROUP_SIZE_MAX + 5), cell)),
+            1.0,
+            0.0,
+        );
         assert_eq!(past, by_hand);
         assert!(past.estimate().mean > SpanBelief::new(5.0).estimate().mean);
     }

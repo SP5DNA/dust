@@ -6,9 +6,11 @@
 
 #![forbid(unsafe_code)]
 
+mod aim;
 mod alignment;
 mod auto_level;
 pub mod band;
+mod belief;
 mod board;
 mod callsign;
 mod heatmap;
@@ -37,6 +39,7 @@ pub use auto_level::{
     AutoLevelChange, AutoLevelCounters, AutoLevelProgress, Completion, CountersKey, CountersUpdate,
     auto_level_progress, complete_session, evaluate_auto_level,
 };
+pub use belief::{Estimate, EstimatePoint};
 pub use board::{
     BOARD_MIN_GROUPS, BoardEntry, FORM_SESSIONS, TimelinePoint, board_modes, board_place,
     per_group, score_board, score_timeline,
@@ -74,8 +77,8 @@ pub use settings::{
     SIDE_TONE_MAX_HZ, SIDE_TONE_MIN_HZ, STATIONS_MAX, STATIONS_MIN, STEEPNESS_MAX_MS,
     STEEPNESS_MIN_MS, SettingsSection, TrainingSettings, VOLUME_MAX, VOLUME_MIN, WPM_MAX, WPM_MIN,
 };
-pub use span::{LengthForecast, SpanEstimate, SpanPoint};
-pub use speed::{SpeedEstimate, SpeedPath, SpeedPoint};
+pub use span::LengthForecast;
+pub use speed::SpeedPath;
 pub use stats::{
     AccuracyPoint, BigramHeatmap, CharacterDiagnostic, ConfusionEntry, GROUP_START_BIGRAM_TOKEN,
     MasteryStatus, MistakeStats, SamplingRow, SessionHistoryRow, accuracy_chart,

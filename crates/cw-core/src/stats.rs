@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 
 use crate::alignment::align_group;
+use crate::belief::EstimatePoint;
 use crate::morse::LCWO_SEQUENCE;
 use crate::pool::compute_char_pool;
 use crate::sampling::{
@@ -12,8 +13,8 @@ use crate::sampling::{
 };
 use crate::session::SessionResult;
 use crate::settings::{CharSetMode, TrainingSettings};
-use crate::span::{LengthForecast, SpanBelief, SpanPoint};
-use crate::speed::{SpeedBelief, SpeedPoint};
+use crate::span::{LengthForecast, SpanBelief};
+use crate::speed::SpeedBelief;
 
 pub const MASTERED_MIN_ATTEMPTS: u32 = 5;
 pub const MASTERED_MIN_ACCURACY: f64 = 0.9;
@@ -393,14 +394,17 @@ pub fn session_history(sessions: &[SessionResult]) -> Vec<SessionHistoryRow> {
 
 /// Your copy span after each session of the character set `settings`
 /// trains, oldest first. Empty for callsigns, which are as long as they are.
-pub fn span_history(settings: &TrainingSettings, sessions: &[SessionResult]) -> Vec<SpanPoint> {
+pub fn span_history(settings: &TrainingSettings, sessions: &[SessionResult]) -> Vec<EstimatePoint> {
     SpanBelief::history(sessions, settings)
 }
 
 /// Your copy speed after each session of the character set `settings`
 /// trains, oldest first: the speed at which you copy the share of characters
 /// their "Aim for" asks, in WPM.
-pub fn speed_history(settings: &TrainingSettings, sessions: &[SessionResult]) -> Vec<SpeedPoint> {
+pub fn speed_history(
+    settings: &TrainingSettings,
+    sessions: &[SessionResult],
+) -> Vec<EstimatePoint> {
     SpeedBelief::history(
         sessions,
         settings,
