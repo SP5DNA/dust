@@ -10,7 +10,8 @@ use cw_core::{
     EXTRA_WORD_SPACE_MIN, Experience, GROUP_PAUSE_MAX_SEC, GROUP_REPEAT_MAX, GROUP_REPEAT_MIN,
     GROUP_SIZE_MAX, GROUP_SIZE_MIN, GROUP_TIMEOUT_MAX_SEC, GroupSizeTarget, KeyerMode,
     NUM_GROUPS_MAX, NUM_GROUPS_MIN, RangeSetting, SIDE_TONE_MAX_HZ, SIDE_TONE_MIN_HZ,
-    SettingsSection, TrainingSettings, VOLUME_MAX, VOLUME_MIN, WPM_MAX, WPM_MIN, adapts_group_size,
+    SettingsSection, SpeedPath, TrainingSettings, VOLUME_MAX, VOLUME_MIN, WPM_MAX, WPM_MIN,
+    adapts_group_size, adapts_speed,
 };
 use dioxus::prelude::*;
 
@@ -198,6 +199,8 @@ struct SessionShape {
     /// Adaptive group size is on and has lengths to choose between: what the
     /// sampler itself goes by.
     adapts: bool,
+    /// Adaptive speed is steering too, so the aim covers characters.
+    speed_adapts: bool,
     target: GroupSizeTarget,
     num_groups: u32,
     group_timeout: f64,
@@ -218,6 +221,7 @@ impl SessionShape {
             one_size: settings.curriculum.min_group_size >= settings.curriculum.max_group_size,
             adaptive: settings.curriculum.adaptive_group_size,
             adapts: adapts_group_size(settings),
+            speed_adapts: adapts_speed(settings),
             target: settings.curriculum.group_size_target,
             num_groups: settings.curriculum.num_groups,
             group_timeout: p.group_timeout,
@@ -231,13 +235,40 @@ impl SessionShape {
     }
 }
 
-/// What a target asks of you, in a sentence.
-fn target_note(target: GroupSizeTarget) -> String {
-    format!(
-        "{} aims for {:.0}% of groups copied whole.",
-        target_label(target),
-        target.success_rate() * 100.0
-    )
+/// What a target asks of you, in a sentence: of the groups copied whole, if
+/// group size adapts; of the characters right, if speed does.
+fn target_note(target: GroupSizeTarget, groups: bool, chars: bool) -> String {
+    let label = target_label(target);
+    let whole = target.success_rate() * 100.0;
+    let right = target.char_rate() * 100.0;
+    match (groups, chars) {
+        (true, true) => format!(
+            "{label} aims for {whole:.0}% of groups copied whole and {right:.0}% of characters right."
+        ),
+        (false, true) => format!("{label} aims for {right:.0}% of characters right."),
+        _ => format!("{label} aims for {whole:.0}% of groups copied whole."),
+    }
+}
+
+/// How hard the adaptive features push: one setting for group size and
+/// speed alike.
+#[component]
+fn AimFor(settings: Signal<TrainingSettings>, target: GroupSizeTarget, note: String) -> Element {
+    rsx! {
+        div { class: "field",
+            span { class: "field-label", "Aim for" }
+            div { class: "segmented",
+                for each in GroupSizeTarget::ALL {
+                    Seg {
+                        label: target_label(each),
+                        active: target == each,
+                        onclick: move |_| settings.write().curriculum.group_size_target = each,
+                    }
+                }
+            }
+            p { class: "muted", style: "margin: 0; font-size: 0.8rem;", "{note}" }
+        }
+    }
 }
 
 #[component]
@@ -325,20 +356,10 @@ fn SessionShapeCard(settings: Signal<TrainingSettings>) -> Element {
                     onchange: move |on| settings.write().curriculum.adaptive_group_size = on,
                 }
                 if s.adapts {
-                    div { class: "field",
-                        span { class: "field-label", "Aim for" }
-                        div { class: "segmented",
-                            for target in GroupSizeTarget::ALL {
-                                Seg {
-                                    label: target_label(target),
-                                    active: s.target == target,
-                                    onclick: move |_| settings.write().curriculum.group_size_target = target,
-                                }
-                            }
-                        }
-                        p { class: "muted", style: "margin: 0; font-size: 0.8rem;",
-                            {target_note(s.target)}
-                        }
+                    AimFor {
+                        settings,
+                        target: s.target,
+                        note: target_note(s.target, true, s.speed_adapts),
                     }
                 }
             }
@@ -401,16 +422,29 @@ struct Speed {
     tied: bool,
     fist_variation: f64,
     extra_word_space: f64,
+    adaptive: bool,
+    /// More than one speed to choose from.
+    room: bool,
+    adapts: bool,
+    /// Adaptive group size shows the aim, for both.
+    length_adapts: bool,
+    target: GroupSizeTarget,
 }
 
 #[component]
 fn SpeedCard(settings: Signal<TrainingSettings>) -> Element {
     let speed = use_memo(move || {
-        let p = &settings.read().playback;
+        let all = settings.read();
+        let p = &all.playback;
         Speed {
             tied: p.link_char_to_effective,
             fist_variation: p.fist_variation,
             extra_word_space: p.extra_word_space_multiplier,
+            adaptive: p.adaptive_speed,
+            room: SpeedPath::of(&all).has_room(),
+            adapts: adapts_speed(&all),
+            length_adapts: adapts_group_size(&all),
+            target: all.curriculum.group_size_target,
         }
     })();
     rsx! {
@@ -441,6 +475,29 @@ fn SpeedCard(settings: Signal<TrainingSettings>) -> Element {
                     max_bound: WPM_MAX,
                     step: 1.0,
                     hint: "Farnsworth: characters stay fast, the gaps between them stretch.",
+                }
+            }
+            Switch {
+                title: "Adapt speed to me",
+                description: if speed.room {
+                    "Within these speeds: faster while you copy the characters, slower when you miss them. Your copy speed is under Stats."
+                } else {
+                    "Give Character speed or Effective speed a range to use this: one speed leaves nothing to adapt."
+                },
+                checked: speed.adaptive,
+                onchange: move |on| settings.write().playback.adaptive_speed = on,
+            }
+            if speed.adapts {
+                if speed.length_adapts {
+                    p { class: "muted", style: "margin: 0; font-size: 0.8rem;",
+                        "{target_note(speed.target, false, true)} Aim for is set under Session shape, for group size and speed together."
+                    }
+                } else {
+                    AimFor {
+                        settings,
+                        target: speed.target,
+                        note: target_note(speed.target, false, true),
+                    }
                 }
             }
             SliderField {

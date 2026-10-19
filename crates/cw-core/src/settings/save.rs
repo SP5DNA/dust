@@ -174,6 +174,19 @@ mod tests {
         assert_eq!(load(json), new);
     }
 
+    /// A save from before adaptive speed has it off; one written since reads
+    /// back what it said.
+    #[test]
+    fn adaptive_speed_is_off_in_a_save_from_before_it() {
+        let old = load(serde_json::json!({ "charWpmMin": 18.0, "charWpmMax": 30.0 }));
+        assert!(!old.playback.adaptive_speed);
+        let mut new = TrainingSettings::default();
+        new.playback.adaptive_speed = true;
+        let json = serde_json::to_value(&new).expect("serialize");
+        assert_eq!(json["adaptiveSpeed"], true);
+        assert_eq!(load(json), new);
+    }
+
     #[test]
     fn a_named_window_wins_over_old_bounds() {
         let settings = load(serde_json::json!({

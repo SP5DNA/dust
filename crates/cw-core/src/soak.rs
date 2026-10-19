@@ -38,6 +38,7 @@ fn wild_settings(rng: &mut SplitMix64) -> TrainingSettings {
     s.curriculum.max_group_size = rng.usize_in(0, 20) as u32;
     s.curriculum.link_group_size = rng.f64() < 0.5;
     s.curriculum.adaptive_group_size = rng.f64() < 0.5;
+    s.playback.adaptive_speed = rng.f64() < 0.5;
     s.curriculum.group_size_target = GroupSizeTarget::ALL[rng.usize_in(0, 2)];
     s.curriculum.char_set_mode = match rng.usize_in(0, 4) {
         0 => CharSetMode::Koch,

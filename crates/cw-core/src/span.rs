@@ -40,7 +40,7 @@ const CELLS: usize = SPAN_POINTS * SPREADS.len();
 const PRIOR_SD: f64 = 3.0;
 /// What a session's evidence is worth once another has followed it: half,
 /// ten sessions on, so the span follows you as you improve.
-const SESSION_FADE: f64 = 0.933_032_991_536_807_4;
+pub(crate) const SESSION_FADE: f64 = 0.933_032_991_536_807_4;
 /// The share of lengths drawn evenly from the whole range, so every length
 /// in it still comes round now and then.
 const VARIETY: f64 = 0.1;
@@ -84,7 +84,7 @@ fn log_chance_table() -> &'static [[f64; 2]] {
 
 /// One index, in proportion to `weights`. A table with no weight in it, or
 /// one that cannot be read, is drawn from evenly.
-fn pick_index(weights: &[f64], rng: &mut impl Rng) -> usize {
+pub(crate) fn pick_index(weights: &[f64], rng: &mut impl Rng) -> usize {
     let total: f64 = weights.iter().sum();
     if !(total.is_finite() && total > 0.0) {
         return rng.usize_in(0, weights.len().saturating_sub(1));

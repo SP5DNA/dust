@@ -1,6 +1,6 @@
 use cw_core::{
-    AccuracyPoint, MasteryStatus, SessionResult, SpanPoint, TrainingSettings, accuracy_chart,
-    adapts_group_size, character_diagnostics, span_history,
+    AccuracyPoint, MasteryStatus, SessionResult, TrainingSettings, accuracy_chart,
+    adapts_group_size, adapts_speed, character_diagnostics, span_history, speed_history,
 };
 use dioxus::prelude::*;
 
@@ -140,19 +140,21 @@ struct SpanChart {
     high: f64,
 }
 
-fn span_chart(points: &[SpanPoint]) -> Option<SpanChart> {
+/// The chart of an estimate over sessions — the copy span, or the copy
+/// speed — from each session's mean and standard deviation.
+fn span_chart(points: &[(f64, f64)]) -> Option<SpanChart> {
     if points.is_empty() {
         return None;
     }
-    let below = |p: &SpanPoint| p.estimate.mean - p.estimate.sd;
-    let above = |p: &SpanPoint| p.estimate.mean + p.estimate.sd;
+    let below = |(mean, sd): &(f64, f64)| mean - sd;
+    let above = |(mean, sd): &(f64, f64)| mean + sd;
     let low = points.iter().map(below).fold(f64::INFINITY, f64::min);
     let high = points.iter().map(above).fold(f64::NEG_INFINITY, f64::max);
     let low = low.floor().max(0.0);
     let high = high.ceil().max(low + 2.0);
-    let y_at = |chars: f64| (CHART_H - (chars - low) / (high - low) * CHART_H).clamp(0.0, CHART_H);
+    let y_at = |value: f64| (CHART_H - (value - low) / (high - low) * CHART_H).clamp(0.0, CHART_H);
 
-    let means: Vec<f64> = points.iter().map(|p| p.estimate.mean).collect();
+    let means: Vec<f64> = points.iter().map(|(mean, _)| *mean).collect();
     let tops: Vec<f64> = points.iter().map(above).collect();
     let bottoms: Vec<f64> = points.iter().map(below).collect();
     let coords = series(&means, y_at);
@@ -184,7 +186,12 @@ const SPAN_SESSIONS_SHOWN: usize = 30;
 fn SpanCard(settings: TrainingSettings, sessions: Vec<SessionResult>) -> Element {
     let points = span_history(&settings, &sessions);
     let shown = &points[points.len().saturating_sub(SPAN_SESSIONS_SHOWN)..];
-    let (Some(first), Some(last), Some(chart)) = (shown.first(), shown.last(), span_chart(shown))
+    let estimates: Vec<(f64, f64)> = shown
+        .iter()
+        .map(|point| (point.estimate.mean, point.estimate.sd))
+        .collect();
+    let (Some(first), Some(last), Some(chart)) =
+        (shown.first(), shown.last(), span_chart(&estimates))
     else {
         return rsx! {};
     };
@@ -394,7 +401,82 @@ fn OverviewTab(settings: TrainingSettings, sessions: Vec<SessionResult>) -> Elem
                         }
                     }
                 }
-                SpanCard { settings, sessions }
+                SpanCard { settings: settings.clone(), sessions: sessions.clone() }
+                CopySpeedCard { settings, sessions }
+            }
+        }
+    }
+}
+
+/// Your copy speed: the speed at which you copy the share of characters
+/// "Aim for" asks, and how that has moved. Nothing before a session of the
+/// character set being trained.
+#[component]
+fn CopySpeedCard(settings: TrainingSettings, sessions: Vec<SessionResult>) -> Element {
+    let points = speed_history(&settings, &sessions);
+    let shown = &points[points.len().saturating_sub(SPAN_SESSIONS_SHOWN)..];
+    let estimates: Vec<(f64, f64)> = shown
+        .iter()
+        .map(|point| (point.estimate.mean, point.estimate.sd))
+        .collect();
+    let (Some(first), Some(last), Some(chart)) =
+        (shown.first(), shown.last(), span_chart(&estimates))
+    else {
+        return rsx! {};
+    };
+    let change = last.estimate.mean - first.estimate.mean;
+    let count = shown.len();
+    let trend = if count == 1 {
+        "after 1 session".to_string()
+    } else if change.abs() < 0.5 {
+        format!("steady over {count} sessions")
+    } else if change > 0.0 {
+        format!("up {change:.0} over {count} sessions")
+    } else {
+        format!("down {:.0} over {count} sessions", -change)
+    };
+    let target = settings.curriculum.group_size_target;
+    let adapting = adapts_speed(&settings);
+    let mode = if adapting {
+        format!("Adapting · {}", target_label(target))
+    } else {
+        "Adaptive speed off".to_string()
+    };
+    rsx! {
+        div { class: "card chart-card",
+            CardHead {
+                icon: IconName::Gauge,
+                title: "Copy speed",
+                note: format!("{:.0} ± {:.0} WPM · {trend}", last.estimate.mean, last.estimate.sd),
+            }
+            svg {
+                class: "sparkline",
+                view_box: "0 0 420 96",
+                path { d: "{chart.band}", fill: "var(--good)", fill_opacity: "0.16", stroke: "none" }
+                polyline {
+                    points: "{chart.line}",
+                    fill: "none",
+                    stroke: "var(--good)",
+                    stroke_width: "2.2",
+                    stroke_linecap: "round",
+                    stroke_linejoin: "round",
+                }
+                for (x, y) in chart.dots.iter() {
+                    circle {
+                        cx: "{x:.1}",
+                        cy: "{y:.1}",
+                        r: "3",
+                        fill: "var(--good)",
+                        stroke: "var(--surface)",
+                        stroke_width: "1.5",
+                    }
+                }
+            }
+            div { class: "row-between",
+                span { class: "tiny", style: "text-transform: none; letter-spacing: 0.02em;",
+                    "{target.char_rate() * 100.0:.0}% of characters right · scale {chart.low:.0}–{chart.high:.0} WPM"
+                }
+                span { class: if adapting { "chip good" } else { "chip" }, "{mode}" }
             }
         }
     }

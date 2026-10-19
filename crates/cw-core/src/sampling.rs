@@ -10,6 +10,7 @@ use crate::rng::{Rng, SplitMix64, weighted_random_pick};
 use crate::session::SessionResult;
 use crate::settings::{CharSetMode, LevelAxis, TrainingSettings};
 use crate::span::SpanBelief;
+use crate::speed::{SpeedBelief, SpeedPath};
 
 pub const CHAR_SAMPLING_PRIOR_ALPHA: f64 = 1.0;
 pub const CHAR_SAMPLING_PRIOR_BETA: f64 = 1.0;
@@ -75,6 +76,7 @@ impl CharSamplingState {
 pub struct Sampler {
     state: CharSamplingState,
     span: SpanBelief,
+    speed: SpeedBelief,
     rng: SplitMix64,
 }
 
@@ -86,6 +88,7 @@ impl Sampler {
         Self {
             state: CharSamplingState::from_history(history, settings),
             span: SpanBelief::for_session(history, settings),
+            speed: SpeedBelief::for_session(history, settings),
             rng: SplitMix64::new(seed),
         }
     }
@@ -106,6 +109,31 @@ impl GroupSource for Sampler {
         self.state.learn(copied);
         self.span.learn_copy(copied);
     }
+
+    fn next_speed(&mut self, settings: &TrainingSettings) -> Option<(f64, f64)> {
+        let path = adaptive_speed_path(settings)?;
+        let (low, high) = path.bounds();
+        let target = settings.curriculum.group_size_target.char_rate();
+        let copy = self.speed.draw_speed(low, high, target, &mut self.rng);
+        Some(path.voice_at(copy))
+    }
+
+    fn learn_speed(&mut self, sent: &str, received: &str, played: (f64, f64)) {
+        self.speed
+            .learn(sent, received, crate::score::copy_speed(played.0, played.1));
+    }
+}
+
+/// Whether `settings` have each group's speed chosen by adaptive speed.
+pub fn adapts_speed(settings: &TrainingSettings) -> bool {
+    adaptive_speed_path(settings).is_some()
+}
+
+/// The line adaptive speed moves along, when it has one: it is switched on,
+/// and the speed settings leave more than one speed to choose from.
+pub(crate) fn adaptive_speed_path(settings: &TrainingSettings) -> Option<SpeedPath> {
+    let path = SpeedPath::of(settings);
+    (settings.playback.adaptive_speed && path.has_room()).then_some(path)
 }
 
 /// The shortest and longest group `settings` asks for. At least one
@@ -1053,5 +1081,250 @@ mod tests {
             struggling < fresh - 1.0,
             "struggling {struggling}, fresh {fresh}"
         );
+    }
+
+    /// A learner for both beliefs at once. Each character is recognised with
+    /// a chance that falls as the speed rises, and the group is held to its
+    /// end with a chance that falls as it grows longer; a group not held is
+    /// lost from a random point on. With `span_falls`, the span shrinks at
+    /// speed as well, with the square root of the speed against 20 WPM.
+    struct Learner {
+        copy: f64,
+        slope: f64,
+        span: f64,
+        spread: f64,
+        span_falls: bool,
+    }
+
+    impl Learner {
+        fn recognises(&self, speed: f64) -> f64 {
+            let x = (0.9_f64 / 0.98 / (1.0 - 0.9 / 0.98)).ln()
+                + (self.copy.ln() - speed.ln()) / self.slope;
+            0.98 / (1.0 + (-x).exp())
+        }
+
+        fn span_at(&self, speed: f64) -> f64 {
+            if self.span_falls {
+                self.span * (20.0 / speed).sqrt()
+            } else {
+                self.span
+            }
+        }
+
+        /// The speed at which they recognise `rate` of characters.
+        fn speed_for(&self, rate: f64) -> f64 {
+            let reference = (0.9_f64 / 0.98 / (1.0 - 0.9 / 0.98)).ln();
+            let x = (rate / 0.98 / (1.0 - rate / 0.98)).ln();
+            (self.copy.ln() - self.slope * (x - reference)).exp()
+        }
+
+        fn answer(&self, sent: &str, speed: f64, rng: &mut SplitMix64) -> String {
+            let length = sent.chars().count();
+            let held = 0.97 / (1.0 + ((length as f64 - self.span_at(speed)) / self.spread).exp());
+            let kept = if rng.f64() < held {
+                length
+            } else {
+                rng.usize_in(0, length.saturating_sub(1))
+            };
+            let recognised = self.recognises(speed);
+            sent.chars()
+                .take(kept)
+                .map(|c| if rng.f64() < recognised { c } else { 'E' })
+                .collect()
+        }
+    }
+
+    /// What a run of both adaptive features made of one learner: over its
+    /// second half, the share of characters right (of those a speed could
+    /// change), of groups copied whole, and the mean speed and length; at
+    /// its end, the speed the belief puts at the target and the span.
+    struct Run {
+        chars_right: f64,
+        whole: f64,
+        speed: f64,
+        length: f64,
+        found_speed: f64,
+        found_span: f64,
+    }
+
+    fn run_both(learner: &Learner, groups: usize, seed: u64) -> Run {
+        run_with(learner, groups, seed, false)
+    }
+
+    /// As [`run_both`], or, `naive`, with the speed learning from whole
+    /// groups the way the span does: a group copied whole all right, any
+    /// other all wrong.
+    fn run_with(learner: &Learner, groups: usize, seed: u64, naive: bool) -> Run {
+        let mut settings = length_settings(true);
+        settings.playback.char_wpm_min = 10.0;
+        settings.playback.char_wpm_max = 50.0;
+        settings.playback.link_char_to_effective = true;
+        settings.playback.adaptive_speed = true;
+        let target = settings.curriculum.group_size_target.char_rate();
+        let mut sampler = Sampler::new(&[], &settings, seed);
+        let mut rng = SplitMix64::new(seed ^ 0xA5A5);
+        let (mut right, mut counted, mut whole, mut speeds, mut lengths) = (0, 0, 0, 0.0, 0);
+        let half = groups / 2;
+        for n in 0..groups {
+            let (sent, _) = sampler.next_group(&settings);
+            let played = sampler.next_speed(&settings).expect("adaptive speed is on");
+            let speed = crate::score::copy_speed(played.0, played.1);
+            let typed = learner.answer(&sent, speed, &mut rng);
+            if n >= half {
+                if let Some((r, c)) = crate::speed::speed_evidence(&sent, &typed) {
+                    right += r;
+                    counted += c;
+                }
+                whole += usize::from(typed == sent);
+                speeds += speed;
+                lengths += sent.chars().count();
+            }
+            sampler.learn(&CopyTally::of(&sent, &typed));
+            if naive {
+                let all_wrong: String = sent.chars().map(|_| '#').collect();
+                let judged = if typed == sent { &sent } else { &all_wrong };
+                sampler.learn_speed(&sent, judged, played);
+            } else {
+                sampler.learn_speed(&sent, &typed, played);
+            }
+        }
+        let counted_groups = (groups - half) as f64;
+        Run {
+            chars_right: f64::from(right) / f64::from(counted.max(1)),
+            whole: whole as f64 / counted_groups,
+            speed: speeds / counted_groups,
+            length: lengths as f64 / counted_groups,
+            found_speed: sampler.speed.estimate(target).mean,
+            found_span: sampler.span.estimate().mean,
+        }
+    }
+
+    fn learners() -> [(&'static str, Learner); 4] {
+        [
+            (
+                "copies 90% at 20, span 5",
+                Learner {
+                    copy: 20.0,
+                    slope: 0.1,
+                    span: 5.0,
+                    spread: 0.7,
+                    span_falls: false,
+                },
+            ),
+            (
+                "copies 90% at 30, span 7",
+                Learner {
+                    copy: 30.0,
+                    slope: 0.12,
+                    span: 7.0,
+                    spread: 1.0,
+                    span_falls: false,
+                },
+            ),
+            (
+                "copies 90% at 40, span 4",
+                Learner {
+                    copy: 40.0,
+                    slope: 0.08,
+                    span: 4.0,
+                    spread: 0.7,
+                    span_falls: false,
+                },
+            ),
+            (
+                "copies 90% at 30, span 7 at 20 WPM, shrinking with speed",
+                Learner {
+                    copy: 30.0,
+                    slope: 0.12,
+                    span: 7.0,
+                    spread: 1.0,
+                    span_falls: true,
+                },
+            ),
+        ]
+    }
+
+    /// Both adaptive features together settle where each was asked to: the
+    /// speed where the characters are copied at the target, the length where
+    /// groups are copied whole about as often as theirs. Neither runs away
+    /// with the other — no shortest groups at the top speed.
+    #[test]
+    fn adaptive_speed_and_length_settle_together() {
+        let target = crate::settings::GroupSizeTarget::Balanced;
+        for (name, learner) in learners() {
+            let run = run_both(&learner, 400, 7);
+            let true_speed = learner.speed_for(target.char_rate());
+            assert!(
+                (0.89..=0.98).contains(&run.chars_right),
+                "{name}: {:.3} of characters right",
+                run.chars_right
+            );
+            assert!(
+                (run.found_speed / true_speed - 1.0).abs() < 0.15,
+                "{name}: found {:.1} WPM for {true_speed:.1}",
+                run.found_speed
+            );
+            assert!(
+                (0.5..=0.9).contains(&run.whole),
+                "{name}: {:.2} copied whole",
+                run.whole
+            );
+            assert!(
+                run.length > 2.2,
+                "{name}: groups shrank to {:.1}",
+                run.length
+            );
+            assert!(
+                (11.0..49.0).contains(&run.speed),
+                "{name}: speed ran to {:.1}",
+                run.speed
+            );
+        }
+    }
+
+    /// The numbers the design note reports. `cargo test -p cw-core
+    /// adaptive_speed_simulation -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn adaptive_speed_simulation() {
+        let target = crate::settings::GroupSizeTarget::Balanced;
+        println!(
+            "| Learner | Speed for 94% | Found | Sent at | Characters right | Span found | Length | Copied whole |"
+        );
+        println!("| --- | --- | --- | --- | --- | --- | --- | --- |");
+        for (name, learner) in learners() {
+            for seed in [7, 8, 9] {
+                let run = run_both(&learner, 400, seed);
+                println!(
+                    "| {name} | {:.1} | {:.1} | {:.1} | {:.1}% | {:.1} | {:.1} | {:.0}% |",
+                    learner.speed_for(target.char_rate()),
+                    run.found_speed,
+                    run.speed,
+                    run.chars_right * 100.0,
+                    run.found_span,
+                    run.length,
+                    run.whole * 100.0
+                );
+            }
+        }
+        println!();
+        println!("Naive: the speed learning from whole groups too.");
+        println!(
+            "| Learner | Speed for 94% | Sent at | Characters right | Length | Copied whole |"
+        );
+        println!("| --- | --- | --- | --- | --- | --- |");
+        for (name, learner) in learners() {
+            for seed in [7, 8, 9] {
+                let run = run_with(&learner, 400, seed, true);
+                println!(
+                    "| {name} | {:.1} | {:.1} | {:.1}% | {:.1} | {:.0}% |",
+                    learner.speed_for(target.char_rate()),
+                    run.speed,
+                    run.chars_right * 100.0,
+                    run.length,
+                    run.whole * 100.0
+                );
+            }
+        }
     }
 }

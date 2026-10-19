@@ -1,0 +1,795 @@
+//! How fast you can copy: a Bayesian estimate of your copy speed, and each
+//! group's speed drawn near its edge.
+//!
+//! It is the copy span's twin ([`crate::span`]), over speed rather than
+//! length, and it learns from characters rather than whole groups. At a speed
+//! `v` a character is copied right with probability
+//!
+//! ```text
+//! P(right | v) = (1 − λ) · σ(ℓ + (ln V − ln v) / w)
+//! ```
+//!
+//! `V` is your copy speed, the speed at which you copy nine characters in
+//! ten (`ℓ` is what puts it there); `w` is how sharply accuracy falls away
+//! as the speed rises, on a log scale, so ten percent faster means the same
+//! at 15 WPM as at 40; `λ` is a small lapse rate. The speed is the one the
+//! score uses ([`crate::score::copy_speed`]): with Farnsworth spacing, the
+//! character speed and the spacing's pace together. The posterior over
+//! `(V, w)` is held exactly, as log weights on a fixed grid.
+//!
+//! Each group counts once, whatever its length: its characters are not
+//! independent of each other — a send too fast loses several together — so
+//! a long group must not weigh like many short ones. It counts as the share
+//! of its characters copied right, and only the characters a faster or slower
+//! send could have changed: what was lost off the end of a group, after the
+//! last character typed, is the group's length to answer for, which the copy
+//! span learns from. So the span and the speed learn from different
+//! evidence, and both can steer at once without pulling against each other.
+//!
+//! Each group's speed is drawn the way the span draws a length: one `(V, w)`
+//! is drawn from the posterior, and the speeds whose accuracy comes closest
+//! to the target are favoured, with a share drawn evenly from the whole
+//! range so the slope keeps being learned. The speed moves along the line
+//! from the slowest corner of the speed settings to the fastest: character
+//! speed and spacing together, so a fixed character speed with a range of
+//! spacing adapts the spacing alone, the way Farnsworth training does.
+
+use std::sync::OnceLock;
+
+use crate::alignment::align_group;
+use crate::rng::Rng;
+use crate::score::copy_speed;
+use crate::session::SessionResult;
+use crate::settings::TrainingSettings;
+use crate::span::{SESSION_FADE, pick_index};
+
+/// The chance of fumbling a character however slowly it was sent.
+const LAPSE: f64 = 0.02;
+/// The share of characters copied right at the speed the grid names.
+const REFERENCE_RATE: f64 = 0.9;
+/// The copy speeds the grid holds: 4 WPM up to about 80, two percent apart.
+const SPEED_FROM: f64 = 4.0;
+const LOG_STEP: f64 = 0.02;
+const SPEED_POINTS: usize = 151;
+/// How sharply accuracy falls away as the speed rises, in log speed a step
+/// of the logit.
+const SLOPES: [f64; 5] = [0.04, 0.08, 0.12, 0.2, 0.35];
+const CELLS: usize = SPEED_POINTS * SLOPES.len();
+/// How far the first guess at a copy speed may be off, in log speed: half
+/// as fast again, or two thirds as fast.
+const PRIOR_SD: f64 = 0.4;
+/// The share of speeds drawn from a wider spread around the aim, so the
+/// slope keeps being learned. Not from the whole range: a 48 WPM group in a
+/// run at 18 teaches little and costs the run.
+const VARIETY: f64 = 0.15;
+/// How far, in log speed, a speed can be from the aim and still be favoured.
+const AIM_WIDTH: f64 = 0.05;
+/// The wider spread the variety is drawn from, in log speed: about a fifth
+/// either way.
+const VARIETY_WIDTH: f64 = 0.2;
+/// How far past either end of the range the aim may go, in log speed.
+const AIM_REACH: f64 = 0.15;
+/// How far apart, in log speed, the speeds the draw chooses from are.
+const CANDIDATE_STEP: f64 = 0.01;
+
+fn ln_speed_of(cell: usize) -> f64 {
+    SPEED_FROM.ln() + (cell / SLOPES.len()) as f64 * LOG_STEP
+}
+
+fn slope_of(cell: usize) -> f64 {
+    SLOPES[cell % SLOPES.len()]
+}
+
+fn logit(p: f64) -> f64 {
+    (p / (1.0 - p)).ln()
+}
+
+/// What puts the copy speed at [`REFERENCE_RATE`]: the curve's logit there.
+fn reference_logit() -> f64 {
+    logit(REFERENCE_RATE / (1.0 - LAPSE))
+}
+
+/// The chance of copying a character right at `ln_speed`, for one cell.
+fn p_right(ln_speed: f64, cell: usize) -> f64 {
+    let x = reference_logit() + (ln_speed_of(cell) - ln_speed) / slope_of(cell);
+    (1.0 - LAPSE) / (1.0 + (-x).exp())
+}
+
+/// The speed, in log WPM, at which one cell copies `rate` of characters.
+fn ln_speed_at(rate: f64, cell: usize) -> f64 {
+    let rate = rate.clamp(0.01, (1.0 - LAPSE) * 0.999);
+    ln_speed_of(cell) - slope_of(cell) * (logit(rate / (1.0 - LAPSE)) - reference_logit())
+}
+
+/// The grid point nearest a speed, for the table: speeds past either end of
+/// the grid count as its end.
+fn speed_bin(ln_speed: f64) -> usize {
+    let bin = ((ln_speed - SPEED_FROM.ln()) / LOG_STEP).round();
+    if bin.is_finite() {
+        (bin.max(0.0) as usize).min(SPEED_POINTS - 1)
+    } else {
+        0
+    }
+}
+
+/// `ln P(right)` and `ln P(wrong)` at every grid speed for every cell,
+/// worked out once, so that replaying a history is additions rather than
+/// logarithms.
+fn log_chance_table() -> &'static [[f64; 2]] {
+    static TABLE: OnceLock<Vec<[f64; 2]>> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        (0..SPEED_POINTS)
+            .flat_map(|bin| {
+                let ln_speed = SPEED_FROM.ln() + bin as f64 * LOG_STEP;
+                (0..CELLS).map(move |cell| {
+                    let p = p_right(ln_speed, cell).clamp(1e-12, 1.0 - 1e-12);
+                    [p.ln(), (1.0 - p).ln()]
+                })
+            })
+            .collect()
+    })
+}
+
+/// What a group says about speed: of the characters a faster or slower send
+/// could have changed, how many were copied right, and how many count.
+///
+/// Characters lost off the end of a group, after the last one typed, are its
+/// length's to answer for: you heard them, and the group was longer than you
+/// could hold. A group with nothing typed says nothing about speed at all —
+/// a send too fast to follow and a group too long to hold both leave a blank
+/// — so it is the length's alone; a send that really is too fast shows in
+/// what does get typed. Characters typed that were never sent count against
+/// the speed. Nothing sent, nothing to count.
+pub fn speed_evidence(sent: &str, received: &str) -> Option<(u32, u32)> {
+    if sent.is_empty() || received.trim().is_empty() {
+        return None;
+    }
+    // Of the readings that cost the fewest edits, the one that loses the
+    // most off the end: "KE" for "KMRSU" is one wrong and three lost, not
+    // three dropped inside and the last one wrong.
+    let sent: Vec<char> = sent.chars().map(|c| c.to_ascii_uppercase()).collect();
+    let received: Vec<char> = received.chars().map(|c| c.to_ascii_uppercase()).collect();
+    let fewest = edits(&sent, &received);
+    let lost = (0..sent.len())
+        .rev()
+        .find(|lost| edits(&sent[..sent.len() - lost], &received) + lost == fewest)
+        .unwrap_or(0);
+    let held: String = sent[..sent.len() - lost].iter().collect();
+    let typed: String = received.iter().collect();
+    let pairs = align_group(&held, &typed);
+    let right = pairs.iter().filter(|pair| pair.matched).count() as u32;
+    let counted = pairs.len() as u32;
+    (counted > 0).then_some((right, counted))
+}
+
+/// The fewest single-character edits that turn `from` into `to`.
+fn edits(from: &[char], to: &[char]) -> usize {
+    let mut row: Vec<usize> = (0..=to.len()).collect();
+    for (i, a) in from.iter().enumerate() {
+        let mut diagonal = row[0];
+        row[0] = i + 1;
+        for (j, b) in to.iter().enumerate() {
+            let replace = diagonal + usize::from(a != b);
+            diagonal = row[j + 1];
+            row[j + 1] = replace.min(row[j] + 1).min(diagonal + 1);
+        }
+    }
+    row[to.len()]
+}
+
+/// The speed settings, seen as one line from the slowest corner to the
+/// fastest: the character speed and the spacing's pace each move across
+/// their range together, on a log scale.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SpeedPath {
+    char_wpm: (f64, f64),
+    effective_wpm: (f64, f64),
+}
+
+impl SpeedPath {
+    /// The line `settings` allow. The spacing is never faster than the
+    /// characters, and tied to them it is the characters' own speed.
+    pub fn of(settings: &TrainingSettings) -> Self {
+        let p = &settings.playback;
+        let char_wpm = (
+            p.char_wpm_min.max(1.0),
+            p.char_wpm_max.max(p.char_wpm_min).max(1.0),
+        );
+        let effective_wpm = if p.link_char_to_effective {
+            char_wpm
+        } else {
+            (
+                p.effective_wpm_min.max(1.0).min(char_wpm.0),
+                p.effective_wpm_max
+                    .max(p.effective_wpm_min)
+                    .max(1.0)
+                    .min(char_wpm.1),
+            )
+        };
+        Self {
+            char_wpm,
+            effective_wpm,
+        }
+    }
+
+    /// The slowest and fastest copy speed along it.
+    pub fn bounds(&self) -> (f64, f64) {
+        (
+            copy_speed(self.char_wpm.0, self.effective_wpm.0),
+            copy_speed(self.char_wpm.1, self.effective_wpm.1),
+        )
+    }
+
+    /// Whether there is more than one speed on it.
+    pub fn has_room(&self) -> bool {
+        let (low, high) = self.bounds();
+        high > low * (1.0 + 1e-6)
+    }
+
+    /// The character speed and the spacing's pace that send at `copy`,
+    /// kept on the line.
+    pub fn voice_at(&self, copy: f64) -> (f64, f64) {
+        let (low, high) = self.bounds();
+        if !self.has_room() || !copy.is_finite() {
+            return (self.char_wpm.0, self.effective_wpm.0);
+        }
+        let along = ((copy.ln() - low.ln()) / (high.ln() - low.ln())).clamp(0.0, 1.0);
+        let between = |(from, to): (f64, f64)| (from.ln() + along * (to.ln() - from.ln())).exp();
+        let char_wpm = between(self.char_wpm);
+        (char_wpm, between(self.effective_wpm).min(char_wpm))
+    }
+}
+
+/// The estimate of the copy speed at some accuracy: its posterior mean and
+/// standard deviation, in WPM.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SpeedEstimate {
+    pub mean: f64,
+    pub sd: f64,
+}
+
+/// The copy speed after one session of the history.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SpeedPoint {
+    pub timestamp: u64,
+    pub estimate: SpeedEstimate,
+}
+
+/// What the history and this session say about your copy speed.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SpeedBelief {
+    /// Log prior, one per (speed, slope) cell.
+    prior: Vec<f64>,
+    /// Log likelihood of everything observed, faded by age.
+    evidence: Vec<f64>,
+}
+
+impl SpeedBelief {
+    /// A belief with nothing learned yet, its first guess at the copy speed
+    /// being `centre` WPM.
+    pub fn new(centre: f64) -> Self {
+        let centre = centre.max(1.0).ln();
+        let prior = (0..CELLS)
+            .map(|cell| -0.5 * ((ln_speed_of(cell) - centre) / PRIOR_SD).powi(2))
+            .collect();
+        Self {
+            prior,
+            evidence: vec![0.0; CELLS],
+        }
+    }
+
+    /// The belief the history leaves for `settings`, its first guess the
+    /// middle of the speeds they allow.
+    pub fn from_history(history: &[SessionResult], settings: &TrainingSettings) -> Self {
+        Self::replay(history, settings, |_, _| {})
+    }
+
+    /// The belief a new session starts from: the history's, all of it one
+    /// session older.
+    pub fn for_session(history: &[SessionResult], settings: &TrainingSettings) -> Self {
+        let mut belief = Self::from_history(history, settings);
+        belief.fade();
+        belief
+    }
+
+    /// The copy speed at `rate` of characters right after each session of
+    /// the history that counts towards it, oldest first.
+    pub fn history(
+        history: &[SessionResult],
+        settings: &TrainingSettings,
+        rate: f64,
+    ) -> Vec<SpeedPoint> {
+        let mut points = Vec::new();
+        Self::replay(history, settings, |session, belief| {
+            points.push(SpeedPoint {
+                timestamp: session.timestamp,
+                estimate: belief.estimate(rate),
+            });
+        });
+        points
+    }
+
+    /// Learn from the history in the order it was practised, telling `after`
+    /// where the belief stands after each session. Only sessions of the
+    /// character set `settings` trains count: a callsign at 30 WPM is not a
+    /// two-letter Koch group at 30 WPM.
+    fn replay(
+        history: &[SessionResult],
+        settings: &TrainingSettings,
+        mut after: impl FnMut(&SessionResult, &Self),
+    ) -> Self {
+        let (low, high) = SpeedPath::of(settings).bounds();
+        let mut belief = Self::new((low * high).sqrt());
+        let mode = settings.curriculum.char_set_mode;
+        let mut sessions: Vec<&SessionResult> = history
+            .iter()
+            .filter(|session| session.char_set_mode == mode && !session.groups.is_empty())
+            .collect();
+        sessions.sort_by_key(|session| session.timestamp);
+        for session in sessions {
+            belief.fade();
+            // Counted per speed first: one update for each speed a session
+            // sent at, rather than one for each group.
+            let mut tally: Vec<(usize, f64, f64)> = Vec::new();
+            for (index, group) in session.groups.iter().enumerate() {
+                let timing = session.group_timings.get(index);
+                let char_wpm = timing
+                    .and_then(|timing| timing.char_wpm)
+                    .unwrap_or(session.char_wpm);
+                let effective_wpm = timing
+                    .and_then(|timing| timing.effective_wpm)
+                    .unwrap_or(session.effective_wpm);
+                let Some((right, counted)) = speed_evidence(&group.sent, &group.received) else {
+                    continue;
+                };
+                let bin = speed_bin(copy_speed(char_wpm, effective_wpm).ln());
+                let share = f64::from(right) / f64::from(counted);
+                match tally.iter_mut().find(|(seen, _, _)| *seen == bin) {
+                    Some((_, hits, misses)) => {
+                        *hits += share;
+                        *misses += 1.0 - share;
+                    }
+                    None => tally.push((bin, share, 1.0 - share)),
+                }
+            }
+            for (bin, hits, misses) in tally {
+                belief.observe(bin, hits, misses);
+            }
+            after(session, &belief);
+        }
+        belief
+    }
+
+    /// One more session has passed: everything learned so far counts for a
+    /// little less.
+    fn fade(&mut self) {
+        for evidence in &mut self.evidence {
+            *evidence *= SESSION_FADE;
+        }
+    }
+
+    /// Groups sent at grid speed `bin`: `hits` and `misses` are their shares
+    /// of characters right and wrong, added up.
+    fn observe(&mut self, bin: usize, hits: f64, misses: f64) {
+        if hits + misses <= 0.0 {
+            return;
+        }
+        let Some(row) = log_chance_table().get(bin * CELLS..(bin + 1) * CELLS) else {
+            return;
+        };
+        for (evidence, [right, wrong]) in self.evidence.iter_mut().zip(row) {
+            *evidence += hits * right + misses * wrong;
+        }
+    }
+
+    /// Learn from one group sent at `copy` WPM: what was sent, and what came
+    /// back.
+    pub fn learn(&mut self, sent: &str, received: &str, copy: f64) {
+        if let Some((right, counted)) = speed_evidence(sent, received) {
+            let share = f64::from(right) / f64::from(counted);
+            self.observe(speed_bin(copy.max(1.0).ln()), share, 1.0 - share);
+        }
+    }
+
+    /// The posterior, one probability per cell.
+    fn posterior(&self) -> Vec<f64> {
+        let log: Vec<f64> = self
+            .prior
+            .iter()
+            .zip(&self.evidence)
+            .map(|(prior, evidence)| prior + evidence)
+            .collect();
+        let top = log.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let mut weights: Vec<f64> = log.iter().map(|value| (value - top).exp()).collect();
+        let total: f64 = weights.iter().sum();
+        if total.is_finite() && total > 0.0 {
+            for weight in &mut weights {
+                *weight /= total;
+            }
+        } else {
+            weights = vec![1.0 / CELLS as f64; CELLS];
+        }
+        weights
+    }
+
+    /// The speed at which `rate` of characters are copied right.
+    pub fn estimate(&self, rate: f64) -> SpeedEstimate {
+        let posterior = self.posterior();
+        let speeds: Vec<f64> = (0..CELLS)
+            .map(|cell| ln_speed_at(rate, cell).exp())
+            .collect();
+        let mean: f64 = posterior.iter().zip(&speeds).map(|(p, v)| p * v).sum();
+        let variance: f64 = posterior
+            .iter()
+            .zip(&speeds)
+            .map(|(p, v)| p * (v - mean).powi(2))
+            .sum();
+        SpeedEstimate {
+            mean,
+            sd: variance.max(0.0).sqrt(),
+        }
+    }
+
+    /// The next group's copy speed, between `low` and `high` WPM, aiming for
+    /// `target` of characters right.
+    pub fn draw_speed(&self, low: f64, high: f64, target: f64, rng: &mut impl Rng) -> f64 {
+        let (low, high) = (low.min(high).max(1.0), high.max(low).max(1.0));
+        let candidates = candidates(low, high);
+        if candidates.len() < 2 {
+            return low;
+        }
+        let cell = pick_index(&self.posterior(), rng);
+        let weights = speed_weights(&candidates, target, cell);
+        candidates
+            .get(pick_index(&weights, rng))
+            .map_or(low, |ln_speed| ln_speed.exp().clamp(low, high))
+    }
+}
+
+/// The speeds the draw chooses from, in log WPM: from `low` to `high`, a
+/// percent apart, both ends among them.
+fn candidates(low: f64, high: f64) -> Vec<f64> {
+    let (from, to) = (low.ln(), high.ln());
+    let width = to - from;
+    if width.is_nan() || width <= 1e-9 {
+        return vec![from];
+    }
+    let steps = ((to - from) / CANDIDATE_STEP).ceil().max(1.0) as usize;
+    (0..=steps)
+        .map(|step| from + (to - from) * step as f64 / steps as f64)
+        .collect()
+}
+
+/// How strongly each candidate speed is favoured for one cell of the
+/// posterior: leaning towards an aim, set so that over the speeds drawn
+/// `target` of characters are copied right, with a share spread evenly over
+/// them all. A range that is all too easy leans on its fastest speeds, and
+/// one that is all too hard on its slowest.
+fn speed_weights(candidates: &[f64], target: f64, cell: usize) -> Vec<f64> {
+    let right: Vec<f64> = candidates.iter().map(|v| p_right(*v, cell)).collect();
+    let (Some(first), Some(last)) = (candidates.first(), candidates.last()) else {
+        return Vec::new();
+    };
+    let expected = |aim: f64| expected_right(candidates, aim, &right);
+    let (mut slow, mut fast) = (first - AIM_REACH, last + AIM_REACH);
+    let aim = if expected(fast) >= target {
+        fast
+    } else if expected(slow) <= target {
+        slow
+    } else {
+        // Aiming faster only ever copies less, so halve towards it.
+        for _ in 0..30 {
+            let middle = (slow + fast) / 2.0;
+            if expected(middle) > target {
+                slow = middle;
+            } else {
+                fast = middle;
+            }
+        }
+        (slow + fast) / 2.0
+    };
+    weights_around(candidates, aim)
+}
+
+fn nearness(ln_speed: f64, aim: f64, width: f64) -> f64 {
+    let off = ln_speed - aim;
+    (-off * off / (2.0 * width * width)).exp()
+}
+
+/// The candidates leaning towards `aim`, a share of them from a wider
+/// spread around it. Should every nearness underflow, the end nearest the
+/// aim takes all of it.
+fn weights_around(candidates: &[f64], aim: f64) -> Vec<f64> {
+    let end = if candidates.last().is_some_and(|last| aim > *last) {
+        candidates.len().saturating_sub(1)
+    } else {
+        0
+    };
+    let shared = |width: f64| -> Vec<f64> {
+        let near: Vec<f64> = candidates
+            .iter()
+            .map(|v| nearness(*v, aim, width))
+            .collect();
+        let total: f64 = near.iter().sum();
+        near.iter()
+            .enumerate()
+            .map(|(index, weight)| {
+                if total > 0.0 {
+                    weight / total
+                } else {
+                    f64::from(u8::from(index == end))
+                }
+            })
+            .collect()
+    };
+    let (close, wide) = (shared(AIM_WIDTH), shared(VARIETY_WIDTH));
+    close
+        .iter()
+        .zip(&wide)
+        .map(|(close, wide)| (1.0 - VARIETY) * close + VARIETY * wide)
+        .collect()
+}
+
+/// How often a character is copied right over the speeds
+/// [`weights_around`] gives for `aim`, `right` holding each candidate's
+/// chance.
+fn expected_right(candidates: &[f64], aim: f64, right: &[f64]) -> f64 {
+    let weights = weights_around(candidates, aim);
+    weights.iter().zip(right).map(|(w, p)| w * p).sum()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rng::SplitMix64;
+    use crate::session::{GroupResult, SessionTiming};
+    use crate::settings::CharSetMode;
+
+    /// A learner whose copy speed is `copy` WPM with slope `slope`: copies
+    /// each character with the model's own chance.
+    fn learner_right(copy: f64, slope: f64, speed: f64) -> f64 {
+        let x = reference_logit() + (copy.ln() - speed.ln()) / slope;
+        (1.0 - LAPSE) / (1.0 + (-x).exp())
+    }
+
+    /// Five characters sent at `speed`, copied by that learner.
+    fn copy_group(copy: f64, slope: f64, speed: f64, rng: &mut SplitMix64) -> (String, String) {
+        let sent = "KMRSU".to_string();
+        let received: String = sent
+            .chars()
+            .map(|c| {
+                if rng.f64() < learner_right(copy, slope, speed) {
+                    c
+                } else {
+                    'E'
+                }
+            })
+            .collect();
+        (sent, received)
+    }
+
+    fn settings(low: f64, high: f64) -> TrainingSettings {
+        let mut settings = TrainingSettings::default();
+        settings.playback.char_wpm_min = low;
+        settings.playback.char_wpm_max = high;
+        settings.playback.link_char_to_effective = true;
+        settings.curriculum.char_set_mode = CharSetMode::Koch;
+        settings
+    }
+
+    #[test]
+    fn with_nothing_learned_the_guess_is_the_middle_of_the_range() {
+        let belief = SpeedBelief::from_history(&[], &settings(16.0, 36.0));
+        // The middle on a log scale, at the reference accuracy.
+        let estimate = belief.estimate(REFERENCE_RATE);
+        assert!((estimate.mean - 24.0).abs() < 3.0, "{estimate:?}");
+        assert!(
+            estimate.sd > 5.0,
+            "a first guess is a wide one: {estimate:?}"
+        );
+    }
+
+    #[test]
+    fn clean_copy_raises_the_speed_and_misses_lower_it() {
+        let start = SpeedBelief::new(20.0);
+        let mut clean = start.clone();
+        let mut sloppy = start.clone();
+        for _ in 0..10 {
+            clean.learn("KMRSU", "KMRSU", 24.0);
+            sloppy.learn("KMRSU", "KXRXU", 18.0);
+        }
+        let at = |belief: &SpeedBelief| belief.estimate(REFERENCE_RATE).mean;
+        assert!(at(&clean) > at(&start), "{} vs {}", at(&clean), at(&start));
+        assert!(
+            at(&sloppy) < at(&start),
+            "{} vs {}",
+            at(&sloppy),
+            at(&start)
+        );
+    }
+
+    /// What was lost off the end is the group's length to answer for, not
+    /// its speed's; what was misheard inside it, the speed's.
+    #[test]
+    fn a_group_cut_short_says_nothing_against_the_speed() {
+        assert_eq!(speed_evidence("KMRSU", "KMRSU"), Some((5, 5)));
+        assert_eq!(speed_evidence("KMRSU", "KMR"), Some((3, 3)), "lost the end");
+        assert_eq!(
+            speed_evidence("KMRSU", "KXRSU"),
+            Some((4, 5)),
+            "misheard one"
+        );
+        assert_eq!(
+            speed_evidence("KMRSU", "KRSU"),
+            Some((4, 5)),
+            "dropped one inside"
+        );
+        assert_eq!(speed_evidence("KMRSU", "KMRSUE"), Some((5, 6)), "added one");
+        assert_eq!(
+            speed_evidence("KMRSU", "KE"),
+            Some((1, 2)),
+            "lost the end, one wrong"
+        );
+        assert_eq!(
+            speed_evidence("kmrsu", "KMR"),
+            Some((3, 3)),
+            "case is no error"
+        );
+        assert_eq!(edits(&['K', 'M'], &['K', 'E']), 1);
+        assert_eq!(speed_evidence("KMRSU", ""), None, "a blank could be either");
+        assert_eq!(speed_evidence("", "K"), None);
+        // A prefix copied clean raises the speed, never lowers it.
+        let start = SpeedBelief::new(20.0);
+        let mut cut = start.clone();
+        cut.learn("KMRSUAB", "KMR", 22.0);
+        assert!(cut.estimate(REFERENCE_RATE).mean >= start.estimate(REFERENCE_RATE).mean);
+    }
+
+    /// A simulated learner is found, and copies near the target at the
+    /// speeds drawn for them.
+    #[test]
+    fn a_simulated_learner_is_found_and_copies_near_the_target() {
+        let (copy, slope, target) = (26.0, 0.12, 0.94);
+        let mut belief = SpeedBelief::new(18.0);
+        let mut rng = SplitMix64::new(11);
+        let (mut right, mut sent) = (0usize, 0usize);
+        for n in 0..300 {
+            let speed = belief.draw_speed(10.0, 50.0, target, &mut rng);
+            let (group, copied) = copy_group(copy, slope, speed, &mut rng);
+            if n >= 150 {
+                right += group
+                    .chars()
+                    .zip(copied.chars())
+                    .filter(|(a, b)| a == b)
+                    .count();
+                sent += group.chars().count();
+            }
+            belief.learn(&group, &copied, speed);
+        }
+        let found = belief.estimate(REFERENCE_RATE).mean;
+        assert!((found - copy).abs() < 3.0, "found {found:.1} for {copy}");
+        let rate = right as f64 / sent as f64;
+        assert!(
+            (0.90..=0.97).contains(&rate),
+            "copied {rate:.3} for {target}"
+        );
+    }
+
+    /// Too easy a range leans on its fastest speeds; too hard, its slowest.
+    #[test]
+    fn a_range_too_easy_or_too_hard_leans_on_the_right_end() {
+        let mut fast_learner = SpeedBelief::new(40.0);
+        let mut slow_learner = SpeedBelief::new(10.0);
+        for _ in 0..40 {
+            fast_learner.learn("KMRSU", "KMRSU", 40.0);
+            slow_learner.learn("KMRSU", "KXXSU", 12.0);
+        }
+        let mut rng = SplitMix64::new(3);
+        let mean = |belief: &SpeedBelief, rng: &mut SplitMix64| {
+            (0..400)
+                .map(|_| belief.draw_speed(15.0, 25.0, 0.94, rng))
+                .sum::<f64>()
+                / 400.0
+        };
+        assert!(mean(&fast_learner, &mut rng) > 23.5);
+        assert!(mean(&slow_learner, &mut rng) < 16.5);
+    }
+
+    #[test]
+    fn speeds_stay_inside_the_range_whatever_the_generator_does() {
+        struct Stuck(f64);
+        impl Rng for Stuck {
+            fn f64(&mut self) -> f64 {
+                self.0
+            }
+        }
+        let belief = SpeedBelief::new(20.0);
+        for stuck in [0.0, 0.999_999] {
+            let speed = belief.draw_speed(18.0, 25.0, 0.94, &mut Stuck(stuck));
+            assert!((18.0..=25.0 + 1e-9).contains(&speed), "{speed}");
+        }
+        // One speed is all there is.
+        assert_eq!(belief.draw_speed(20.0, 20.0, 0.94, &mut Stuck(0.5)), 20.0);
+    }
+
+    /// The line runs from the slowest corner of the settings to the fastest:
+    /// with a fixed character speed only the spacing moves.
+    #[test]
+    fn the_speed_settings_are_one_line_from_slowest_to_fastest() {
+        let mut farnsworth = settings(20.0, 20.0);
+        farnsworth.playback.link_char_to_effective = false;
+        farnsworth.playback.effective_wpm_min = 8.0;
+        farnsworth.playback.effective_wpm_max = 15.0;
+        let path = SpeedPath::of(&farnsworth);
+        let (low, high) = path.bounds();
+        assert!((low - copy_speed(20.0, 8.0)).abs() < 1e-9);
+        assert!((high - copy_speed(20.0, 15.0)).abs() < 1e-9);
+        let (char_wpm, effective_wpm) = path.voice_at((low * high).sqrt());
+        assert!((char_wpm - 20.0).abs() < 1e-9, "the characters stay put");
+        assert!(effective_wpm > 8.0 && effective_wpm < 15.0);
+        assert!((copy_speed(char_wpm, effective_wpm) - (low * high).sqrt()).abs() < 1e-6);
+
+        let tied = SpeedPath::of(&settings(15.0, 30.0));
+        let near =
+            |(a, b): (f64, f64), (c, d): (f64, f64)| (a - c).abs() < 1e-9 && (b - d).abs() < 1e-9;
+        assert!(near(tied.voice_at(22.0), (22.0, 22.0)));
+        assert!(near(tied.voice_at(99.0), (30.0, 30.0)), "kept on the line");
+        assert!(!SpeedPath::of(&settings(20.0, 20.0)).has_room());
+    }
+
+    fn stored(timestamp: u64, speed: f64, received: &str) -> SessionResult {
+        SessionResult {
+            timestamp,
+            char_set_mode: CharSetMode::Koch,
+            groups: vec![GroupResult {
+                sent: "KMRSU".into(),
+                received: received.into(),
+                correct: received == "KMRSU",
+            }],
+            group_timings: vec![SessionTiming {
+                time_to_complete_ms: 500.0,
+                char_wpm: Some(speed),
+                effective_wpm: Some(speed),
+                sends: 1,
+            }],
+            ..SessionResult::empty_for_test()
+        }
+    }
+
+    #[test]
+    fn the_history_is_learned_oldest_first_and_older_sessions_count_for_less() {
+        let settings = settings(15.0, 40.0);
+        // Clean copy at 30 recently, misses at 30 long ago: it should lean
+        // towards copying at 30.
+        let recent_clean = [stored(2, 30.0, "KMRSU"), stored(1, 30.0, "KXXXU")];
+        let recent_miss = [stored(1, 30.0, "KMRSU"), stored(2, 30.0, "KXXXU")];
+        let a = SpeedBelief::from_history(&recent_clean, &settings).estimate(REFERENCE_RATE);
+        let b = SpeedBelief::from_history(&recent_miss, &settings).estimate(REFERENCE_RATE);
+        assert!(a.mean > b.mean, "{a:?} vs {b:?}");
+        assert_eq!(
+            SpeedBelief::history(&recent_clean, &settings, REFERENCE_RATE).len(),
+            2
+        );
+    }
+
+    #[test]
+    fn only_sessions_of_the_set_being_trained_count() {
+        let settings = settings(15.0, 40.0);
+        let mut calls = stored(1, 35.0, "KMRSU");
+        calls.char_set_mode = CharSetMode::Callsign;
+        let belief = SpeedBelief::from_history(&[calls], &settings);
+        assert_eq!(belief, SpeedBelief::from_history(&[], &settings));
+    }
+
+    /// A higher accuracy is copied at a lower speed.
+    #[test]
+    fn a_stricter_aim_is_a_slower_speed() {
+        let mut belief = SpeedBelief::new(25.0);
+        for _ in 0..20 {
+            belief.learn("KMRSU", "KMRSU", 25.0);
+        }
+        let comfortable = belief.estimate(0.97).mean;
+        let stretch = belief.estimate(0.90).mean;
+        assert!(comfortable < stretch, "{comfortable} vs {stretch}");
+    }
+}

@@ -195,7 +195,10 @@ These were settled with the proposed defaults and can be revisited:
 1. **Targets:** 85 / 70 / 50% of groups copied whole, with Balanced as the
    default.
 2. **Speed:** one span for all speeds, with older sessions fading. A span per
-   speed would need more data before it is trustworthy.
+   speed would need more data before it is trustworthy. Adaptive speed
+   ([adaptive-speed.md](adaptive-speed.md)) moves the speed alongside, and
+   learns from characters rather than whole groups, so the two do not pull
+   against each other.
 3. **Auto level:** left as it was. Adaptive length keeps whole-group success
    near the target, which can make level-ups come a little sooner. A new
    character then shortens the groups until things settle.

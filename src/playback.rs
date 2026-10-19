@@ -254,8 +254,14 @@ async fn loop_stream(
     let mut rng = SplitMix64::new(seed_rng());
     loop {
         let settings_now = settings.peek().clone().clamp();
-        let voice = resolve_station(&settings_now, &mut rng);
+        let mut voice = resolve_station(&settings_now, &mut rng);
         let (group, repeats) = sampler.next_group(&settings_now);
+        // With adaptive speed on, the stream is sent where a session would
+        // send it.
+        if let Some((char_wpm, effective_wpm)) = sampler.next_speed(&settings_now) {
+            voice.char_wpm = char_wpm;
+            voice.effective_wpm = effective_wpm;
+        }
         // Across it, whoever else the settings have calling, sending groups
         // of their own as a session's callers do: from the same curriculum,
         // off a blank slate, so they never teach the sampler anything.

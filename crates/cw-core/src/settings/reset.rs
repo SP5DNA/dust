@@ -38,6 +38,7 @@ impl TrainingSettings {
                 self.playback.effective_wpm_max = d.playback.effective_wpm_max;
                 self.playback.link_effective_wpm = d.playback.link_effective_wpm;
                 self.playback.link_char_to_effective = d.playback.link_char_to_effective;
+                self.playback.adaptive_speed = d.playback.adaptive_speed;
                 self.playback.extra_word_space_multiplier = d.playback.extra_word_space_multiplier;
                 self.playback.fist_variation = d.playback.fist_variation;
             }

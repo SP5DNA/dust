@@ -13,6 +13,7 @@ use crate::sampling::{
 use crate::session::SessionResult;
 use crate::settings::{CharSetMode, TrainingSettings};
 use crate::span::{LengthForecast, SpanBelief, SpanPoint};
+use crate::speed::{SpeedBelief, SpeedPoint};
 
 pub const MASTERED_MIN_ATTEMPTS: u32 = 5;
 pub const MASTERED_MIN_ACCURACY: f64 = 0.9;
@@ -394,6 +395,17 @@ pub fn session_history(sessions: &[SessionResult]) -> Vec<SessionHistoryRow> {
 /// trains, oldest first. Empty for callsigns, which are as long as they are.
 pub fn span_history(settings: &TrainingSettings, sessions: &[SessionResult]) -> Vec<SpanPoint> {
     SpanBelief::history(sessions, settings)
+}
+
+/// Your copy speed after each session of the character set `settings`
+/// trains, oldest first: the speed at which you copy the share of characters
+/// their "Aim for" asks, in WPM.
+pub fn speed_history(settings: &TrainingSettings, sessions: &[SessionResult]) -> Vec<SpeedPoint> {
+    SpeedBelief::history(
+        sessions,
+        settings,
+        settings.curriculum.group_size_target.char_rate(),
+    )
 }
 
 /// Each group length the next session can send: how likely it is to come

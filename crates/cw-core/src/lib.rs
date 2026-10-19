@@ -26,6 +26,7 @@ mod settings;
 #[cfg(test)]
 mod soak;
 mod span;
+mod speed;
 mod stats;
 mod streak;
 mod timing;
@@ -53,10 +54,12 @@ pub use pool::{
     compute_char_pool, current_practice_window, newest_unlocked, unlocked_practice_count,
 };
 pub use rng::{Rng, SplitMix64};
-pub use sampling::{CharSamplingState, Sampler, adapts_group_size, generate_training_group};
+pub use sampling::{
+    CharSamplingState, Sampler, adapts_group_size, adapts_speed, generate_training_group,
+};
 pub use sequences::{PresetId, SEQUENCE_PRESETS, SequenceChoice, SequencePreset};
 pub use session::{
-    Group, GroupResult, GroupSession, MonoMs, SessionId, SessionPhase, SessionResult,
+    ChosenSpeed, Group, GroupResult, GroupSession, MonoMs, SessionId, SessionPhase, SessionResult,
     SessionTiming, SessionView, answer_length_matches,
 };
 pub use settings::{
@@ -72,11 +75,12 @@ pub use settings::{
     STEEPNESS_MIN_MS, SettingsSection, TrainingSettings, VOLUME_MAX, VOLUME_MIN, WPM_MAX, WPM_MIN,
 };
 pub use span::{LengthForecast, SpanEstimate, SpanPoint};
+pub use speed::{SpeedEstimate, SpeedPath, SpeedPoint};
 pub use stats::{
     AccuracyPoint, BigramHeatmap, CharacterDiagnostic, ConfusionEntry, GROUP_START_BIGRAM_TOKEN,
     MasteryStatus, MistakeStats, SamplingRow, SessionHistoryRow, accuracy_chart,
     character_diagnostics, group_length_forecast, mistake_stats, sampling_rows, session_history,
-    span_history,
+    span_history, speed_history,
 };
 pub use streak::{StreakState, StreakStatus, compute_streak_status};
 pub use timing::{

@@ -178,6 +178,18 @@ impl GroupSizeTarget {
             Self::Stretch => 0.50,
         }
     }
+
+    /// The share of characters to copy right, from 0 to 1: what adaptive
+    /// speed aims for. Over a group of five, each about matches the share
+    /// of groups copied whole above (0.97⁵ ≈ 0.86, 0.94⁵ ≈ 0.73,
+    /// 0.90⁵ ≈ 0.59).
+    pub fn char_rate(self) -> f64 {
+        match self {
+            Self::Comfortable => 0.97,
+            Self::Balanced => 0.94,
+            Self::Stretch => 0.90,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -246,6 +258,10 @@ pub struct PlaybackSettings {
     pub effective_wpm_max: f64,
     pub link_effective_wpm: bool,
     pub link_char_to_effective: bool,
+    /// Let the trainer choose each group's speed within the ranges above,
+    /// learning your copy speed as it goes ([`crate::speed`]). Off draws the
+    /// speed evenly from the ranges. Older saves have no field and load off.
+    pub adaptive_speed: bool,
     pub extra_word_space_multiplier: f64,
     pub group_timeout: f64,
     /// Seconds to sit on the last group after it is sent, so the card can be
@@ -284,6 +300,7 @@ impl Default for PlaybackSettings {
             effective_wpm_max: 25.0,
             link_effective_wpm: false,
             link_char_to_effective: true,
+            adaptive_speed: false,
             extra_word_space_multiplier: 1.0,
             group_timeout: 10.0,
             group_pause_sec: 2.0,
