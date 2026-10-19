@@ -1,4 +1,5 @@
 pub mod auto_level;
+pub mod backup;
 pub mod band;
 pub mod chart;
 pub mod credits;
@@ -24,6 +25,8 @@ pub mod widgets;
 #[cfg(feature = "desktop")]
 mod window_menu;
 
+#[cfg(test)]
+mod backup_tests;
 #[cfg(test)]
 mod history_tests;
 #[cfg(test)]

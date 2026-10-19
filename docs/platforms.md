@@ -218,12 +218,40 @@ gives it:
 which is what a portable install uses.
 
 Updating the app does not clear any of it. The storage keys (`dust_settings`,
-`dust_sessions`, `dust_auto_adjust_*`, `dust_theme`, `dust_tutorial_done`) and
+`dust_sessions`, `dust_auto_adjust_*`, `dust_theme`, `dust_tutorial_done`,
+`dust_last_backup`) and
 file names are not versioned, and settings files from older builds still load
 — new fields fall back to their defaults, and one unreadable field costs only
 that field. A history that
 cannot be read at all is set aside beside the new one rather than written over,
 and if it cannot even be moved, nothing is saved over it.
+
+### Backups
+
+A browser clears `localStorage` along with cookies when someone clears a
+site's data, and Safari clears it by itself after seven days without a visit,
+unless the site is on the home screen. So **Stats → History** has a Backup
+card:
+
+- **Save a backup** writes `dust-backup-<date>.json`, the settings and the
+  history in one file. The web app hands it over as a download; desktop
+  builds put it in Downloads (or Documents, or home), never over an earlier
+  one. An app on a phone keeps its files where nobody can reach them, so it
+  has no Save button.
+- **Restore a backup**, on every build, adds the sessions in the file that
+  are not here yet and takes its settings, level included. Undo, in the
+  message that follows, puts both back as they were. A file that is not a
+  backup, or far too large to be one, is refused, and the card says why. A
+  session or a setting the file can no longer read is left out, as when the
+  store is read.
+- After ten sessions without a backup the card says so, and its Save button
+  stands out. When the last one was saved is kept under `dust_last_backup`,
+  or in `last_backup.txt`.
+
+After every finished session the web app also asks the browser to keep its
+storage (`navigator.storage.persist()`) rather than clear it to make room.
+Chrome decides by itself; Firefox asks once. That guards against the browser,
+not against someone clearing the site's data: only a backup does.
 
 The history keeps your newest 500 sessions. A browser also gives each site only
 a few megabytes; should the history outgrow that — hundreds of sessions of

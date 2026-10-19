@@ -1,0 +1,234 @@
+//! A backup: the history and the settings in one file the user keeps,
+//! outside wherever this build stores them, to put back after that store is
+//! lost — a browser's data cleared — or on another device.
+//!
+//! Reading one is as forgiving as reading the store: a session that no longer
+//! parses is left out, a setting that no longer reads falls back to its
+//! default, and every session is scored the way sessions score today.
+
+use cw_core::{SessionResult, TrainingSettings};
+use serde::Serialize;
+
+use super::{load_settings_from, parse_sessions};
+
+/// The key that marks a file as a backup, and the version of its layout.
+const MARK: &str = "dustBackup";
+const LAYOUT: u32 = 1;
+
+/// How many sessions may go unbacked before the History tab says so.
+pub const BACKUP_DUE_AFTER: usize = 10;
+
+/// The largest file read as a backup. Five hundred long sessions come to a
+/// few megabytes.
+pub const BACKUP_MAX_BYTES: u64 = 50_000_000;
+
+/// What a backup holds.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Backup {
+    /// When it was saved, in milliseconds since the epoch; zero if it does
+    /// not say.
+    pub saved_at: u64,
+    pub settings: TrainingSettings,
+    /// Oldest first.
+    pub sessions: Vec<SessionResult>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Written<'a> {
+    dust_backup: u32,
+    saved_at: u64,
+    settings: &'a TrainingSettings,
+    sessions: &'a [SessionResult],
+}
+
+/// A backup of `settings` and `sessions`, saved at `saved_at`, as the file
+/// holds it.
+pub fn write_backup(
+    settings: &TrainingSettings,
+    sessions: &[SessionResult],
+    saved_at: u64,
+) -> String {
+    serde_json::to_string(&Written {
+        dust_backup: LAYOUT,
+        saved_at,
+        settings,
+        sessions,
+    })
+    .unwrap_or_default()
+}
+
+/// Why a file could not be restored from, in words that follow its name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NotRestored {
+    /// It is not a backup: some other file, or not JSON at all.
+    NotABackup,
+    /// It says it is one, but its sessions cannot be read.
+    Unreadable,
+}
+
+impl NotRestored {
+    pub fn reason(&self) -> &'static str {
+        match self {
+            Self::NotABackup => "is not a Dust backup",
+            Self::Unreadable => "is a Dust backup whose sessions cannot be read",
+        }
+    }
+}
+
+/// Read a backup file.
+pub fn read_backup(raw: &str) -> Result<Backup, NotRestored> {
+    let Ok(serde_json::Value::Object(file)) = serde_json::from_str(raw) else {
+        return Err(NotRestored::NotABackup);
+    };
+    if !file.get(MARK).is_some_and(serde_json::Value::is_u64) {
+        return Err(NotRestored::NotABackup);
+    }
+    let settings = file
+        .get("settings")
+        .map_or_else(TrainingSettings::default, |settings| {
+            load_settings_from(&settings.to_string())
+        });
+    let sessions = file
+        .get("sessions")
+        .and_then(|sessions| parse_sessions(&sessions.to_string()))
+        .ok_or(NotRestored::Unreadable)?;
+    Ok(Backup {
+        saved_at: file
+            .get("savedAt")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0),
+        settings,
+        sessions,
+    })
+}
+
+/// What a backup saved on `date` is called: "dust-backup-2026-10-19.json".
+pub fn backup_name(date: &str) -> String {
+    format!("dust-backup-{date}.json")
+}
+
+/// `current` with every session of `restored` that it does not already
+/// have, in the order they were practised, and how many that was. A session
+/// is the same session if it finished at the same moment on the same day.
+pub fn merge_sessions(
+    current: &[SessionResult],
+    restored: Vec<SessionResult>,
+) -> (Vec<SessionResult>, usize) {
+    let same =
+        |a: &SessionResult, b: &SessionResult| a.timestamp == b.timestamp && a.date == b.date;
+    let mut merged = current.to_vec();
+    let mut added = 0;
+    for session in restored {
+        if !merged.iter().any(|kept| same(kept, &session)) {
+            merged.push(session);
+            added += 1;
+        }
+    }
+    if added > 0 {
+        merged.sort_by_key(|session| session.timestamp);
+    }
+    (merged, added)
+}
+
+/// How many of `sessions` finished after the backup saved at `last`: all of
+/// them, when there has been none.
+pub fn sessions_since(sessions: &[SessionResult], last: Option<u64>) -> usize {
+    match last {
+        Some(at) => sessions
+            .iter()
+            .filter(|session| session.timestamp > at)
+            .count(),
+        None => sessions.len(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::persist::tests::session;
+
+    fn at(timestamp: u64, date: &str) -> SessionResult {
+        SessionResult {
+            timestamp,
+            ..session(date)
+        }
+    }
+
+    #[test]
+    fn a_backup_reads_back_what_it_was_saved_with() {
+        let mut settings = TrainingSettings::default();
+        settings.curriculum.level = 14;
+        settings.playback.char_wpm_min = 22.0;
+        let sessions = vec![at(1, "2026-10-01"), at(2, "2026-10-02")];
+        let raw = write_backup(&settings, &sessions, 1_790_000_000_000);
+        let backup = read_backup(&raw).expect("a backup");
+        assert_eq!(backup.saved_at, 1_790_000_000_000);
+        assert_eq!(backup.settings, settings.clamp());
+        assert_eq!(backup.sessions.len(), 2);
+        assert_eq!(backup.sessions[1].date, "2026-10-02");
+    }
+
+    #[test]
+    fn only_a_backup_is_read_as_one() {
+        assert_eq!(read_backup("not json"), Err(NotRestored::NotABackup));
+        assert_eq!(read_backup("[]"), Err(NotRestored::NotABackup));
+        // A settings file is JSON, but not a backup.
+        let settings = serde_json::to_string(&TrainingSettings::default()).unwrap();
+        assert_eq!(read_backup(&settings), Err(NotRestored::NotABackup));
+        assert_eq!(
+            read_backup(r#"{"dustBackup":1,"sessions":{}}"#),
+            Err(NotRestored::Unreadable)
+        );
+        assert!(
+            NotRestored::NotABackup
+                .reason()
+                .contains("not a Dust backup")
+        );
+    }
+
+    /// One bad setting or session costs that one alone, as in the store.
+    #[test]
+    fn a_damaged_backup_gives_back_what_it_can() {
+        let good = serde_json::to_string(&at(5, "2026-10-05")).unwrap();
+        let raw = format!(
+            r#"{{"dustBackup":1,"settings":{{"level":9,"groupTimeout":"nonsense"}},
+                "sessions":[{good},{{"date":"broken"}}]}}"#
+        );
+        let backup = read_backup(&raw).expect("a backup");
+        assert_eq!(backup.settings.curriculum.level, 9);
+        assert_eq!(backup.sessions.len(), 1);
+        assert_eq!(backup.saved_at, 0, "it does not say when");
+        // A newer layout is still read for what it has.
+        assert!(read_backup(r#"{"dustBackup":7,"sessions":[]}"#).is_ok());
+    }
+
+    #[test]
+    fn restoring_adds_only_the_sessions_not_already_here() {
+        let current = vec![at(10, "2026-10-10"), at(30, "2026-10-30")];
+        let restored = vec![
+            at(10, "2026-10-10"),
+            at(20, "2026-10-20"),
+            at(30, "2026-10-30"),
+            at(5, "2026-10-05"),
+        ];
+        let (merged, added) = merge_sessions(&current, restored);
+        assert_eq!(added, 2);
+        assert_eq!(
+            merged.iter().map(|s| s.timestamp).collect::<Vec<_>>(),
+            [5, 10, 20, 30],
+            "in the order they were practised"
+        );
+        let (again, none) = merge_sessions(&merged, merged.clone());
+        assert_eq!((again, none), (merged, 0), "restoring twice does nothing");
+    }
+
+    #[test]
+    fn sessions_since_a_backup_are_counted() {
+        let sessions = vec![at(10, "a"), at(20, "b"), at(30, "c")];
+        assert_eq!(sessions_since(&sessions, None), 3);
+        assert_eq!(sessions_since(&sessions, Some(20)), 1);
+        assert_eq!(sessions_since(&sessions, Some(99)), 0);
+        assert_eq!(backup_name("2026-10-19"), "dust-backup-2026-10-19.json");
+    }
+}

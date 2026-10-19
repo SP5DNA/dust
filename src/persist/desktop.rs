@@ -15,11 +15,14 @@ const TUTORIAL: &str = "tutorial_done.txt";
 const SETTINGS: &str = "settings.json";
 const SESSIONS: &str = "sessions.json";
 const COUNTERS: &str = "auto_adjust.json";
+const LAST_BACKUP: &str = "last_backup.txt";
 
 /// Files under one directory. The directory is a field rather than a global
 /// so a test can point one at a scratch folder.
 pub struct DesktopStore {
     root: PathBuf,
+    /// Where backup files go, when there is anywhere the user can reach.
+    backup_folder: Option<PathBuf>,
     /// The stored history could not be read, nor moved out of the way, so it
     /// is not to be written over.
     history_held: Cell<bool>,
@@ -27,44 +30,32 @@ pub struct DesktopStore {
 
 impl DesktopStore {
     pub fn new() -> Self {
-        Self::at(data_dir())
+        Self {
+            backup_folder: backup_folder(),
+            ..Self::at(data_dir())
+        }
     }
 
+    /// Files under `root`, and no backups.
     pub fn at(root: impl Into<PathBuf>) -> Self {
         Self {
             root: root.into(),
+            backup_folder: None,
             history_held: Cell::new(false),
         }
     }
 
-    /// Write `name` whole or not at all.
-    ///
-    /// The bytes go to a temporary file beside it, are flushed to the disk,
-    /// and only then take the name, so a crash, a power cut or a full disk
-    /// leaves either the old file or the new one — never a half-written one,
-    /// and never an empty one whose rename reached the disk before its data.
-    /// The temporary name is this process's own, so two copies of the app
-    /// running at once cannot write into each other's.
-    fn write(&self, name: &str, bytes: &[u8]) -> io::Result<()> {
-        static WRITES: AtomicU64 = AtomicU64::new(0);
-        fs::create_dir_all(&self.root)?;
-        let path = self.root.join(name);
-        let tmp = self.root.join(format!(
-            ".{name}.{}.{}.tmp",
-            std::process::id(),
-            WRITES.fetch_add(1, Ordering::Relaxed)
-        ));
-        let written = (|| {
-            let mut file = fs::File::create(&tmp)?;
-            file.write_all(bytes)?;
-            file.sync_all()?;
-            fs::rename(&tmp, &path)?;
-            sync_dir(&self.root)
-        })();
-        if written.is_err() {
-            let _ = fs::remove_file(&tmp);
+    /// Backup files go into `folder`.
+    #[cfg(test)]
+    fn with_backup_folder(self, folder: impl Into<PathBuf>) -> Self {
+        Self {
+            backup_folder: Some(folder.into()),
+            ..self
         }
-        written
+    }
+
+    fn write(&self, name: &str, bytes: &[u8]) -> io::Result<()> {
+        write_whole(&self.root, name, bytes)
     }
 
     fn load_all_counters(&self) -> std::collections::BTreeMap<String, AutoLevelCounters> {
@@ -93,6 +84,65 @@ impl DesktopStore {
             self.history_held.set(true);
         }
     }
+}
+
+/// Write `name` in `dir` whole or not at all.
+///
+/// The bytes go to a temporary file beside it, are flushed to the disk, and
+/// only then take the name, so a crash, a power cut or a full disk leaves
+/// either the old file or the new one — never a half-written one, and never
+/// an empty one whose rename reached the disk before its data. The temporary
+/// name is this process's own, so two copies of the app running at once
+/// cannot write into each other's.
+fn write_whole(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
+    static WRITES: AtomicU64 = AtomicU64::new(0);
+    fs::create_dir_all(dir)?;
+    let path = dir.join(name);
+    let tmp = dir.join(format!(
+        ".{name}.{}.{}.tmp",
+        std::process::id(),
+        WRITES.fetch_add(1, Ordering::Relaxed)
+    ));
+    let written = (|| {
+        let mut file = fs::File::create(&tmp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        fs::rename(&tmp, &path)?;
+        sync_dir(dir)
+    })();
+    if written.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    written
+}
+
+/// Where a computer's backup files go: Downloads, or failing that Documents,
+/// or home. An app on a phone keeps its files where the user cannot reach
+/// them, so it has nowhere.
+fn backup_folder() -> Option<PathBuf> {
+    if cfg!(any(target_os = "android", target_os = "ios")) {
+        return None;
+    }
+    dirs::download_dir()
+        .or_else(dirs::document_dir)
+        .or_else(dirs::home_dir)
+}
+
+/// `name` in `folder`, or, if a file is already called that, the first of
+/// `name-2`, `name-3` and so on that is free: an earlier backup is never
+/// written over.
+fn free_name(folder: &Path, name: &str) -> String {
+    let (stem, extension) = name.rsplit_once('.').unwrap_or((name, ""));
+    std::iter::once(name.to_string())
+        .chain((2..1_000).map(|n| {
+            if extension.is_empty() {
+                format!("{stem}-{n}")
+            } else {
+                format!("{stem}-{n}.{extension}")
+            }
+        }))
+        .find(|candidate| !folder.join(candidate).exists())
+        .unwrap_or_else(|| name.to_string())
 }
 
 /// Make a rename in `dir` as durable as the data it names.
@@ -192,6 +242,30 @@ impl Store for DesktopStore {
             all.remove(key.as_str());
         }
         self.save_all_counters(&all);
+    }
+
+    fn last_backup(&self) -> Option<u64> {
+        fs::read_to_string(self.root.join(LAST_BACKUP))
+            .ok()
+            .and_then(|raw| raw.trim().parse().ok())
+    }
+
+    fn mark_backup(&self, at: u64) {
+        let _ = self.write(LAST_BACKUP, at.to_string().as_bytes());
+    }
+
+    fn saves_backups(&self) -> bool {
+        self.backup_folder.is_some()
+    }
+
+    fn save_backup_file(&self, name: &str, contents: &str) -> Result<String, String> {
+        let folder = self
+            .backup_folder
+            .as_deref()
+            .ok_or("there is no folder to put it in")?;
+        let name = free_name(folder, name);
+        write_whole(folder, &name, contents.as_bytes()).map_err(|err| err.to_string())?;
+        Ok(folder.join(name).display().to_string())
     }
 }
 
@@ -491,6 +565,52 @@ mod tests {
             HistorySaved::Failed(_)
         ));
         assert_eq!(files(&dir), [SESSIONS]);
+    }
+
+    /// A backup goes into the backup folder, never over an earlier one, and
+    /// the store remembers when.
+    #[test]
+    fn a_backup_is_a_new_file_in_the_backup_folder() {
+        let (dir, store) = store("backup");
+        let folder = TempDir::new("backup-folder");
+        assert!(!store.saves_backups(), "a store with no folder saves none");
+        assert!(store.save_backup_file("b.json", "{}").is_err());
+        let store = store.with_backup_folder(folder.0.clone());
+        assert!(store.saves_backups());
+        let first = store.save_backup_file("dust-backup-2026-10-19.json", "one");
+        let second = store.save_backup_file("dust-backup-2026-10-19.json", "two");
+        assert_eq!(
+            first,
+            Ok(folder
+                .0
+                .join("dust-backup-2026-10-19.json")
+                .display()
+                .to_string())
+        );
+        assert_eq!(
+            second,
+            Ok(folder
+                .0
+                .join("dust-backup-2026-10-19-2.json")
+                .display()
+                .to_string())
+        );
+        assert_eq!(
+            fs::read_to_string(folder.0.join("dust-backup-2026-10-19.json")).unwrap(),
+            "one"
+        );
+        assert_eq!(
+            files(&folder),
+            [
+                "dust-backup-2026-10-19-2.json",
+                "dust-backup-2026-10-19.json"
+            ]
+        );
+
+        assert_eq!(store.last_backup(), None);
+        store.mark_backup(1_790_000_000_000);
+        assert_eq!(store.last_backup(), Some(1_790_000_000_000));
+        assert_eq!(files(&dir), [LAST_BACKUP]);
     }
 
     #[test]

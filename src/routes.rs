@@ -16,6 +16,7 @@ use crate::playback;
 use crate::session_runtime::{send_event, start_session};
 use crate::state::{AppCtx, Screen, SessionPick};
 use crate::time::{local_date_string, sleep_ms};
+use crate::ui::backup::Backups;
 use crate::ui::home::Home;
 use crate::ui::listen::ListenView;
 use crate::ui::results::ResultsView;
@@ -197,6 +198,12 @@ fn StatsRoute() -> Element {
             settings: ctx.settings.read().clone(),
             sessions: ctx.sessions.read().clone(),
             on_delete: move |picked: Vec<SessionPick>| ctx.delete_sessions(&picked),
+            backups: Backups {
+                last: *ctx.last_backup.read(),
+                can_save: ctx.app().store.saves_backups(),
+                on_save: EventHandler::new(move |()| ctx.save_backup()),
+                on_restore: EventHandler::new(move |backup| ctx.restore_backup(backup)),
+            },
         }
     }
 }
