@@ -37,7 +37,7 @@
 use std::sync::OnceLock;
 
 use crate::aim::{self, Leaning, Spread};
-use crate::alignment::align_group;
+use crate::alignment::align_holding;
 use crate::belief::{Estimate, EstimatePoint, GridBelief, Tally, pick_index, sessions_in_order};
 use crate::rng::Rng;
 use crate::score::copy_speed;
@@ -144,37 +144,10 @@ pub fn speed_evidence(sent: &str, received: &str) -> Option<(u32, u32)> {
     if sent.is_empty() || received.trim().is_empty() {
         return None;
     }
-    // Of the readings that cost the fewest edits, the one that loses the
-    // most off the end: "KE" for "KMRSU" is one wrong and three lost, not
-    // three dropped inside and the last one wrong.
-    let sent: Vec<char> = sent.chars().map(|c| c.to_ascii_uppercase()).collect();
-    let received: Vec<char> = received.chars().map(|c| c.to_ascii_uppercase()).collect();
-    let fewest = edits(&sent, &received);
-    let lost = (0..sent.len())
-        .rev()
-        .find(|lost| edits(&sent[..sent.len() - lost], &received) + lost == fewest)
-        .unwrap_or(0);
-    let held: String = sent[..sent.len() - lost].iter().collect();
-    let typed: String = received.iter().collect();
-    let pairs = align_group(&held, &typed);
-    let right = pairs.iter().filter(|pair| pair.matched).count() as u32;
-    let counted = pairs.len() as u32;
+    let (held, _) = align_holding(sent, received);
+    let right = held.iter().filter(|pair| pair.matched).count() as u32;
+    let counted = held.len() as u32;
     (counted > 0).then_some((right, counted))
-}
-
-/// The fewest single-character edits that turn `from` into `to`.
-fn edits(from: &[char], to: &[char]) -> usize {
-    let mut row: Vec<usize> = (0..=to.len()).collect();
-    for (i, a) in from.iter().enumerate() {
-        let mut diagonal = row[0];
-        row[0] = i + 1;
-        for (j, b) in to.iter().enumerate() {
-            let replace = diagonal + usize::from(a != b);
-            diagonal = row[j + 1];
-            row[j + 1] = replace.min(row[j] + 1).min(diagonal + 1);
-        }
-    }
-    row[to.len()]
 }
 
 /// The speed settings, seen as one line from the slowest corner to the
@@ -479,7 +452,6 @@ mod tests {
             Some((3, 3)),
             "case is no error"
         );
-        assert_eq!(edits(&['K', 'M'], &['K', 'E']), 1);
         assert_eq!(speed_evidence("KMRSU", ""), None, "a blank could be either");
         assert_eq!(speed_evidence("", "K"), None);
         // A prefix copied clean raises the speed, never lowers it.
