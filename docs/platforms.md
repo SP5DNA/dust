@@ -285,4 +285,5 @@ accuracy over time, letter mastery, mistakes, the calendar and the streak all
 count every session, because a letter is the same letter whichever set it was
 sent under. The one exception is the **Sampling** tab, which shows what the
 trainer will draw next and so narrows to the current character set, the same way
-the sampler itself does.
+the sampler itself does — in whatever unlock order it was practised, since a
+character is as hard to copy whichever order unlocked it.

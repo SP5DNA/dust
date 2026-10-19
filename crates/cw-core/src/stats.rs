@@ -772,6 +772,40 @@ mod tests {
         assert_eq!(only_koch, mixed_history);
     }
 
+    /// Picking another unlock order — the guided setup does — keeps what the
+    /// history says of each character: a K always missed under LCWO's order
+    /// is still the hardest under MorseMania's.
+    #[test]
+    fn a_new_unlock_order_keeps_what_was_learned_of_each_character() {
+        let mut lcwo = TrainingSettings::default();
+        lcwo.curriculum.char_set_mode = CharSetMode::Koch;
+        let mut missed = session();
+        missed.alphabet_fingerprint = lcwo.alphabet_fingerprint();
+        missed.tally.sent.insert(
+            'K',
+            LetterAccuracy {
+                correct: 0,
+                total: 20,
+            },
+        );
+        let mut mania = lcwo.clone();
+        mania.choose_sequence(crate::sequences::SequenceChoice::Preset(
+            crate::sequences::PresetId::MorseMania,
+        ));
+        assert_ne!(lcwo.alphabet_fingerprint(), mania.alphabet_fingerprint());
+        let rows = sampling_rows(&mania, &[missed]);
+        let k = rows
+            .iter()
+            .find(|row| row.character == 'K')
+            .expect("K in MorseMania's pool");
+        assert!(k.p_error > 0.9, "{}", k.p_error);
+        assert!(
+            rows.iter()
+                .all(|row| row.character == 'K' || row.sampling_prob < k.sampling_prob),
+            "K is drawn most"
+        );
+    }
+
     fn length_settings(adaptive: bool) -> TrainingSettings {
         let mut settings = TrainingSettings::default();
         settings.curriculum.char_set_mode = CharSetMode::Koch;

@@ -611,7 +611,8 @@ pub struct SessionResult {
     pub char_wpm: f64,
     #[serde(default = "session_wpm_default")]
     pub effective_wpm: f64,
-    /// Full progress alphabet at the time of the session. Empty on legacy saves.
+    /// Full progress alphabet at the time of the session, in its unlock
+    /// order. Empty on legacy saves.
     #[serde(default)]
     pub alphabet_fingerprint: String,
 }
@@ -663,13 +664,13 @@ impl SessionResult {
         Cow::Owned(tally.sent)
     }
 
-    /// Whether this session's letter stats should seed sampling for `settings`.
+    /// Whether this session's letter stats should seed sampling for
+    /// `settings`: a session of the same character set does, whatever unlock
+    /// order it was practised in. A character is as hard to copy whichever
+    /// order unlocked it, and a new order — the guided setup picks one — must
+    /// not leave the sampler knowing nothing of characters it has seen.
     pub fn usable_for_sampling(&self, settings: &TrainingSettings) -> bool {
-        if self.char_set_mode != settings.curriculum.char_set_mode {
-            return false;
-        }
-        self.alphabet_fingerprint.is_empty()
-            || self.alphabet_fingerprint == settings.alphabet_fingerprint()
+        self.char_set_mode == settings.curriculum.char_set_mode
     }
 
     /// A Koch session with nothing in it, for tests to fill in.
@@ -1039,7 +1040,7 @@ mod tests {
     }
 
     #[test]
-    fn history_is_reusable_only_for_the_same_alphabet() {
+    fn history_seeds_sampling_for_its_own_character_set_in_any_order() {
         let mut settings = TrainingSettings::default();
         settings.curriculum.char_set_mode = CharSetMode::Koch;
         let result = result(&answered(settings.clone(), &[("KM", "KM", 10)]));
@@ -1050,12 +1051,16 @@ mod tests {
         other.curriculum.char_set_mode = CharSetMode::Digits;
         assert!(!result.usable_for_sampling(&other));
 
-        // Same mode, different alphabet.
+        // Another unlock order of the same set does: K is K.
         let mut resequenced = settings;
         resequenced.curriculum.custom_sequence = vec!['A', 'B', 'C'];
-        assert!(!result.usable_for_sampling(&resequenced));
+        assert_ne!(
+            result.alphabet_fingerprint,
+            resequenced.alphabet_fingerprint()
+        );
+        assert!(result.usable_for_sampling(&resequenced));
 
-        // A legacy session carries no fingerprint and is accepted.
+        // So does a legacy session, which carries no fingerprint.
         let mut legacy = result;
         legacy.alphabet_fingerprint.clear();
         assert!(legacy.usable_for_sampling(&resequenced));
