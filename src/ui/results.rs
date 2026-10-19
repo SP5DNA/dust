@@ -1,11 +1,54 @@
 use cw_core::SessionResult;
 use dioxus::prelude::*;
 
+use crate::ui::scores::{Medal, mode_noun, ordinal};
 use crate::ui::widgets::{CardHead, GroupResultRow, Icon, IconName, ScoreRing, control_id};
+
+/// What the session's place on the score board says, and the medal it
+/// earns, if any: among the sessions of its own mode, kept on this device.
+fn place_line(place: usize, of: usize, noun: &str) -> (String, Option<usize>) {
+    let medal = (place <= 3).then_some(place);
+    let text = if of == 1 {
+        format!("Your first {noun} score on the board")
+    } else if place == 1 {
+        format!("New personal best — the top of your {of} {noun} sessions")
+    } else {
+        format!("{} best of your {of} {noun} sessions", ordinal(place))
+    };
+    (text, medal)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::place_line;
+
+    #[test]
+    fn a_place_is_said_among_the_sessions_of_its_mode() {
+        assert_eq!(
+            place_line(1, 1, "callsign"),
+            (
+                "Your first callsign score on the board".to_string(),
+                Some(1)
+            )
+        );
+        assert_eq!(
+            place_line(1, 8, "Koch").0,
+            "New personal best — the top of your 8 Koch sessions"
+        );
+        assert_eq!(
+            place_line(3, 8, "Koch"),
+            ("3rd best of your 8 Koch sessions".to_string(), Some(3))
+        );
+        assert_eq!(place_line(12, 40, "word").1, None, "medals go to three");
+    }
+}
 
 #[component]
 pub fn ResultsView(
     result: SessionResult,
+    /// Where the session stands on the score board, and of how many.
+    #[props(default)]
+    place: Option<(usize, usize)>,
     auto_message: Option<String>,
     on_again: EventHandler<()>,
     on_home: EventHandler<()>,
@@ -36,6 +79,21 @@ pub fn ResultsView(
                     div { class: "score-copy",
                         h2 { "Session complete" }
                         p { class: "muted", style: "margin: 0;", "{verdict}" }
+                    }
+                }
+            }
+            if let Some((place, of)) = place {
+                {
+                    let (text, medal) = place_line(place, of, mode_noun(result.char_set_mode));
+                    rsx! {
+                        div { class: if medal == Some(1) { "place-banner best" } else { "place-banner" },
+                            if let Some(medal) = medal {
+                                Medal { place: medal }
+                            } else {
+                                span { class: "board-number", "{place}" }
+                            }
+                            span { "{text}" }
+                        }
                     }
                 }
             }

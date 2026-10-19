@@ -38,6 +38,27 @@ fn open_history(sessions: &[SessionResult]) -> (Ui, std::rc::Rc<crate::audio::fa
     (ui, recorder)
 }
 
+/// The board is read off what is kept: a deleted session leaves it, and
+/// Undo puts it back.
+#[test]
+fn a_deleted_session_leaves_the_score_board() {
+    run(|| async {
+        let (mut ui, _recorder) = open_history(&history());
+        ui.click("seg-scores");
+        assert_eq!(ui.controls("board-").len(), 5);
+        assert!(ui.has("Fri 2 Oct 2026"));
+
+        ui.click("seg-history");
+        ui.click("history-delete-1");
+        ui.click("seg-scores");
+        assert_eq!(ui.controls("board-").len(), 4);
+        assert!(!ui.has("Fri 2 Oct 2026"), "the 2nd of October is gone");
+
+        ui.click("toast-undo");
+        assert_eq!(ui.controls("board-").len(), 5);
+    });
+}
+
 #[test]
 fn a_session_is_deleted_from_its_row_and_undo_puts_it_back() {
     run(|| async {

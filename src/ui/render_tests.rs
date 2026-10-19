@@ -553,6 +553,40 @@ fn results_renders_the_score_ring_and_rows() {
     assert!(html.contains("Unlocked a new character"));
     assert!(html.contains("50%"));
     assert!(html.contains("1/2"));
+    assert!(!html.contains("place-banner"), "no place, no banner");
+}
+
+/// A session that tops the board says so with the gold medal; one further
+/// down says where it came.
+#[test]
+fn results_say_where_the_session_stands_on_the_board() {
+    let best = render(|| {
+        rsx! {
+            ResultsView {
+                result: session("2026-09-03", 0.9),
+                place: Some((1, 5)),
+                auto_message: None,
+                on_again: move |_| {},
+                on_home: move |_| {},
+            }
+        }
+    });
+    assert!(best.contains("New personal best — the top of your 5 mixed sessions"));
+    assert!(best.contains("place-banner best"));
+    assert!(best.contains("aria-label=\"1st place\""));
+    let fourth = render(|| {
+        rsx! {
+            ResultsView {
+                result: session("2026-09-03", 0.9),
+                place: Some((4, 5)),
+                auto_message: None,
+                on_again: move |_| {},
+                on_home: move |_| {},
+            }
+        }
+    });
+    assert!(fourth.contains("4th best of your 5 mixed sessions"));
+    assert!(!fourth.contains("class=\"medal"), "no medal below third");
 }
 
 #[test]

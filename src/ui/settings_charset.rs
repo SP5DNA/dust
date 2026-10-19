@@ -48,7 +48,7 @@ fn AlphabetField(label: &'static str, value: String, on_commit: EventHandler<Str
 }
 
 /// The character sets, in the order the control offers them.
-const CHAR_SET_MODES: [(CharSetMode, &str); 5] = [
+pub(crate) const CHAR_SET_MODES: [(CharSetMode, &str); 5] = [
     (CharSetMode::Koch, "Koch"),
     (CharSetMode::Digits, "Digits"),
     (CharSetMode::Mixed, "Mixed"),

@@ -232,9 +232,18 @@ hundreds of groups — the newest that fit are kept, and the app says so.
 Sessions can be deleted under **Stats → History**: one from its own row, or
 several with **Select**, all of them included. Deleting everything asks once
 more. Every deletion can be undone from the message that follows it, for a
-few seconds. Deleting a session takes it out of every stat, the calendar and
-the streak, and out of what the sampler learns from; the level you have
-reached stays where it is.
+few seconds. Deleting a session takes it out of every stat, the calendar,
+the streak and the score board, and out of what the sampler learns from; the
+level you have reached stays where it is.
+
+**Stats → Scores** is the score board: every session kept on this device,
+best score first, with gold, silver and bronze for the top three and the
+personal best on its own card. There is one player, so a row is a place, a
+score and when it was set. A chart of the score over time steps up wherever
+a new record was set, and pointing at a row (or tapping it) marks when that
+session was. With more than one mode in the history, the board can show one
+at a time; a finished session's results say where it came among the
+sessions of its own mode.
 
 Stats are computed across your whole history. Changing course — Koch to Mixed,
 a new sequence, a custom alphabet — does not hide what you already did:

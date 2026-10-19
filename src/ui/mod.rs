@@ -10,6 +10,7 @@ pub mod listen;
 pub mod paddle;
 pub mod privacy;
 pub mod results;
+pub mod scores;
 pub mod settings;
 pub mod settings_charset;
 pub mod stats;
