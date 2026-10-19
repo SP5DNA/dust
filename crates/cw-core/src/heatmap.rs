@@ -29,9 +29,33 @@ pub struct HeatmapDay {
     /// over. A session with a broken accuracy still practised that day, but
     /// it says nothing about how well.
     pub accuracy_sessions: u32,
+    /// Character and spacing speed, each times the characters sent at it, so
+    /// the day's speed is what most of its copy was sent at.
+    pub char_wpm_sum: f64,
+    pub effective_wpm_sum: f64,
+    /// The characters the speeds are summed over: those of sessions whose
+    /// speeds could be read.
+    pub speed_chars: u32,
+    /// The day's best session score, if any could be read.
+    pub best_score: Option<f64>,
 }
 
 impl HeatmapDay {
+    fn new(date: &str) -> Self {
+        Self {
+            date: date.to_string(),
+            chars: 0,
+            sessions: 0,
+            group_count: 0,
+            accuracy_sum: 0.0,
+            accuracy_sessions: 0,
+            char_wpm_sum: 0.0,
+            effective_wpm_sum: 0.0,
+            speed_chars: 0,
+            best_score: None,
+        }
+    }
+
     pub fn avg_accuracy(&self) -> Option<f64> {
         if self.accuracy_sessions == 0 {
             None
@@ -39,6 +63,22 @@ impl HeatmapDay {
             Some(self.accuracy_sum / f64::from(self.accuracy_sessions))
         }
     }
+
+    /// The character speed most of the day's copy was sent at.
+    pub fn char_wpm(&self) -> Option<f64> {
+        (self.speed_chars > 0).then(|| self.char_wpm_sum / f64::from(self.speed_chars))
+    }
+
+    /// The pace its spacing set, slower than [`Self::char_wpm`] under
+    /// Farnsworth.
+    pub fn effective_wpm(&self) -> Option<f64> {
+        (self.speed_chars > 0).then(|| self.effective_wpm_sum / f64::from(self.speed_chars))
+    }
+}
+
+/// A speed a session can be read as having been sent at.
+fn readable_wpm(wpm: f64) -> bool {
+    wpm.is_finite() && wpm > 0.0
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -49,6 +89,9 @@ pub struct HeatmapCell {
     pub sessions: u32,
     pub group_count: u32,
     pub avg_accuracy: Option<f64>,
+    pub char_wpm: Option<f64>,
+    pub effective_wpm: Option<f64>,
+    pub best_score: Option<f64>,
     /// How strongly to shade the day, from 0 to 1, by what the grid is
     /// showing: the share of the busiest day's characters, or the day's
     /// accuracy. None where there is nothing to shade — a day with no
@@ -69,9 +112,15 @@ pub struct HeatmapMonth {
     pub cells: Vec<HeatmapCell>,
 }
 
+/// The calendar, and the most of each thing any one day on it had: what a
+/// day's figures are measured against.
 #[derive(Clone, Debug, PartialEq)]
 pub struct HeatmapGrid {
     pub max_chars: u32,
+    pub max_sessions: u32,
+    pub max_groups: u32,
+    pub max_char_wpm: f64,
+    pub max_score: f64,
     /// Oldest first, ending with the month today is in.
     pub months: Vec<HeatmapMonth>,
 }
@@ -95,14 +144,7 @@ pub fn aggregate_heatmap(sessions: &[SessionResult]) -> BTreeMap<String, Heatmap
         }
         let entry = days
             .entry(session.date.clone())
-            .or_insert_with(|| HeatmapDay {
-                date: session.date.clone(),
-                chars: 0,
-                sessions: 0,
-                group_count: 0,
-                accuracy_sum: 0.0,
-                accuracy_sessions: 0,
-            });
+            .or_insert_with(|| HeatmapDay::new(&session.date));
         entry.chars = entry.chars.saturating_add(session.total_chars);
         entry.sessions = entry.sessions.saturating_add(1);
         entry.group_count = entry
@@ -111,6 +153,19 @@ pub fn aggregate_heatmap(sessions: &[SessionResult]) -> BTreeMap<String, Heatmap
         if session.accuracy.is_finite() && (0.0..=1.0).contains(&session.accuracy) {
             entry.accuracy_sum += session.accuracy;
             entry.accuracy_sessions += 1;
+        }
+        if readable_wpm(session.char_wpm) && readable_wpm(session.effective_wpm) {
+            let chars = f64::from(session.total_chars);
+            entry.char_wpm_sum += session.char_wpm * chars;
+            entry.effective_wpm_sum += session.effective_wpm * chars;
+            entry.speed_chars = entry.speed_chars.saturating_add(session.total_chars);
+        }
+        if session.score.is_finite() && session.score >= 0.0 {
+            entry.best_score = Some(
+                entry
+                    .best_score
+                    .map_or(session.score, |best| best.max(session.score)),
+            );
         }
     }
     days
@@ -141,12 +196,25 @@ pub fn build_heatmap(
         let first = days_from_civil(year, month, 1);
         first..first + i64::from(days_in_month(year, month))
     };
-    let max_chars = spans
+    let on_calendar: Vec<&HeatmapDay> = spans
         .iter()
         .flat_map(|&span| days(span))
         .filter_map(|idx| by_date.get(&day_index_to_date(idx)))
-        .map(|day| day.chars)
+        .collect();
+    let max_chars = on_calendar.iter().map(|day| day.chars).fold(1, u32::max);
+    let max_sessions = on_calendar.iter().map(|day| day.sessions).fold(1, u32::max);
+    let max_groups = on_calendar
+        .iter()
+        .map(|day| day.group_count)
         .fold(1, u32::max);
+    let max_char_wpm = on_calendar
+        .iter()
+        .filter_map(|day| day.char_wpm())
+        .fold(0.0, f64::max);
+    let max_score = on_calendar
+        .iter()
+        .filter_map(|day| day.best_score)
+        .fold(0.0, f64::max);
 
     let cell = |idx: i64| {
         let date = day_index_to_date(idx);
@@ -156,6 +224,9 @@ pub fn build_heatmap(
         let sessions_n = day.map(|d| d.sessions).unwrap_or(0);
         let group_count = day.map(|d| d.group_count).unwrap_or(0);
         let avg_accuracy = day.and_then(HeatmapDay::avg_accuracy);
+        let char_wpm = day.and_then(HeatmapDay::char_wpm);
+        let effective_wpm = day.and_then(HeatmapDay::effective_wpm);
+        let best_score = day.and_then(|d| d.best_score);
         let intensity = if in_future || sessions_n == 0 {
             None
         } else {
@@ -173,6 +244,9 @@ pub fn build_heatmap(
             sessions: sessions_n,
             group_count,
             avg_accuracy,
+            char_wpm,
+            effective_wpm,
+            best_score,
             intensity,
         }
     };
@@ -190,7 +264,14 @@ pub fn build_heatmap(
         })
         .collect();
 
-    Some(HeatmapGrid { max_chars, months })
+    Some(HeatmapGrid {
+        max_chars,
+        max_sessions,
+        max_groups,
+        max_char_wpm,
+        max_score,
+        months,
+    })
 }
 
 #[cfg(test)]
@@ -225,6 +306,64 @@ mod tests {
         assert!((day.avg_accuracy().unwrap_or(0.0) - 0.9).abs() < 1e-9);
     }
 
+    /// A day's speed is what most of its copy was sent at, and its score is
+    /// its best session's.
+    #[test]
+    fn a_day_keeps_its_speed_and_its_best_score() {
+        let mut slow = session("2026-07-17", 30, 0.9);
+        slow.char_wpm = 20.0;
+        slow.effective_wpm = 10.0;
+        slow.score = 400.0;
+        let mut fast = session("2026-07-17", 10, 0.8);
+        fast.char_wpm = 40.0;
+        fast.effective_wpm = 30.0;
+        fast.score = 250.0;
+        let days = aggregate_heatmap(&[slow, fast]);
+        let day = days.get("2026-07-17").expect("day");
+        assert!((day.char_wpm().unwrap_or(0.0) - 25.0).abs() < 1e-9);
+        assert!((day.effective_wpm().unwrap_or(0.0) - 15.0).abs() < 1e-9);
+        assert_eq!(day.best_score, Some(400.0));
+    }
+
+    #[test]
+    fn an_unreadable_speed_or_score_is_left_out() {
+        let mut broken = session("2026-07-17", 10, 0.9);
+        broken.char_wpm = f64::NAN;
+        broken.score = f64::INFINITY;
+        let days = aggregate_heatmap(&[broken]);
+        let day = days.get("2026-07-17").expect("day");
+        assert_eq!(day.char_wpm(), None);
+        assert_eq!(day.best_score, None);
+    }
+
+    /// Each figure of a day is measured against the most any day on the
+    /// calendar had, whichever day that was.
+    #[test]
+    fn the_grid_knows_the_most_of_everything() {
+        let mut busy = session("2026-07-16", 30, 0.9);
+        busy.score = 120.0;
+        busy.char_wpm = 18.0;
+        let mut quick = session("2026-07-17", 10, 0.9);
+        quick.score = 300.0;
+        quick.char_wpm = 32.0;
+        let again = session("2026-07-17", 5, 0.9);
+        let grid = build_heatmap(
+            &[busy, quick, again],
+            "2026-07-17",
+            1,
+            HeatmapColorMode::Volume,
+        )
+        .expect("grid");
+        assert_eq!(grid.max_chars, 30);
+        assert_eq!(grid.max_sessions, 2);
+        assert_eq!(grid.max_groups, 2);
+        assert_eq!(grid.max_score, 300.0);
+        assert!(grid.max_char_wpm > 18.0);
+        let friday = grid.cell("2026-07-17").expect("friday");
+        assert_eq!(friday.best_score, Some(300.0));
+        assert!(friday.char_wpm.is_some());
+    }
+
     #[test]
     fn a_session_with_an_unreadable_date_is_skipped() {
         let days = aggregate_heatmap(&[session("not-a-date", 10, 1.0)]);
@@ -255,15 +394,10 @@ mod tests {
 
     #[test]
     fn a_day_without_sessions_has_no_average() {
-        let day = HeatmapDay {
-            date: "2026-07-17".into(),
-            chars: 0,
-            sessions: 0,
-            group_count: 0,
-            accuracy_sum: 0.0,
-            accuracy_sessions: 0,
-        };
+        let day = HeatmapDay::new("2026-07-17");
         assert_eq!(day.avg_accuracy(), None);
+        assert_eq!(day.char_wpm(), None);
+        assert_eq!(day.best_score, None);
     }
 
     #[test]

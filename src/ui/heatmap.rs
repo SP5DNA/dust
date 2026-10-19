@@ -1,4 +1,6 @@
-use cw_core::{HeatmapColorMode, HeatmapGrid, SessionResult, StreakState, StreakStatus};
+use cw_core::{
+    HeatmapCell, HeatmapColorMode, HeatmapGrid, SessionResult, StreakState, StreakStatus,
+};
 use dioxus::prelude::*;
 
 use crate::ui::widgets::{CardHead, IconName, Seg, control_id, html_bool};
@@ -71,7 +73,6 @@ fn heat_color(intensity: f64) -> String {
 #[component]
 pub fn ActivityHeatmap(sessions: Vec<SessionResult>, today: String) -> Element {
     let mut mode = use_signal(|| HeatmapColorMode::Volume);
-    let mut selected = use_signal(|| None::<String>);
     let Some(grid) = cw_core::build_heatmap(&sessions, &today, cw_core::HEATMAP_MONTHS, mode())
     else {
         return rsx! {};
@@ -81,26 +82,6 @@ pub fn ActivityHeatmap(sessions: Vec<SessionResult>, today: String) -> Element {
     } else {
         "Better copy"
     };
-    let selected_cell = selected().and_then(|date| grid.cell(&date).cloned());
-    let selected_summary = selected_cell.as_ref().map(|cell| {
-        if cell.sessions == 0 {
-            format!("{} · no practice", cell.date)
-        } else {
-            let noun = if cell.sessions == 1 {
-                "session"
-            } else {
-                "sessions"
-            };
-            let mut text = format!(
-                "{} · {} {noun} · {} chars",
-                cell.date, cell.sessions, cell.chars
-            );
-            if let Some(acc) = cell.avg_accuracy {
-                text.push_str(&format!(" · {:.0}% accuracy", acc * 100.0));
-            }
-            text
-        }
-    });
     rsx! {
         div { class: "card stack-sm",
             CardHead {
@@ -120,7 +101,7 @@ pub fn ActivityHeatmap(sessions: Vec<SessionResult>, today: String) -> Element {
                     }
                 }
             }
-            HeatmapGridView { grid: grid, selected: selected(), on_select: move |date| selected.set(Some(date)) }
+            HeatmapGridView { grid: grid }
             div { class: "heatmap-legend",
                 span { class: "tiny", style: "text-transform: none; letter-spacing: 0;", "Less" }
                 span { class: "heat-cell" }
@@ -129,17 +110,23 @@ pub fn ActivityHeatmap(sessions: Vec<SessionResult>, today: String) -> Element {
                 }
                 span { class: "tiny", style: "text-transform: none; letter-spacing: 0;", "{legend}" }
             }
-            if let Some(summary) = selected_summary {
-                p { class: "muted", "{summary}" }
-            } else {
-                p { class: "muted", "Tap a day for details." }
-            }
+            p { class: "muted", "Tap a day for details." }
         }
     }
 }
 
 /// Weekday headings over each month's columns, Monday first.
 const WEEKDAYS: [&str; 7] = ["M", "T", "W", "T", "F", "S", "S"];
+
+const WEEKDAY_NAMES: [&str; 7] = [
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+    "Sunday",
+];
 
 const MONTH_NAMES: [&str; 12] = [
     "January",
@@ -166,12 +153,232 @@ fn month_label(year: i32, month: u32) -> String {
     format!("{name} {year}")
 }
 
+/// "Tuesday 8 September 2026": the `n`th day (from 0) of a month whose 1st
+/// falls `lead` days into its week.
+fn day_label(year: i32, month: u32, lead: u32, n: usize) -> String {
+    let weekday = WEEKDAY_NAMES
+        .get((lead as usize + n) % WEEKDAY_NAMES.len())
+        .copied()
+        .unwrap_or_default();
+    format!("{weekday} {} {}", n + 1, month_label(year, month))
+}
+
+/// "1 session", "2 sessions".
+fn counted(n: u32, noun: &str) -> String {
+    if n == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{n} {noun}s")
+    }
+}
+
+/// What a screen reader says for a day's square.
+fn day_summary(label: &str, cell: &HeatmapCell) -> String {
+    if cell.sessions == 0 {
+        return format!("{label}: no practice");
+    }
+    let mut text = format!(
+        "{label}: {}, {}",
+        counted(cell.chars, "character"),
+        counted(cell.sessions, "session")
+    );
+    if let Some(accuracy) = cell.avg_accuracy {
+        text.push_str(&format!(", {:.0}% accuracy", accuracy * 100.0));
+    }
+    text
+}
+
+/// One line of a day's card: what it is, how much, and a bar of how that
+/// stands against the most any day on the calendar had.
+#[derive(Clone, Debug, PartialEq)]
+struct TipRow {
+    label: &'static str,
+    value: String,
+    note: Option<String>,
+    /// The bar's length, from 0 to 1.
+    share: f64,
+    /// The bar's class, which colours it.
+    tone: &'static str,
+    /// A colour of its own instead, for accuracy: the calendar's.
+    heat: Option<String>,
+}
+
+fn share(value: f64, most: f64) -> f64 {
+    if most > 0.0 && value.is_finite() {
+        (value / most).clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+/// What a day's card shows, line by line. A day without practice has none.
+fn tip_rows(cell: &HeatmapCell, grid: &HeatmapGrid) -> Vec<TipRow> {
+    if cell.sessions == 0 {
+        return Vec::new();
+    }
+    let several = cell.sessions > 1;
+    let mut rows = vec![
+        TipRow {
+            label: "Characters",
+            value: cell.chars.to_string(),
+            note: None,
+            share: share(f64::from(cell.chars), f64::from(grid.max_chars)),
+            tone: "fill-chars",
+            heat: None,
+        },
+        TipRow {
+            label: "Sessions",
+            value: cell.sessions.to_string(),
+            note: None,
+            share: share(f64::from(cell.sessions), f64::from(grid.max_sessions)),
+            tone: "fill-sessions",
+            heat: None,
+        },
+        TipRow {
+            label: "Groups",
+            value: cell.group_count.to_string(),
+            note: (cell.group_count > 0).then(|| {
+                let per_group = format!(
+                    "~{:.1} chars/group",
+                    f64::from(cell.chars) / f64::from(cell.group_count)
+                );
+                if several {
+                    format!(
+                        "~{:.1}/session · {per_group}",
+                        f64::from(cell.group_count) / f64::from(cell.sessions)
+                    )
+                } else {
+                    per_group
+                }
+            }),
+            share: share(f64::from(cell.group_count), f64::from(grid.max_groups)),
+            tone: "fill-groups",
+            heat: None,
+        },
+    ];
+    if let Some(char_wpm) = cell.char_wpm {
+        // Farnsworth: characters at one speed, spaced out to a slower one.
+        let spaced = cell
+            .effective_wpm
+            .filter(|effective| char_wpm - effective >= 0.5);
+        rows.push(TipRow {
+            label: "Speed",
+            value: format!("{char_wpm:.0} WPM"),
+            note: spaced.map(|effective| format!("spaced to {effective:.0} WPM")),
+            share: share(char_wpm, grid.max_char_wpm),
+            tone: "fill-speed",
+            heat: None,
+        });
+    }
+    if let Some(accuracy) = cell.avg_accuracy {
+        rows.push(TipRow {
+            label: "Accuracy",
+            value: format!(
+                "{:.1}%{}",
+                accuracy * 100.0,
+                if several { " avg" } else { "" }
+            ),
+            note: None,
+            share: accuracy.clamp(0.0, 1.0),
+            tone: "fill-accuracy",
+            heat: Some(heat_color(accuracy)),
+        });
+    }
+    if let Some(score) = cell.best_score {
+        rows.push(TipRow {
+            label: if several { "Best score" } else { "Score" },
+            value: format!("{score:.0}"),
+            note: None,
+            share: share(score, grid.max_score),
+            tone: "fill-score",
+            heat: None,
+        });
+    }
+    rows
+}
+
+/// Where a day's card goes: on the square it is for, kept on screen.
+#[derive(Clone, Debug, PartialEq)]
+struct TipAt {
+    date: String,
+    /// The square's left edge, from the window's, in CSS pixels.
+    cell_left: f64,
+    /// Below the square, because the window has no room for it above.
+    below: bool,
+}
+
+/// The room a card needs above its square, in CSS pixels. A square nearer
+/// the top of the window than this opens its card below it.
+const TIP_ROOM_PX: f64 = 300.0;
+
+impl TipAt {
+    /// From where an event happened, in the window and in the square: the
+    /// square's own corner is the one less the other.
+    fn new(date: &str, in_window: (f64, f64), in_square: (f64, f64)) -> Self {
+        let left = in_window.0 - in_square.0;
+        let top = in_window.1 - in_square.1;
+        Self {
+            date: date.to_string(),
+            cell_left: if left.is_finite() { left.max(0.0) } else { 0.0 },
+            below: top.is_nan() || top < TIP_ROOM_PX,
+        }
+    }
+}
+
+/// A day's card, opened by pointing at its square with a mouse or pinned by
+/// tapping it. It is the square's own child, so it scrolls with it; it is
+/// hidden from screen readers, which hear the square's label instead.
+fn day_tip(label: &str, cell: &HeatmapCell, grid: &HeatmapGrid, at: &TipAt) -> Element {
+    let class = if at.below { "day-tip below" } else { "day-tip" };
+    let rows = tip_rows(cell, grid);
+    rsx! {
+        span {
+            class: class,
+            role: "tooltip",
+            aria_hidden: "true",
+            style: "--cell-left: {at.cell_left:.0}px;",
+            span { class: "tip-date", "{label}" }
+            if rows.is_empty() {
+                span { class: "tip-empty", "No practice" }
+            }
+            for row in rows {
+                span { class: "tip-row",
+                    span { class: "tip-line",
+                        span { class: "tip-label", "{row.label}" }
+                        span { class: "tip-value", "{row.value}" }
+                    }
+                    span { class: "tip-bar",
+                        if row.share > 0.0 {
+                            span {
+                                class: "tip-fill {row.tone}",
+                                style: {
+                                    let width = format!("width: {:.1}%;", row.share * 100.0);
+                                    match &row.heat {
+                                        Some(colour) => format!("{width} background: {colour};"),
+                                        None => width,
+                                    }
+                                },
+                            }
+                        }
+                    }
+                    if let Some(note) = row.note {
+                        span { class: "tip-note", "{note}" }
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[component]
-fn HeatmapGridView(
-    grid: HeatmapGrid,
-    selected: Option<String>,
-    on_select: EventHandler<String>,
-) -> Element {
+fn HeatmapGridView(grid: HeatmapGrid) -> Element {
+    // A mouse pointing at a square opens its card for as long as it stays;
+    // a tap pins one until the same square is tapped again. Touch has no
+    // pointing, so only a mouse's counts.
+    let mut hovered = use_signal(|| None::<TipAt>);
+    let mut pinned = use_signal(|| None::<TipAt>);
+    let shown = hovered().or_else(&*pinned);
+    let pinned_date = pinned().map(|at| at.date);
     rsx! {
         div { class: "heatmap-months",
             for month in grid.months.iter() {
@@ -183,28 +390,56 @@ fn HeatmapGridView(
                         }
                         for (n, cell) in month.cells.iter().enumerate() {
                             {
-                                let date = cell.date.clone();
-                                let is_selected = selected.as_deref() == Some(date.as_str());
-                                let cls = if is_selected { "heat-cell selected" } else { "heat-cell" };
+                                let label = day_label(month.year, month.month, month.lead, n);
+                                let tip = shown.as_ref().filter(|at| at.date == cell.date);
+                                let is_selected = pinned_date.as_deref() == Some(cell.date.as_str());
+                                let cls = match (is_selected, tip.is_some()) {
+                                    (true, true) => "heat-cell selected has-tip",
+                                    (true, false) => "heat-cell selected",
+                                    (false, true) => "heat-cell has-tip",
+                                    (false, false) => "heat-cell",
+                                };
                                 // The 1st sits under its weekday, and every day after it follows on.
                                 let column = (n == 0).then(|| format!("grid-column-start: {};", month.lead + 1));
                                 let paint = cell.intensity.map(|intensity| format!("background: {};", heat_color(intensity)));
                                 let style: Vec<String> = [column, paint].into_iter().flatten().collect();
                                 let style = (!style.is_empty()).then(|| style.join(" "));
-                                let title = if cell.sessions == 0 {
-                                    format!("{} — no practice", cell.date)
-                                } else {
-                                    format!("{} — {} chars, {} sessions", cell.date, cell.chars, cell.sessions)
-                                };
+                                let summary = day_summary(&label, cell);
+                                let in_future = cell.in_future;
+                                let (enter, leave, click) = (cell.date.clone(), cell.date.clone(), cell.date.clone());
                                 rsx! {
                                     button {
                                         id: control_id("day", &cell.date),
                                         class: cls,
                                         style: style,
-                                        title: "{title}",
-                                        aria_label: "{title}",
-                                        disabled: html_bool(cell.in_future),
-                                        onclick: move |_| on_select.call(date.clone()),
+                                        aria_label: "{summary}",
+                                        disabled: html_bool(in_future),
+                                        onpointerenter: move |evt: PointerEvent| {
+                                            if !in_future && evt.pointer_type() == "mouse" {
+                                                let window = evt.client_coordinates();
+                                                let square = evt.element_coordinates();
+                                                hovered.set(Some(TipAt::new(&enter, (window.x, window.y), (square.x, square.y))));
+                                            }
+                                        },
+                                        onpointerleave: move |evt: PointerEvent| {
+                                            let here = hovered.peek().as_ref().is_some_and(|at| at.date == leave);
+                                            if here && evt.pointer_type() == "mouse" {
+                                                hovered.set(None);
+                                            }
+                                        },
+                                        onclick: move |evt: MouseEvent| {
+                                            let again = pinned.peek().as_ref().is_some_and(|at| at.date == click);
+                                            if again {
+                                                pinned.set(None);
+                                            } else {
+                                                let window = evt.client_coordinates();
+                                                let square = evt.element_coordinates();
+                                                pinned.set(Some(TipAt::new(&click, (window.x, window.y), (square.x, square.y))));
+                                            }
+                                        },
+                                        if let Some(at) = tip {
+                                            {day_tip(&label, cell, &grid, at)}
+                                        }
                                     }
                                 }
                             }
@@ -218,7 +453,7 @@ fn HeatmapGridView(
 
 #[cfg(test)]
 mod tests {
-    use super::{heat_color, month_label};
+    use super::*;
 
     #[test]
     fn days_shade_from_red_through_yellow_to_green() {
@@ -237,5 +472,155 @@ mod tests {
         // A month out of range names no month rather than panicking.
         assert_eq!(month_label(2026, 0), " 2026");
         assert_eq!(month_label(2026, 13), " 2026");
+    }
+
+    #[test]
+    fn a_day_is_named_with_its_weekday() {
+        // September 2026 starts on a Tuesday, one day into its week.
+        assert_eq!(day_label(2026, 9, 1, 0), "Tuesday 1 September 2026");
+        assert_eq!(day_label(2026, 9, 1, 5), "Sunday 6 September 2026");
+        assert_eq!(day_label(2026, 9, 1, 6), "Monday 7 September 2026");
+    }
+
+    #[test]
+    fn one_is_counted_in_the_singular() {
+        assert_eq!(counted(1, "session"), "1 session");
+        assert_eq!(counted(2, "session"), "2 sessions");
+        assert_eq!(counted(0, "character"), "0 characters");
+    }
+
+    fn day(sessions: u32) -> HeatmapCell {
+        HeatmapCell {
+            date: "2026-09-08".to_string(),
+            in_future: false,
+            chars: 60,
+            sessions,
+            group_count: 20,
+            avg_accuracy: Some(0.959),
+            char_wpm: Some(25.0),
+            effective_wpm: Some(25.0),
+            best_score: Some(800.0),
+            intensity: Some(0.5),
+        }
+    }
+
+    fn grid() -> HeatmapGrid {
+        HeatmapGrid {
+            max_chars: 120,
+            max_sessions: 4,
+            max_groups: 20,
+            max_char_wpm: 50.0,
+            max_score: 1_600.0,
+            months: Vec::new(),
+        }
+    }
+
+    fn row<'r>(rows: &'r [TipRow], label: &str) -> &'r TipRow {
+        rows.iter()
+            .find(|row| row.label == label)
+            .unwrap_or_else(|| panic!("no {label} row in {rows:?}"))
+    }
+
+    /// Every figure stands against the most any day on the calendar had.
+    #[test]
+    fn a_day_card_measures_each_figure_against_the_busiest_day() {
+        let rows = tip_rows(&day(1), &grid());
+        let labels: Vec<&str> = rows.iter().map(|row| row.label).collect();
+        assert_eq!(
+            labels,
+            [
+                "Characters",
+                "Sessions",
+                "Groups",
+                "Speed",
+                "Accuracy",
+                "Score"
+            ]
+        );
+        assert_eq!(row(&rows, "Characters").value, "60");
+        assert_eq!(row(&rows, "Characters").share, 0.5);
+        assert_eq!(row(&rows, "Sessions").share, 0.25);
+        assert_eq!(row(&rows, "Groups").value, "20");
+        assert_eq!(row(&rows, "Groups").share, 1.0);
+        assert_eq!(
+            row(&rows, "Groups").note.as_deref(),
+            Some("~3.0 chars/group")
+        );
+        assert_eq!(row(&rows, "Speed").value, "25 WPM");
+        assert_eq!(row(&rows, "Speed").note, None, "no Farnsworth, no note");
+        assert_eq!(row(&rows, "Accuracy").value, "95.9%");
+        assert_eq!(row(&rows, "Accuracy").heat, Some(heat_color(0.959)));
+        assert_eq!(row(&rows, "Characters").heat, None);
+        assert_eq!(row(&rows, "Characters").tone, "fill-chars");
+        assert_eq!(row(&rows, "Score").value, "800");
+        assert_eq!(row(&rows, "Score").share, 0.5);
+    }
+
+    #[test]
+    fn a_day_of_several_sessions_shows_averages_and_its_best() {
+        let mut busy = day(2);
+        busy.effective_wpm = Some(15.0);
+        let rows = tip_rows(&busy, &grid());
+        assert_eq!(row(&rows, "Groups").value, "20");
+        assert_eq!(
+            row(&rows, "Groups").note.as_deref(),
+            Some("~10.0/session · ~3.0 chars/group")
+        );
+        assert_eq!(row(&rows, "Accuracy").value, "95.9% avg");
+        assert_eq!(row(&rows, "Best score").value, "800");
+        assert_eq!(
+            row(&rows, "Speed").note.as_deref(),
+            Some("spaced to 15 WPM")
+        );
+    }
+
+    #[test]
+    fn a_day_without_practice_has_nothing_to_show() {
+        let quiet = HeatmapCell {
+            sessions: 0,
+            ..day(1)
+        };
+        assert!(tip_rows(&quiet, &grid()).is_empty());
+        assert_eq!(
+            day_summary("Wednesday 9 September 2026", &quiet),
+            "Wednesday 9 September 2026: no practice"
+        );
+    }
+
+    /// What could not be read is left off rather than shown as nothing.
+    #[test]
+    fn what_a_day_does_not_know_it_leaves_off() {
+        let unknown = HeatmapCell {
+            char_wpm: None,
+            avg_accuracy: None,
+            best_score: None,
+            ..day(1)
+        };
+        let labels: Vec<&str> = tip_rows(&unknown, &grid())
+            .iter()
+            .map(|row| row.label)
+            .collect();
+        assert_eq!(labels, ["Characters", "Sessions", "Groups"]);
+        // An empty calendar draws no bar rather than dividing by nothing.
+        assert_eq!(share(5.0, 0.0), 0.0);
+        assert_eq!(share(f64::NAN, 10.0), 0.0);
+        assert_eq!(share(20.0, 10.0), 1.0);
+    }
+
+    #[test]
+    fn a_card_opens_above_its_square_unless_the_window_has_no_room() {
+        let low = TipAt::new("2026-09-08", (410.0, 520.0), (10.0, 20.0));
+        assert_eq!(low.cell_left, 400.0);
+        assert!(!low.below);
+        let high = TipAt::new("2026-09-08", (410.0, 120.0), (10.0, 20.0));
+        assert!(high.below);
+        // A click from the keyboard has no position: the card still opens,
+        // kept on screen.
+        let keyed = TipAt::new("2026-09-08", (0.0, 0.0), (0.0, 0.0));
+        assert_eq!(keyed.cell_left, 0.0);
+        assert!(keyed.below);
+        let nowhere = TipAt::new("2026-09-08", (f64::NAN, f64::NAN), (0.0, 0.0));
+        assert_eq!(nowhere.cell_left, 0.0);
+        assert!(nowhere.below);
     }
 }

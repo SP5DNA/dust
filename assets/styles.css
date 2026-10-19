@@ -46,6 +46,7 @@
   --bad-soft: rgba(192, 57, 47, 0.12);
   --info: #3d5a80;
   --info-soft: rgba(61, 90, 128, 0.12);
+  --violet: #7a4fc4;
 
   /* Switch: the off state needs its own contrast, not just a surface tint */
   --switch-track: #e3d2b4;
@@ -122,6 +123,7 @@
     --bad-soft: rgba(244, 114, 106, 0.16);
     --info: #7aa5dd;
     --info-soft: rgba(122, 165, 221, 0.16);
+    --violet: #b493f5;
 
     --switch-track: #2b3446;
     --switch-edge: #414c62;
@@ -184,6 +186,7 @@
   --bad-soft: rgba(244, 114, 106, 0.16);
   --info: #7aa5dd;
   --info-soft: rgba(122, 165, 221, 0.16);
+  --violet: #b493f5;
 
   --switch-track: #2b3446;
   --switch-edge: #414c62;
@@ -1782,6 +1785,7 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
 .heatmap-month-grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 3px; }
 .heatmap-day-label { font-size: 9px; line-height: 1.3; text-align: center; color: var(--ink-dim); font-weight: 700; }
 .heat-cell {
+  position: relative;
   width: 13px;
   height: 13px;
   border-radius: 3px;
@@ -1793,6 +1797,58 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
 .heatmap-month-grid .heat-cell { width: 100%; height: auto; aspect-ratio: 1; }
 .heat-cell.selected { outline: 2px solid var(--ink); outline-offset: 1px; }
 .heat-cell:disabled { opacity: 0.3; cursor: default; }
+/* A day's card, opened by pointing at its square or pinned by tapping it. It
+   hangs above the square, or below where the window has no room above, and
+   --cell-left (the square's distance from the window's left edge) keeps it
+   on screen sideways. The square carrying it is lifted over its neighbours. */
+.heat-cell.has-tip { z-index: 30; }
+.day-tip {
+  --tip-w: min(15.5rem, calc(100vw - 32px));
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: clamp(
+    calc(12px - var(--cell-left, 0px)),
+    calc(50% - var(--tip-w) / 2),
+    calc(100vw - 28px - var(--tip-w) - var(--cell-left, 0px))
+  );
+  width: var(--tip-w);
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  padding: 0.85rem 1rem 0.95rem;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  box-shadow: var(--shadow-lg);
+  color: var(--ink);
+  font-size: 0.84rem;
+  line-height: 1.3;
+  text-align: left;
+  white-space: normal;
+  pointer-events: none;
+  animation: tip-in 0.12s var(--ease);
+}
+.day-tip.below { bottom: auto; top: calc(100% + 8px); }
+.tip-date {
+  font-size: 0.95rem;
+  font-weight: 700;
+  padding-bottom: 0.55rem;
+  border-bottom: 1px solid var(--line);
+}
+.tip-row { display: flex; flex-direction: column; gap: 0.3rem; }
+.tip-line { display: flex; justify-content: space-between; align-items: baseline; gap: 0.75rem; }
+.tip-label { color: var(--ink-soft); }
+.tip-value { font-weight: 700; font-variant-numeric: tabular-nums; text-align: right; }
+.tip-bar { display: block; height: 7px; border-radius: var(--pill); background: var(--surface-sunken); overflow: hidden; }
+.tip-fill { display: block; height: 100%; min-width: 7px; border-radius: var(--pill); }
+.tip-fill.fill-chars { background: var(--info); }
+.tip-fill.fill-sessions { background: var(--good); }
+.tip-fill.fill-groups { background: var(--violet); }
+.tip-fill.fill-speed { background: var(--copper); }
+.tip-fill.fill-score { background: var(--warn); }
+.tip-note { color: var(--ink-dim); font-size: 0.78rem; }
+.tip-empty { color: var(--ink-dim); }
+@keyframes tip-in { from { opacity: 0; } to { opacity: 1; } }
 .heatmap-legend { display: flex; align-items: center; gap: 0.35rem; }
 
 .notice {
