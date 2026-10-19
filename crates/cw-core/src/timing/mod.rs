@@ -22,6 +22,7 @@ pub use plan::{
     DEFAULT_TARGET_GAIN, PlannedTransmission, PlaybackPlan, ToneEvent, plan_morse_playback_for,
     plan_transmission,
 };
+pub(crate) use station::station_speed_grid;
 pub use station::{StationVoice, resolve_station};
 
 /// The word-space stretch, inside its range whatever is set.

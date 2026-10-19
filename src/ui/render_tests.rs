@@ -1046,6 +1046,33 @@ mod interactions {
         assert!(!ui.has("Group length"));
     }
 
+    /// Speed has its card beside length: how likely each speed is next, and
+    /// the share of characters copied right at it.
+    #[test]
+    fn the_sampling_tab_shows_each_speed() {
+        let mut ui = stats(false, CharSetMode::Mixed);
+        ui.click("seg-sampling");
+        assert!(ui.has("Speed, WPM"));
+        assert!(ui.has("Adaptive speed is off, so each group"));
+        // The default speeds are 18 to 25 WPM: a row for each.
+        assert_eq!(ui.html().matches(">right ").count(), 8);
+
+        let mut ui = Ui::new(
+            SpeedStatsHarness,
+            SpeedStatsHarnessProps {
+                adaptive_speed: true,
+            },
+        );
+        ui.click("seg-sampling");
+        assert!(ui.has("Chance of each speed in the next group"));
+        assert!(!ui.has("Farnsworth"), "tied spacing needs no word on it");
+
+        // Callsigns have no length to choose, but they still have a speed.
+        let mut ui = stats(true, CharSetMode::Callsign);
+        ui.click("seg-sampling");
+        assert!(ui.has("Speed, WPM"));
+    }
+
     #[test]
     fn a_day_on_the_calendar_can_be_opened() {
         let mut ui = Ui::new(HeatmapHarness, ());
