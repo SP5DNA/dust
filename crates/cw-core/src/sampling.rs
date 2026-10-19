@@ -8,7 +8,7 @@ use crate::machine::GroupSource;
 use crate::pool::compute_char_pool;
 use crate::rng::{Rng, SplitMix64, weighted_random_pick};
 use crate::session::{Answered, SessionResult};
-use crate::settings::{CharSetMode, LevelAxis, TrainingSettings};
+use crate::settings::{CharSetMode, LevelAxis, SettingsSection, TrainingSettings};
 use crate::span::SpanBelief;
 use crate::speed::{SpeedBelief, SpeedPath};
 
@@ -97,7 +97,7 @@ impl Sampler {
 impl GroupSource for Sampler {
     fn next_group(&mut self, settings: &TrainingSettings) -> (String, u32) {
         let length = adaptive_bounds(settings).map(|(shortest, longest)| {
-            let target = settings.curriculum.group_size_target.success_rate();
+            let target = settings.curriculum.aim.groups_whole();
             self.span
                 .draw_length(shortest, longest, target, &mut self.rng)
         });
@@ -117,7 +117,7 @@ impl GroupSource for Sampler {
     fn next_speed(&mut self, settings: &TrainingSettings) -> Option<(f64, f64)> {
         let path = adaptive_speed_path(settings)?;
         let (low, high) = path.bounds();
-        let target = settings.curriculum.group_size_target.char_rate();
+        let target = settings.curriculum.aim.chars_right();
         let copy = self.speed.draw_speed(low, high, target, &mut self.rng);
         Some(path.voice_at(copy))
     }
@@ -148,6 +148,17 @@ pub(crate) fn group_size_bounds(settings: &TrainingSettings) -> (usize, usize) {
 /// the screens say about it, read off the same rule the sampler follows.
 pub fn adapts_group_size(settings: &TrainingSettings) -> bool {
     adaptive_bounds(settings).is_some()
+}
+
+/// The settings card that shows the aim, and so puts it back: Session shape
+/// while group size adapts, for both; Speed while only the speed does. With
+/// neither adapting it shows nowhere, and Session shape keeps it.
+pub fn aim_section(settings: &TrainingSettings) -> SettingsSection {
+    if adapts_speed(settings) && !adapts_group_size(settings) {
+        SettingsSection::Speed
+    } else {
+        SettingsSection::SessionShape
+    }
 }
 
 /// The range adaptive group size draws within, when it has one to draw in:
@@ -1170,7 +1181,7 @@ mod tests {
         settings.playback.char_wpm_max = 50.0;
         settings.playback.link_char_to_effective = true;
         settings.playback.adaptive_speed = true;
-        let target = settings.curriculum.group_size_target.char_rate();
+        let target = settings.curriculum.aim.chars_right();
         let mut sampler = Sampler::new(&[], &settings, seed);
         let mut rng = SplitMix64::new(seed ^ 0xA5A5);
         let (mut right, mut counted, mut whole, mut speeds, mut lengths) = (0, 0, 0, 0.0, 0);
@@ -1264,10 +1275,10 @@ mod tests {
     /// with the other — no shortest groups at the top speed.
     #[test]
     fn adaptive_speed_and_length_settle_together() {
-        let target = crate::settings::GroupSizeTarget::Balanced;
+        let aim = crate::settings::Aim::Balanced;
         for (name, learner) in learners() {
             let run = run_both(&learner, 400, 7);
-            let true_speed = learner.speed_for(target.char_rate());
+            let true_speed = learner.speed_for(aim.chars_right());
             assert!(
                 (0.89..=0.98).contains(&run.chars_right),
                 "{name}: {:.3} of characters right",
@@ -1301,7 +1312,7 @@ mod tests {
     #[test]
     #[ignore]
     fn adaptive_speed_simulation() {
-        let target = crate::settings::GroupSizeTarget::Balanced;
+        let aim = crate::settings::Aim::Balanced;
         println!(
             "| Learner | Speed for 94% | Found | Sent at | Characters right | Span found | Length | Copied whole |"
         );
@@ -1311,7 +1322,7 @@ mod tests {
                 let run = run_both(&learner, 400, seed);
                 println!(
                     "| {name} | {:.1} | {:.1} | {:.1} | {:.1}% | {:.1} | {:.1} | {:.0}% |",
-                    learner.speed_for(target.char_rate()),
+                    learner.speed_for(aim.chars_right()),
                     run.found_speed,
                     run.speed,
                     run.chars_right * 100.0,
@@ -1332,7 +1343,7 @@ mod tests {
                 let run = run_with(&learner, 400, seed, true);
                 println!(
                     "| {name} | {:.1} | {:.1} | {:.1}% | {:.1} | {:.0}% |",
-                    learner.speed_for(target.char_rate()),
+                    learner.speed_for(aim.chars_right()),
                     run.speed,
                     run.chars_right * 100.0,
                     run.length,

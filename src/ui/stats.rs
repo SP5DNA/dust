@@ -6,7 +6,7 @@ use dioxus::prelude::*;
 
 use crate::state::SessionPick;
 use crate::ui::scores::ScoresTab;
-use crate::ui::settings::target_label;
+use crate::ui::settings::aim_label;
 use crate::ui::stats_detail::{HistoryTab, LettersTab, MistakesTab, SamplingTab};
 use crate::ui::widgets::{CardHead, IconName, Seg};
 
@@ -208,10 +208,7 @@ fn SpanCard(settings: TrainingSettings, sessions: Vec<SessionResult>) -> Element
     };
     let adapting = adapts_group_size(&settings);
     let mode = if adapting {
-        format!(
-            "Adapting · {}",
-            target_label(settings.curriculum.group_size_target)
-        )
+        format!("Adapting · {}", aim_label(settings.curriculum.aim))
     } else {
         "Adaptive length off".to_string()
     };
@@ -435,10 +432,10 @@ fn CopySpeedCard(settings: TrainingSettings, sessions: Vec<SessionResult>) -> El
     } else {
         format!("down {:.0} over {count} sessions", -change)
     };
-    let target = settings.curriculum.group_size_target;
+    let aim = settings.curriculum.aim;
     let adapting = adapts_speed(&settings);
     let mode = if adapting {
-        format!("Adapting · {}", target_label(target))
+        format!("Adapting · {}", aim_label(aim))
     } else {
         "Adaptive speed off".to_string()
     };
@@ -474,7 +471,7 @@ fn CopySpeedCard(settings: TrainingSettings, sessions: Vec<SessionResult>) -> El
             }
             div { class: "row-between",
                 span { class: "tiny", style: "text-transform: none; letter-spacing: 0.02em;",
-                    "{target.char_rate() * 100.0:.0}% of characters right · scale {chart.low:.0}–{chart.high:.0} WPM"
+                    "{aim.chars_right() * 100.0:.0}% of characters right · scale {chart.low:.0}–{chart.high:.0} WPM"
                 }
                 span { class: if adapting { "chip good" } else { "chip" }, "{mode}" }
             }

@@ -133,19 +133,29 @@ that lag.
 
 **cw-core**
 
-- `span.rs`: `SpanBelief`, which holds the grid posterior, history replay
-  and fading, learning from each answer, `draw_length`, `estimate` and
+- `belief.rs`: `GridBelief`, the posterior held exactly on a grid: a log
+  prior, evidence that fades a session at a time, the Thompson draw and the
+  estimate. `sessions_in_order` picks the sessions a belief is rebuilt from.
+  Adaptive speed is built on it too.
+- `aim.rs`: leaning a draw towards an aim, and finding the aim by bisection
+  so that the draw as a whole meets the target. Shared with adaptive speed;
+  each passes a `Leaning` of its own.
+- `span.rs`: `SpanBelief`, the span's grid and curve on a `GridBelief`:
+  history replay, learning from each answer, `draw_length`, `estimate` and
   `forecast`.
 - `sampling.rs`:
   - `Sampler` holds a `SpanBelief` beside its `CharSamplingState`.
   - `next_group` asks the belief for a length only when `adaptive_bounds`
     allows: the switch is on, the range has more than one length, and the
     mode is not callsigns. Otherwise it keeps the even draw, unchanged.
-  - `learn` updates both the character beliefs and the span.
-- `settings/mod.rs`: `adaptive_group_size` (default `false`) and
-  `group_size_target` (`Comfortable | Balanced | Stretch`, default
-  `Balanced`), both in the Session shape section. Saves without them load
-  with the feature off.
+  - `learn` takes the group as it was answered (`Answered`) and updates
+    both the character beliefs and the span.
+  - `aim_section` says which settings card shows the aim, and so which
+    card's reset puts it back.
+- `settings/mod.rs`: `adaptive_group_size` (default `false`) in the Session
+  shape section, and `aim` (`Aim`: `Comfortable | Balanced | Stretch`,
+  default `Balanced`, saved as `groupSizeTarget`). The aim is shared with
+  adaptive speed. Saves without them load with the feature off.
 - `stats.rs`: `span_history` and `group_length_forecast`.
 
 **UI**
@@ -176,7 +186,8 @@ that lag.
     modes and callsigns are ignored.
   - With the switch off, the draws are identical to before.
   - In a session, misses shorten the groups.
-  - The settings reset covers both fields.
+  - The settings reset covers both fields, and the aim goes back with the
+    card that shows it.
   - A soak test runs random settings and random answers with adaptive length
     on.
 - **UI:**

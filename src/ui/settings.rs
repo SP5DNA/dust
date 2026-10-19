@@ -5,13 +5,13 @@
 //! page alone.
 
 use cw_core::{
-    ADJUST_COUNT_MAX, ADJUST_THRESHOLD_MAX_PCT, ADJUST_THRESHOLD_MIN_PCT, AutoLevelSettings,
+    ADJUST_COUNT_MAX, ADJUST_THRESHOLD_MAX_PCT, ADJUST_THRESHOLD_MIN_PCT, Aim, AutoLevelSettings,
     COUNTDOWN_MAX_SEC, COVERAGE_STRENGTH_MAX, CharSetMode, ERROR_WEIGHT_MAX, EXTRA_WORD_SPACE_MAX,
     EXTRA_WORD_SPACE_MIN, Experience, GROUP_PAUSE_MAX_SEC, GROUP_REPEAT_MAX, GROUP_REPEAT_MIN,
-    GROUP_SIZE_MAX, GROUP_SIZE_MIN, GROUP_TIMEOUT_MAX_SEC, GroupSizeTarget, KeyerMode,
-    NUM_GROUPS_MAX, NUM_GROUPS_MIN, RangeSetting, SIDE_TONE_MAX_HZ, SIDE_TONE_MIN_HZ,
-    SettingsSection, SpeedPath, TrainingSettings, VOLUME_MAX, VOLUME_MIN, WPM_MAX, WPM_MIN,
-    adapts_group_size, adapts_speed,
+    GROUP_SIZE_MAX, GROUP_SIZE_MIN, GROUP_TIMEOUT_MAX_SEC, KeyerMode, NUM_GROUPS_MAX,
+    NUM_GROUPS_MIN, RangeSetting, SIDE_TONE_MAX_HZ, SIDE_TONE_MIN_HZ, SettingsSection, SpeedPath,
+    TrainingSettings, VOLUME_MAX, VOLUME_MIN, WPM_MAX, WPM_MIN, adapts_group_size, adapts_speed,
+    aim_section,
 };
 use dioxus::prelude::*;
 
@@ -25,12 +25,12 @@ use crate::ui::widgets::{
     control_id, html_bool,
 };
 
-/// What a target for adaptive group size is called on screen.
-pub(crate) fn target_label(target: GroupSizeTarget) -> &'static str {
-    match target {
-        GroupSizeTarget::Comfortable => "Comfortable",
-        GroupSizeTarget::Balanced => "Balanced",
-        GroupSizeTarget::Stretch => "Stretch",
+/// What an aim is called on screen.
+pub(crate) fn aim_label(aim: Aim) -> &'static str {
+    match aim {
+        Aim::Comfortable => "Comfortable",
+        Aim::Balanced => "Balanced",
+        Aim::Stretch => "Stretch",
     }
 }
 
@@ -201,7 +201,7 @@ struct SessionShape {
     adapts: bool,
     /// Adaptive speed is steering too, so the aim covers characters.
     speed_adapts: bool,
-    target: GroupSizeTarget,
+    aim: Aim,
     num_groups: u32,
     group_timeout: f64,
     group_pause_sec: f64,
@@ -222,7 +222,7 @@ impl SessionShape {
             adaptive: settings.curriculum.adaptive_group_size,
             adapts: adapts_group_size(settings),
             speed_adapts: adapts_speed(settings),
-            target: settings.curriculum.group_size_target,
+            aim: settings.curriculum.aim,
             num_groups: settings.curriculum.num_groups,
             group_timeout: p.group_timeout,
             group_pause_sec: p.group_pause_sec,
@@ -235,12 +235,12 @@ impl SessionShape {
     }
 }
 
-/// What a target asks of you, in a sentence: of the groups copied whole, if
+/// What an aim asks of you, in a sentence: of the groups copied whole, if
 /// group size adapts; of the characters right, if speed does.
-fn target_note(target: GroupSizeTarget, groups: bool, chars: bool) -> String {
-    let label = target_label(target);
-    let whole = target.success_rate() * 100.0;
-    let right = target.char_rate() * 100.0;
+fn aim_note(aim: Aim, groups: bool, chars: bool) -> String {
+    let label = aim_label(aim);
+    let whole = aim.groups_whole() * 100.0;
+    let right = aim.chars_right() * 100.0;
     match (groups, chars) {
         (true, true) => format!(
             "{label} aims for {whole:.0}% of groups copied whole and {right:.0}% of characters right."
@@ -253,16 +253,16 @@ fn target_note(target: GroupSizeTarget, groups: bool, chars: bool) -> String {
 /// How hard the adaptive features push: one setting for group size and
 /// speed alike.
 #[component]
-fn AimFor(settings: Signal<TrainingSettings>, target: GroupSizeTarget, note: String) -> Element {
+fn AimFor(settings: Signal<TrainingSettings>, aim: Aim, note: String) -> Element {
     rsx! {
         div { class: "field",
             span { class: "field-label", "Aim for" }
             div { class: "segmented",
-                for each in GroupSizeTarget::ALL {
+                for each in Aim::ALL {
                     Seg {
-                        label: target_label(each),
-                        active: target == each,
-                        onclick: move |_| settings.write().curriculum.group_size_target = each,
+                        label: aim_label(each),
+                        active: aim == each,
+                        onclick: move |_| settings.write().curriculum.aim = each,
                     }
                 }
             }
@@ -358,8 +358,8 @@ fn SessionShapeCard(settings: Signal<TrainingSettings>) -> Element {
                 if s.adapts {
                     AimFor {
                         settings,
-                        target: s.target,
-                        note: target_note(s.target, true, s.speed_adapts),
+                        aim: s.aim,
+                        note: aim_note(s.aim, true, s.speed_adapts),
                     }
                 }
             }
@@ -426,9 +426,9 @@ struct Speed {
     /// More than one speed to choose from.
     room: bool,
     adapts: bool,
-    /// Adaptive group size shows the aim, for both.
-    length_adapts: bool,
-    target: GroupSizeTarget,
+    /// The aim is set here, not under Session shape.
+    aim_here: bool,
+    aim: Aim,
 }
 
 #[component]
@@ -443,8 +443,8 @@ fn SpeedCard(settings: Signal<TrainingSettings>) -> Element {
             adaptive: p.adaptive_speed,
             room: SpeedPath::of(&all).has_room(),
             adapts: adapts_speed(&all),
-            length_adapts: adapts_group_size(&all),
-            target: all.curriculum.group_size_target,
+            aim_here: aim_section(&all) == SettingsSection::Speed,
+            aim: all.curriculum.aim,
         }
     })();
     rsx! {
@@ -487,17 +487,15 @@ fn SpeedCard(settings: Signal<TrainingSettings>) -> Element {
                 checked: speed.adaptive,
                 onchange: move |on| settings.write().playback.adaptive_speed = on,
             }
-            if speed.adapts {
-                if speed.length_adapts {
-                    p { class: "muted", style: "margin: 0; font-size: 0.8rem;",
-                        "{target_note(speed.target, false, true)} Aim for is set under Session shape, for group size and speed together."
-                    }
-                } else {
-                    AimFor {
-                        settings,
-                        target: speed.target,
-                        note: target_note(speed.target, false, true),
-                    }
+            if speed.aim_here {
+                AimFor {
+                    settings,
+                    aim: speed.aim,
+                    note: aim_note(speed.aim, false, true),
+                }
+            } else if speed.adapts {
+                p { class: "muted", style: "margin: 0; font-size: 0.8rem;",
+                    "{aim_note(speed.aim, false, true)} Aim for is set under Session shape, for group size and speed together."
                 }
             }
             SliderField {

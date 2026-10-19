@@ -14,12 +14,12 @@ use crate::machine::{GroupSource, SessionEffect, SessionEvent, SessionMachine};
 use crate::session::MIN_RESPONSE_MS_PER_CHAR;
 use crate::timing::resolve_pileup;
 use crate::{
-    Answered, AutoLevelCounters, CALLSIGN_TIER_MAX, CharSamplingState, CharSetMode, CopyTally,
-    FILTER_WIDTH_MAX, FILTER_WIDTH_MIN, GroupSizeTarget, MonoMs, PILEUP_LEVEL_MAX_DB,
-    PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN, Rng, STATIONS_MAX, STATIONS_MIN,
-    Sampler, SessionId, SessionPhase, SplitMix64, TrainingSettings, Transmission, align_group,
-    compute_char_pool, evaluate_auto_level, generate_training_group, plan_morse_playback_for,
-    plan_transmission, resolve_station,
+    Aim, Answered, AutoLevelCounters, CALLSIGN_TIER_MAX, CharSamplingState, CharSetMode, CopyTally,
+    FILTER_WIDTH_MAX, FILTER_WIDTH_MIN, MonoMs, PILEUP_LEVEL_MAX_DB, PILEUP_LEVEL_MIN_DB,
+    PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN, Rng, STATIONS_MAX, STATIONS_MIN, Sampler, SessionId,
+    SessionPhase, SplitMix64, TrainingSettings, Transmission, align_group, compute_char_pool,
+    evaluate_auto_level, generate_training_group, plan_morse_playback_for, plan_transmission,
+    resolve_station,
 };
 
 /// Enough seeds to be worth running on every commit, and cheap enough to.
@@ -39,7 +39,7 @@ fn wild_settings(rng: &mut SplitMix64) -> TrainingSettings {
     s.curriculum.link_group_size = rng.f64() < 0.5;
     s.curriculum.adaptive_group_size = rng.f64() < 0.5;
     s.playback.adaptive_speed = rng.f64() < 0.5;
-    s.curriculum.group_size_target = GroupSizeTarget::ALL[rng.usize_in(0, 2)];
+    s.curriculum.aim = Aim::ALL[rng.usize_in(0, 2)];
     s.curriculum.char_set_mode = match rng.usize_in(0, 4) {
         0 => CharSetMode::Koch,
         1 => CharSetMode::Digits,

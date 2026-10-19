@@ -10,6 +10,10 @@ impl TrainingSettings {
     /// the character set under a level, say — is never left half valid.
     pub fn reset_section(&mut self, which: SettingsSection) {
         let d = Self::default();
+        // The aim is shared, and goes back with whichever card shows it.
+        if crate::sampling::aim_section(self) == which {
+            self.curriculum.aim = d.curriculum.aim;
+        }
         match which {
             SettingsSection::SessionShape => {
                 self.curriculum.num_groups = d.curriculum.num_groups;
@@ -17,7 +21,6 @@ impl TrainingSettings {
                 self.curriculum.max_group_size = d.curriculum.max_group_size;
                 self.curriculum.link_group_size = d.curriculum.link_group_size;
                 self.curriculum.adaptive_group_size = d.curriculum.adaptive_group_size;
-                self.curriculum.group_size_target = d.curriculum.group_size_target;
                 self.playback.group_repeat_min = d.playback.group_repeat_min;
                 self.playback.group_repeat_max = d.playback.group_repeat_max;
                 self.playback.link_group_repeat = d.playback.link_group_repeat;

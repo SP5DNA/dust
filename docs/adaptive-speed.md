@@ -189,21 +189,29 @@ Reproduce with `cargo test -p cw-core --release adaptive_speed_simulation --
 
 **cw-core**
 
-- `speed.rs`: `SpeedBelief` (the grid posterior, history replay and fading,
-  learning from each group, `draw_speed`, `estimate`), `speed_evidence` (which
-  characters count against the speed), and `SpeedPath` (the line through the
-  speed settings).
+- `speed.rs`: `SpeedBelief` (the speed's grid and curve on a `GridBelief`:
+  history replay, learning from each group, `draw_speed`, `estimate`),
+  `speed_evidence` (which characters count against the speed), and
+  `SpeedPath` (the line through the speed settings).
+- `belief.rs` and `aim.rs`: the grid posterior and the aim found by
+  bisection, shared with the span. The speed's `Leaning` keeps its wider
+  share around the aim (`Spread::Around`).
+- `alignment.rs`: `align_holding`, the alignment that loses the most off the
+  end, which `speed_evidence` reads. It shares its table of edits with
+  `align_group`.
 - `sampling.rs`: `Sampler` holds a `SpeedBelief` beside its `SpanBelief`.
   `next_speed` draws a speed only when `adapts_speed` allows: the switch is
-  on and the speed settings leave more than one speed. `learn_speed` updates
-  it. The joint simulation lives in its tests.
-- `machine.rs`: `GroupSource::next_speed` and `learn_speed`, with defaults
-  that do nothing. The machine keeps each group's chosen speed with it and
-  teaches the source at the speed the group was actually played.
-- `session.rs`: `planned_wpm` for the sender, and `SessionView::speed`
-  (`ChosenSpeed`) for the screen.
+  on and the speed settings leave more than one speed. `learn` updates it
+  whenever the group's speed was measured. The joint simulation lives in its
+  tests.
+- `machine.rs`: `GroupSource::next_speed`, which by default chooses none,
+  and `learn`, which takes the group as it was answered (`Answered`), with
+  the speed it was actually played at. The machine keeps each group's chosen
+  speed with it.
+- `session.rs`: `planned_wpm` for the sender, `Group::answered` for the
+  source, and `SessionView::speed` (`ChosenSpeed`) for the screen.
 - `settings/mod.rs`: `adaptive_speed` (default `false`) in the Speed section;
-  `GroupSizeTarget::char_rate` for the character targets.
+  `Aim::chars_right` for the character targets.
 - `stats.rs`: `speed_history`.
 
 **App**
@@ -211,7 +219,8 @@ Reproduce with `cargo test -p cw-core --release adaptive_speed_simulation --
 - `session_runtime.rs`: each group's station keeps its tone, strength and
   fist, but is sent at the chosen speed. The listen stream does the same.
 - **Settings → Speed:** the switch. "Aim for" shows here while group size
-  does not adapt; once it does, it is set under Session shape, for both.
+  does not adapt, and this card's reset puts it back; once group size
+  adapts, it is set under Session shape, for both (`aim_section`).
 - **Training:** the speed chip, ▲ faster or ▼ slower than the group before.
 - **Stats → Overview:** "Copy speed": the speed at the aim's share of
   characters, ± one standard deviation, over the last 30 sessions, and a chip

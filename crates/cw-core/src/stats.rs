@@ -405,11 +405,7 @@ pub fn speed_history(
     settings: &TrainingSettings,
     sessions: &[SessionResult],
 ) -> Vec<EstimatePoint> {
-    SpeedBelief::history(
-        sessions,
-        settings,
-        settings.curriculum.group_size_target.char_rate(),
-    )
+    SpeedBelief::history(sessions, settings, settings.curriculum.aim.chars_right())
 }
 
 /// Each group length the next session can send: how likely it is to come
@@ -424,8 +420,7 @@ pub fn group_length_forecast(
         return Vec::new();
     }
     let (shortest, longest) = group_size_bounds(settings);
-    let target =
-        adaptive_bounds(settings).map(|_| settings.curriculum.group_size_target.success_rate());
+    let target = adaptive_bounds(settings).map(|_| settings.curriculum.aim.groups_whole());
     SpanBelief::from_history(sessions, settings).forecast(shortest, longest, target)
 }
 

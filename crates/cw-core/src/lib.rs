@@ -58,7 +58,8 @@ pub use pool::{
 };
 pub use rng::{Rng, SplitMix64};
 pub use sampling::{
-    CharSamplingState, Sampler, adapts_group_size, adapts_speed, generate_training_group,
+    CharSamplingState, Sampler, adapts_group_size, adapts_speed, aim_section,
+    generate_training_group,
 };
 pub use sequences::{PresetId, SEQUENCE_PRESETS, SequenceChoice, SequencePreset};
 pub use session::{
@@ -66,16 +67,16 @@ pub use session::{
     SessionResult, SessionTiming, SessionView, answer_length_matches,
 };
 pub use settings::{
-    ADJUST_COUNT_MAX, ADJUST_THRESHOLD_MAX_PCT, ADJUST_THRESHOLD_MIN_PCT, AutoLevelSettings,
+    ADJUST_COUNT_MAX, ADJUST_THRESHOLD_MAX_PCT, ADJUST_THRESHOLD_MIN_PCT, Aim, AutoLevelSettings,
     BandSettings, COUNTDOWN_MAX_SEC, COVERAGE_STRENGTH_MAX, CharSetMode, CurriculumSettings,
     DEFAULT_FILTER_WIDTH_HZ, ERROR_WEIGHT_MAX, EXTRA_WORD_SPACE_MAX, EXTRA_WORD_SPACE_MIN,
     Experience, FILTER_WIDTH_MAX, FILTER_WIDTH_MIN, FilterShape, GROUP_PAUSE_MAX_SEC,
     GROUP_REPEAT_MAX, GROUP_REPEAT_MIN, GROUP_SIZE_MAX, GROUP_SIZE_MIN, GROUP_TIMEOUT_MAX_SEC,
-    GroupSizeTarget, LevelAxis, MixedAutoLevelAxis, NUM_GROUPS_MAX, NUM_GROUPS_MIN,
-    PILEUP_LEVEL_MAX_DB, PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN,
-    PlaybackSettings, PracticeWindow, QSB_RATE_MAX_HZ, QSB_RATE_MIN_HZ, RangeSetting, RangeValues,
-    SIDE_TONE_MAX_HZ, SIDE_TONE_MIN_HZ, STATIONS_MAX, STATIONS_MIN, STEEPNESS_MAX_MS,
-    STEEPNESS_MIN_MS, SettingsSection, TrainingSettings, VOLUME_MAX, VOLUME_MIN, WPM_MAX, WPM_MIN,
+    LevelAxis, MixedAutoLevelAxis, NUM_GROUPS_MAX, NUM_GROUPS_MIN, PILEUP_LEVEL_MAX_DB,
+    PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN, PlaybackSettings, PracticeWindow,
+    QSB_RATE_MAX_HZ, QSB_RATE_MIN_HZ, RangeSetting, RangeValues, SIDE_TONE_MAX_HZ,
+    SIDE_TONE_MIN_HZ, STATIONS_MAX, STATIONS_MIN, STEEPNESS_MAX_MS, STEEPNESS_MIN_MS,
+    SettingsSection, TrainingSettings, VOLUME_MAX, VOLUME_MIN, WPM_MAX, WPM_MIN,
 };
 pub use span::LengthForecast;
 pub use speed::SpeedPath;
