@@ -7,7 +7,9 @@ use cw_core::{
 };
 use dioxus::prelude::*;
 
+use crate::persist::backup::sessions_since;
 use crate::state::SessionPick;
+use crate::ui::backup::{BackupCard, Backups};
 use crate::ui::format::counted;
 use crate::ui::widgets::{CardHead, Icon, IconName, control_id, html_bool};
 
@@ -262,11 +264,13 @@ const HISTORY_PAGE: usize = 40;
 /// Given `on_delete`, sessions can be deleted: one from its own row, or
 /// several chosen together in select mode, all of them included. Deleting
 /// everything asks once more; anything else is put right with the Undo the
-/// app offers after.
+/// app offers after. Given `backups`, the history can be saved to a file and
+/// restored from one, above the list.
 #[component]
 pub fn HistoryTab(
     sessions: Vec<SessionResult>,
     on_delete: Option<EventHandler<Vec<SessionPick>>>,
+    backups: Option<Backups>,
 ) -> Element {
     let rows = session_history(&sessions);
     let mut selecting = use_signal(|| false);
@@ -298,7 +302,15 @@ pub fn HistoryTab(
     };
     let more = total.saturating_sub(shown()).min(HISTORY_PAGE);
 
+    let since = backups
+        .as_ref()
+        .map(|backups| sessions_since(&sessions, backups.last))
+        .unwrap_or_default();
+
     rsx! {
+        if let Some(backups) = backups {
+            BackupCard { backups, since }
+        }
         div { class: if selecting_now { "card stack-sm history-card selecting" } else { "card stack-sm history-card" },
             CardHead {
                 icon: IconName::Repeat,

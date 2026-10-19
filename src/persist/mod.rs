@@ -1,11 +1,13 @@
 //! What the app keeps between launches: the settings, the theme, the history
-//! of sessions and the auto-level counters.
+//! of sessions and the auto-level counters — and the backup file the user
+//! keeps of them, outside the store ([`backup`]).
 //!
 //! One [`Store`] per platform — files on desktop and mobile, `localStorage`
 //! in a browser — built once and handed to the app, which never asks which
 //! one it has. Reading is forgiving: a store that cannot read something gives
 //! back the most it can, and never writes over what it could not read.
 
+pub mod backup;
 #[cfg(feature = "native-runtime")]
 mod desktop;
 #[cfg(test)]
@@ -40,6 +42,20 @@ pub trait Store {
     fn load_auto_counters(&self, key: &CountersKey) -> AutoLevelCounters;
     fn save_auto_counters(&self, key: &CountersKey, counters: AutoLevelCounters);
     fn clear_auto_counters(&self, keys: &[CountersKey]);
+    /// When a backup was last saved, in milliseconds since the epoch.
+    fn last_backup(&self) -> Option<u64>;
+    fn mark_backup(&self, at: u64);
+    /// Whether this build can hand the user a backup file: an app on a
+    /// phone has nowhere outside itself to put one.
+    fn saves_backups(&self) -> bool;
+    /// Hand `contents` to the user as a file called `name`, outside the
+    /// store: a download in a browser, a file in Downloads on a computer.
+    /// Says where it went, or why it could not go.
+    fn save_backup_file(&self, name: &str, contents: &str) -> Result<String, String>;
+    /// Ask the platform to keep what is stored rather than clear it when it
+    /// needs room. Only a browser clears a store on its own, and it may ask
+    /// the user first.
+    fn ask_to_keep(&self) {}
 }
 
 /// What became of a history handed to [`Store::save_sessions`].

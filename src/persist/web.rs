@@ -3,6 +3,8 @@
 use std::cell::Cell;
 
 use cw_core::{AutoLevelCounters, CountersKey, SessionResult, TrainingSettings};
+use wasm_bindgen::{JsCast, JsValue};
+use wasm_bindgen_futures::JsFuture;
 
 use super::{HistorySaved, Store, load_settings_from, newest, newest_that_fit, parse_sessions};
 
@@ -12,6 +14,7 @@ const SETTINGS_KEY: &str = "dust_settings";
 const SESSIONS_KEY: &str = "dust_sessions";
 const UNREADABLE_SESSIONS_KEY: &str = "dust_sessions_unreadable";
 const AUTO_PREFIX: &str = "dust_auto_adjust_";
+const LAST_BACKUP_KEY: &str = "dust_last_backup";
 
 /// How much of the site's storage the history may take, in characters.
 /// Browsers give a site about five million; the rest is left for the
@@ -23,6 +26,8 @@ pub struct WebStore {
     /// The stored history could not be read, nor copied out of the way, so
     /// it is not to be written over.
     history_held: Cell<bool>,
+    /// The browser has been asked to keep the store, this visit.
+    asked_to_keep: Cell<bool>,
 }
 
 fn storage() -> Option<web_sys::Storage> {
@@ -31,6 +36,55 @@ fn storage() -> Option<web_sys::Storage> {
 
 fn counters_key(key: &CountersKey) -> String {
     format!("{AUTO_PREFIX}{}", key.as_str())
+}
+
+/// Hand `contents` over as a download called `name`, the way a link to a
+/// file does when it is clicked.
+fn download(name: &str, contents: &str) -> Option<()> {
+    let document = web_sys::window()?.document()?;
+    let options = web_sys::BlobPropertyBag::new();
+    options.set_type("application/json");
+    let parts = js_sys::Array::of1(&JsValue::from_str(contents));
+    let blob = web_sys::Blob::new_with_str_sequence_and_options(&parts, &options).ok()?;
+    let url = web_sys::Url::create_object_url_with_blob(&blob).ok()?;
+    let link: web_sys::HtmlAnchorElement = document.create_element("a").ok()?.dyn_into().ok()?;
+    link.set_href(&url);
+    link.set_download(name);
+    document.body()?.append_child(&link).ok()?;
+    link.click();
+    link.remove();
+    // The browser has the file once the click returns; the address it was
+    // read from can go a moment later.
+    wasm_bindgen_futures::spawn_local(async move {
+        crate::time::sleep_ms(10_000).await;
+        let _ = web_sys::Url::revoke_object_url(&url);
+    });
+    Some(())
+}
+
+/// Ask the browser to keep this site's store rather than clear it when it
+/// needs room, unless it already does. Chrome decides by itself; Firefox
+/// asks the user, once.
+async fn ask_for_persistence() {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let navigator = window.navigator();
+    // Older browsers have no storage manager at all.
+    if !js_sys::Reflect::has(&navigator, &JsValue::from_str("storage")).unwrap_or(false) {
+        return;
+    }
+    let manager = navigator.storage();
+    let kept = match manager.persisted() {
+        Ok(promise) => JsFuture::from(promise).await.ok(),
+        Err(_) => return,
+    };
+    if kept.and_then(|kept| kept.as_bool()) == Some(true) {
+        return;
+    }
+    if let Ok(promise) = manager.persist() {
+        let _ = JsFuture::from(promise).await;
+    }
 }
 
 impl Store for WebStore {
@@ -140,6 +194,36 @@ impl Store for WebStore {
         };
         for key in keys {
             let _ = store.remove_item(&counters_key(key));
+        }
+    }
+
+    fn last_backup(&self) -> Option<u64> {
+        storage()?
+            .get_item(LAST_BACKUP_KEY)
+            .ok()
+            .flatten()?
+            .parse()
+            .ok()
+    }
+
+    fn mark_backup(&self, at: u64) {
+        if let Some(store) = storage() {
+            let _ = store.set_item(LAST_BACKUP_KEY, &at.to_string());
+        }
+    }
+
+    fn saves_backups(&self) -> bool {
+        true
+    }
+
+    fn save_backup_file(&self, name: &str, contents: &str) -> Result<String, String> {
+        download(name, contents).ok_or("this browser would not hand over the file")?;
+        Ok(format!("{name}, in your downloads"))
+    }
+
+    fn ask_to_keep(&self) {
+        if !self.asked_to_keep.replace(true) {
+            wasm_bindgen_futures::spawn_local(ask_for_persistence());
         }
     }
 }

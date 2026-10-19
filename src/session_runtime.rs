@@ -417,6 +417,9 @@ fn finish_session(ctx: AppCtx) {
     // The history grows by one where it is, and is stored from there.
     sessions.write().push(done.result.clone());
     let saved = ctx.store_history();
+    // A browser may clear its store to make room; there is now something in
+    // it worth asking it to keep.
+    ctx.app().store.ask_to_keep();
     if let Some(problem) = saved.problem() {
         toasts.show(problem);
     }
@@ -446,7 +449,7 @@ mod tests {
     }
 
     /// A whole session, answered correctly, ends on the results screen with the
-    /// session stored.
+    /// session stored, and the store asked to keep what it holds.
     #[test]
     fn answering_every_group_finishes_the_session_and_stores_it() {
         run(|| async {
@@ -460,6 +463,7 @@ mod tests {
             assert_eq!(result.accuracy, 1.0);
             assert_eq!(h.ctx.sessions.peek().len(), 1);
             assert_eq!(h.store.load_sessions().len(), 1);
+            assert_eq!(h.store.keep_asks.get(), 1);
             // The machine is torn down, and the audio with it.
             assert!(h.app.session.borrow().is_none());
             assert!(h.calls().contains(&Call::Shutdown));

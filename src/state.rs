@@ -8,10 +8,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use cw_core::{GroupSession, SessionResult, TrainingSettings};
 use dioxus::prelude::*;
 
+use crate::persist::backup::{Backup, backup_name, merge_sessions, write_backup};
 use crate::persist::{HistorySaved, Store};
 use crate::playback::Preview;
 use crate::player::{AudioError, BackendFactory, Player};
 use crate::session_runtime::{AnswerOutbox, LiveSession};
+use crate::ui::format::{counted, day_of, short_date};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Screen {
@@ -124,9 +126,14 @@ pub struct AppCtx {
     pub answer: AnswerOutbox,
     /// The guided setup, while it is open.
     pub tour: Signal<Option<Tour>>,
+    /// When the last backup was saved, if ever.
+    pub last_backup: Signal<Option<u64>>,
     /// The sessions deleted last, each with where it sat, for Undo to put
     /// back.
     trash: Signal<Vec<(usize, SessionResult)>>,
+    /// The history and settings as they stood before the last restore, for
+    /// Undo to put back.
+    before_restore: Signal<Option<(Vec<SessionResult>, TrainingSettings)>>,
     app: CopyValue<AppState>,
 }
 
@@ -134,6 +141,7 @@ impl AppCtx {
     /// A fresh app around `app`, starting from what was stored. Made in the
     /// scope that owns the app, as everything in it lives as long as that.
     pub fn new(app: AppState, settings: TrainingSettings, sessions: Vec<SessionResult>) -> Self {
+        let last_backup = app.store.last_backup();
         Self {
             screen: Signal::new(Screen::Home),
             settings: Signal::new(settings),
@@ -146,7 +154,9 @@ impl AppCtx {
             stream_heard: Signal::new(Vec::new()),
             answer: AnswerOutbox::new(),
             tour: Signal::new(None),
+            last_backup: Signal::new(last_backup),
             trash: Signal::new(Vec::new()),
+            before_restore: Signal::new(None),
             app: CopyValue::new(app),
         }
     }
@@ -223,7 +233,7 @@ impl AppCtx {
             Some(problem) => self.toasts.show(problem),
             None => {
                 self.toasts.show_with(
-                    format!("{} deleted", crate::ui::format::counted(count, "session")),
+                    format!("{} deleted", counted(count, "session")),
                     ToastAction::UndoDelete,
                 );
             }
@@ -249,6 +259,94 @@ impl AppCtx {
         } else if let Some(problem) = saved.problem() {
             self.toasts.show(problem);
         }
+    }
+
+    /// Hand the history and the settings to the user as a backup file, and
+    /// remember when.
+    pub fn save_backup(self) {
+        let store = self.app().store;
+        let at = crate::time::now_ms();
+        let contents = write_backup(&self.settings.peek(), &self.sessions.peek(), at);
+        let name = backup_name(&crate::time::local_date_string());
+        match store.save_backup_file(&name, &contents) {
+            Ok(place) => {
+                store.mark_backup(at);
+                let mut last_backup = self.last_backup;
+                last_backup.set(Some(at));
+                self.toasts.show(format!("Backup saved as {place}."));
+            }
+            Err(why) => self
+                .toasts
+                .show(format!("The backup could not be saved: {why}.")),
+        }
+    }
+
+    /// Put back what `backup` holds: every session of it not already here,
+    /// and its settings, level and all. Until another restore, Undo puts
+    /// both back as they were. A store that cannot take the history leaves
+    /// everything as it was and says why.
+    pub fn restore_backup(self, backup: Backup) {
+        let mut sessions = self.sessions;
+        let mut settings = self.settings;
+        let before = (sessions.peek().clone(), settings.peek().clone());
+        let (merged, added) = merge_sessions(&before.0, backup.sessions);
+        sessions.set(merged);
+        let saved = self.store_history();
+        if let Some(why) = why_not_stored(&saved) {
+            sessions.set(before.0);
+            self.toasts.show(format!("Nothing was restored: {why}."));
+            return;
+        }
+        // Stored by the app's settings effect.
+        settings.set(backup.settings);
+        let store = self.app().store;
+        // What the backup holds is backed up, as of when it was saved.
+        let mut last_backup = self.last_backup;
+        if backup.saved_at > last_backup.peek().unwrap_or(0) {
+            store.mark_backup(backup.saved_at);
+            last_backup.set(Some(backup.saved_at));
+        }
+        store.ask_to_keep();
+        let mut before_restore = self.before_restore;
+        before_restore.set(Some(before));
+        let from = day_of(backup.saved_at)
+            .filter(|_| backup.saved_at > 0)
+            .map(|day| format!(" from {}", short_date(&day)))
+            .unwrap_or_default();
+        let mut text = if added > 0 {
+            format!(
+                "Restored {} and your settings{from}.",
+                counted(added, "session")
+            )
+        } else {
+            format!("Restored your settings{from}. Every session in it was already here.")
+        };
+        if let Some(problem) = saved.problem() {
+            text = format!("{text} {problem}");
+        }
+        self.toasts.show_with(text, ToastAction::UndoRestore);
+    }
+
+    /// Put the history and settings back as they were before the last
+    /// restore.
+    pub fn undo_restore(self) {
+        let mut before_restore = self.before_restore;
+        let Some((before, settings_before)) = before_restore.write().take() else {
+            return;
+        };
+        let mut sessions = self.sessions;
+        let restored = sessions.peek().clone();
+        sessions.set(before.clone());
+        let saved = self.store_history();
+        if let Some(why) = why_not_stored(&saved) {
+            sessions.set(restored);
+            before_restore.set(Some((before, settings_before)));
+            self.toasts
+                .show(format!("The restore could not be undone: {why}."));
+            return;
+        }
+        let mut settings = self.settings;
+        settings.set(settings_before);
     }
 
     /// Put each of `taken` back where it sat, in the order they sat in.
@@ -298,12 +396,14 @@ pub const ACTION_TOAST_MS: u32 = 8_000;
 pub enum ToastAction {
     /// Put back the sessions just deleted.
     UndoDelete,
+    /// Put the history and settings back as they were before a restore.
+    UndoRestore,
 }
 
 impl ToastAction {
     pub fn label(self) -> &'static str {
         match self {
-            Self::UndoDelete => "Undo",
+            Self::UndoDelete | Self::UndoRestore => "Undo",
         }
     }
 }

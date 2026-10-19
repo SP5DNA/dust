@@ -1804,6 +1804,16 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
 .history-delete:hover, .history-delete:focus-visible { background: var(--bad-soft); color: var(--bad); }
 .history-more { justify-self: center; }
 .history-card.selecting { margin-bottom: 4.5rem; }
+/* Backups: a quiet card above the history, until enough sessions have gone
+   without one. */
+.backup-note { margin: 0; font-size: 0.84rem; line-height: 1.45; color: var(--ink-soft); }
+.backup-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 0.45rem; }
+.backup-card.due {
+  border-color: var(--warn);
+  background: linear-gradient(120deg, var(--warn-soft), var(--surface) 60%);
+}
+.backup-card.due .backup-note { color: var(--ink); }
+.backup-problem { margin: 0; font-size: 0.8rem; line-height: 1.4; color: var(--bad); }
 .history-empty { display: grid; justify-items: center; gap: 0.35rem; padding: 1.4rem 0 0.8rem; text-align: center; }
 .history-empty p { margin: 0; }
 .select-dock {

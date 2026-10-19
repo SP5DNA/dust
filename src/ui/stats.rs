@@ -6,6 +6,7 @@ use cw_core::{
 use dioxus::prelude::*;
 
 use crate::state::SessionPick;
+use crate::ui::backup::Backups;
 use crate::ui::chart::{CHART_H, marks, path, polyline, series, trend_chart};
 use crate::ui::format::counted;
 use crate::ui::scores::ScoresTab;
@@ -219,6 +220,8 @@ pub fn StatsView(
     /// Where deleting sessions from the history goes. Without it the history
     /// is only shown.
     on_delete: Option<EventHandler<Vec<SessionPick>>>,
+    /// Saving and restoring backups, on the History tab.
+    backups: Option<Backups>,
 ) -> Element {
     let mut tab = use_signal(|| StatsTab::Overview);
     // Accuracy, letters and mistakes are counted over the whole history: a
@@ -246,7 +249,7 @@ pub fn StatsView(
                 StatsTab::Letters => rsx! { LettersTab { sessions } },
                 StatsTab::Mistakes => rsx! { MistakesTab { sessions } },
                 StatsTab::Sampling => rsx! { SamplingTab { settings, sessions } },
-                StatsTab::History => rsx! { HistoryTab { sessions, on_delete } },
+                StatsTab::History => rsx! { HistoryTab { sessions, on_delete, backups } },
             }
         }
     }

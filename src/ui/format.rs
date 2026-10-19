@@ -33,14 +33,21 @@ pub fn month_name(year: i32, month: u32) -> String {
     )
 }
 
-/// The local time of day at `timestamp`, in milliseconds since the epoch:
-/// "14:32".
-pub fn clock(timestamp: u64) -> Option<String> {
-    let millis = i64::try_from(timestamp).ok()?;
+/// The local moment `timestamp` names, in milliseconds since the epoch.
+fn local_at(timestamp: u64) -> Option<chrono::DateTime<chrono::Local>> {
     chrono::Local
-        .timestamp_millis_opt(millis)
+        .timestamp_millis_opt(i64::try_from(timestamp).ok()?)
         .single()
-        .map(|at| at.format("%H:%M").to_string())
+}
+
+/// The local time of day at `timestamp`: "14:32".
+pub fn clock(timestamp: u64) -> Option<String> {
+    local_at(timestamp).map(|at| at.format("%H:%M").to_string())
+}
+
+/// The local day of `timestamp`, the way dates are stored: "2026-10-19".
+pub fn day_of(timestamp: u64) -> Option<String> {
+    local_at(timestamp).map(|at| at.format("%Y-%m-%d").to_string())
 }
 
 /// How long ago `date` was, seen from `today`: "today", "yesterday", "12 days
@@ -96,6 +103,14 @@ mod tests {
         // A month out of range names the year rather than panicking.
         assert_eq!(month_name(2026, 0), "2026");
         assert_eq!(month_name(2026, 13), "2026");
+    }
+
+    #[test]
+    fn a_moment_has_a_day_and_a_time_of_day() {
+        let day = day_of(1_790_000_000_000).expect("a day");
+        assert!(parse_date(&day).is_some(), "{day}");
+        assert!(clock(1_790_000_000_000).is_some_and(|time| time.len() == 5));
+        assert_eq!(day_of(u64::MAX), None);
     }
 
     #[test]

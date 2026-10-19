@@ -230,6 +230,7 @@ pub fn App() -> Element {
                                 onclick: move |_| {
                                     match action {
                                         ToastAction::UndoDelete => ctx.undo_delete(),
+                                        ToastAction::UndoRestore => ctx.undo_restore(),
                                     }
                                     toasts.dismiss(&toast);
                                 },

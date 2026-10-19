@@ -289,6 +289,7 @@ fn stats_count_sessions_from_every_character_set() {
             settings: TrainingSettings::default(),
             sessions: vec![digits, koch],
             on_delete: None,
+            backups: None,
         },
     );
     assert!(

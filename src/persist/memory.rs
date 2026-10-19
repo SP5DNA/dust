@@ -22,6 +22,13 @@ pub struct MemoryStore {
     pub room: Cell<Option<usize>>,
     /// A history that could not be read is in the way of any save.
     pub held: Cell<bool>,
+    last_backup: Cell<Option<u64>>,
+    /// Every backup file handed over: its name and what it held.
+    pub backup_files: RefCell<Vec<(String, String)>>,
+    /// A build that cannot hand over a backup file, the way a phone's cannot.
+    pub no_backups: Cell<bool>,
+    /// How many times the store was asked to keep its data.
+    pub keep_asks: Cell<u32>,
 }
 
 impl Store for MemoryStore {
@@ -82,5 +89,31 @@ impl Store for MemoryStore {
         for key in keys {
             counters.remove(key);
         }
+    }
+
+    fn last_backup(&self) -> Option<u64> {
+        self.last_backup.get()
+    }
+
+    fn mark_backup(&self, at: u64) {
+        self.last_backup.set(Some(at));
+    }
+
+    fn saves_backups(&self) -> bool {
+        !self.no_backups.get()
+    }
+
+    fn save_backup_file(&self, name: &str, contents: &str) -> Result<String, String> {
+        if self.no_backups.get() {
+            return Err("this build has nowhere to put it".into());
+        }
+        self.backup_files
+            .borrow_mut()
+            .push((name.to_string(), contents.to_string()));
+        Ok(format!("{name}, in your downloads"))
+    }
+
+    fn ask_to_keep(&self) {
+        self.keep_asks.set(self.keep_asks.get() + 1);
     }
 }
