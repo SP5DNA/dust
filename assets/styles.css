@@ -46,6 +46,7 @@
   --bad-soft: rgba(192, 57, 47, 0.12);
   --info: #3d5a80;
   --info-soft: rgba(61, 90, 128, 0.12);
+  --violet: #7a4fc4;
 
   /* Switch: the off state needs its own contrast, not just a surface tint */
   --switch-track: #e3d2b4;
@@ -122,6 +123,7 @@
     --bad-soft: rgba(244, 114, 106, 0.16);
     --info: #7aa5dd;
     --info-soft: rgba(122, 165, 221, 0.16);
+    --violet: #b493f5;
 
     --switch-track: #2b3446;
     --switch-edge: #414c62;
@@ -184,6 +186,7 @@
   --bad-soft: rgba(244, 114, 106, 0.16);
   --info: #7aa5dd;
   --info-soft: rgba(122, 165, 221, 0.16);
+  --violet: #b493f5;
 
   --switch-track: #2b3446;
   --switch-edge: #414c62;
@@ -1461,6 +1464,136 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
   font-weight: 600;
   font-size: 0.92rem;
 }
+/* Score board. A medal is gold, silver or bronze by its class, with the
+   place on it; its ribbon is the same for all three. */
+.medal { display: block; flex: none; width: 1.55rem; height: 1.95rem; overflow: visible; }
+.medal.large { width: 3.1rem; height: 3.9rem; }
+.medal-gold { --medal: #e3b341; --medal-edge: #a07312; --medal-shine: #fff1b8; }
+.medal-silver { --medal: #c5ccd5; --medal-edge: #788392; --medal-shine: #f8fafc; }
+.medal-bronze { --medal: #d38c50; --medal-edge: #87501f; --medal-shine: #f8d6b5; }
+.medal-ribbon-left { fill: #c0392f; }
+.medal-ribbon-right { fill: #3d5a80; }
+.medal-disc { fill: var(--medal); stroke: var(--medal-edge); stroke-width: 1.5; }
+.medal-ring { fill: none; stroke: var(--medal-shine); stroke-width: 1.2; opacity: 0.9; }
+.medal-number { font-family: Figtree, system-ui, sans-serif; font-size: 10.5px; font-weight: 800; fill: var(--medal-edge); }
+.board-modes { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+.best-card {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  background: linear-gradient(120deg, var(--warn-soft), var(--surface) 65%);
+  border-color: var(--warn);
+}
+.best-copy { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 0.2rem; }
+.best-score {
+  font-family: Fraunces, Georgia, serif;
+  font-size: 2.2rem;
+  font-weight: 700;
+  line-height: 1.05;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+.best-when { margin: 0; font-size: 0.86rem; color: var(--ink-soft); }
+.best-unit { font-family: Figtree, system-ui, sans-serif; font-size: 0.9rem; font-weight: 600; letter-spacing: 0; color: var(--ink-soft); }
+.best-form {
+  flex: none;
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 0.15rem;
+  padding-left: 1rem;
+  border-left: 1px solid var(--line);
+  text-align: right;
+}
+.best-form-value {
+  font-family: Fraunces, Georgia, serif;
+  font-size: 1.5rem;
+  font-weight: 700;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+.best-form-note { font-size: 0.75rem; color: var(--ink-dim); }
+.best-chips { display: flex; flex-wrap: wrap; gap: 0.35rem; margin-top: 0.35rem; }
+.record-line { fill: none; stroke: var(--warn); stroke-width: 2; stroke-linejoin: round; opacity: 0.85; }
+.form-line { fill: none; stroke: var(--info); stroke-width: 1.6; stroke-linejoin: round; stroke-linecap: round; opacity: 0.8; }
+.timeline-legend { display: flex; flex-wrap: wrap; gap: 0.35rem 1rem; font-size: 0.75rem; color: var(--ink-dim); }
+.legend-record, .legend-form { display: inline-flex; align-items: center; gap: 0.35rem; }
+.legend-record::before, .legend-form::before { content: ""; width: 1rem; height: 2px; border-radius: var(--pill); }
+.legend-record::before { background: var(--warn); }
+.legend-form::before { background: var(--info); }
+.place-note { margin: 0; text-align: center; font-size: 0.84rem; }
+.timeline-dot { fill: var(--ink-dim); opacity: 0.55; }
+.timeline-dot.record { fill: var(--warn); opacity: 1; stroke: var(--surface); stroke-width: 1.2; }
+.timeline-guide { stroke: var(--copper); stroke-width: 1; stroke-dasharray: 3 4; opacity: 0.7; }
+.timeline-mark { fill: none; stroke: var(--copper); stroke-width: 2; }
+.timeline-focus { margin: 0.1rem 0 0.35rem; font-size: 0.86rem; color: var(--ink-soft); }
+.timeline-focus-place { font-weight: 700; color: var(--ink); }
+.board-list { display: flex; flex-direction: column; gap: 0.15rem; }
+.board-row {
+  display: grid;
+  grid-template-columns: 2rem minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.75rem;
+  width: 100%;
+  padding: 0.5rem 0.65rem;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  text-align: left;
+  transition: background 0.15s var(--ease), border-color 0.15s var(--ease);
+}
+.board-row:hover, .board-row.focused { background: var(--surface-2); }
+.board-row.pinned { border-color: var(--copper); background: var(--copper-soft); }
+.board-place { display: flex; justify-content: center; }
+.board-number {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.6rem;
+  height: 1.6rem;
+  padding: 0 0.3rem;
+  border-radius: var(--pill);
+  background: var(--surface-sunken);
+  color: var(--ink-soft);
+  font-size: 0.8rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.board-main { display: flex; flex-direction: column; min-width: 0; }
+.board-score { font-size: 1.05rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+.board-when { font-size: 0.78rem; color: var(--ink-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.board-detail { font-size: 0.8rem; color: var(--ink-soft); text-align: right; font-variant-numeric: tabular-nums; }
+.board-more { align-self: flex-start; }
+/* A phone has no room for the speed beside the date: it goes under it. */
+@media (max-width: 640px) {
+  .board-row { grid-template-columns: 2rem minmax(0, 1fr); row-gap: 0.1rem; }
+  .board-place { grid-row: span 2; }
+  .board-detail { grid-column: 2; text-align: left; }
+  .best-card { flex-wrap: wrap; }
+  .best-form {
+    flex: 1 1 100%;
+    flex-direction: row;
+    align-items: baseline;
+    justify-content: flex-start;
+    gap: 0.5rem;
+    padding: 0.6rem 0 0;
+    border-left: 0;
+    border-top: 1px solid var(--line);
+    text-align: left;
+  }
+}
+.place-banner {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  border-radius: var(--r-md);
+  border: 1px solid var(--line);
+  background: var(--surface);
+  padding: 0.6rem 0.9rem;
+  font-weight: 600;
+  font-size: 0.92rem;
+}
+.place-banner.best { border-color: var(--warn); background: linear-gradient(120deg, var(--warn-soft), var(--surface) 70%); }
 .result-rows { display: flex; flex-direction: column; gap: 0.5rem; max-height: 46vh; overflow: auto; padding-right: 0.15rem; }
 .result-row {
   display: flex;
@@ -1782,6 +1915,7 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
 .heatmap-month-grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 3px; }
 .heatmap-day-label { font-size: 9px; line-height: 1.3; text-align: center; color: var(--ink-dim); font-weight: 700; }
 .heat-cell {
+  position: relative;
   width: 13px;
   height: 13px;
   border-radius: 3px;
@@ -1793,6 +1927,58 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
 .heatmap-month-grid .heat-cell { width: 100%; height: auto; aspect-ratio: 1; }
 .heat-cell.selected { outline: 2px solid var(--ink); outline-offset: 1px; }
 .heat-cell:disabled { opacity: 0.3; cursor: default; }
+/* A day's card, opened by pointing at its square or pinned by tapping it. It
+   hangs above the square, or below where the window has no room above, and
+   --cell-left (the square's distance from the window's left edge) keeps it
+   on screen sideways. The square carrying it is lifted over its neighbours. */
+.heat-cell.has-tip { z-index: 30; }
+.day-tip {
+  --tip-w: min(15.5rem, calc(100vw - 32px));
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: clamp(
+    calc(12px - var(--cell-left, 0px)),
+    calc(50% - var(--tip-w) / 2),
+    calc(100vw - 28px - var(--tip-w) - var(--cell-left, 0px))
+  );
+  width: var(--tip-w);
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  padding: 0.85rem 1rem 0.95rem;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  box-shadow: var(--shadow-lg);
+  color: var(--ink);
+  font-size: 0.84rem;
+  line-height: 1.3;
+  text-align: left;
+  white-space: normal;
+  pointer-events: none;
+  animation: tip-in 0.12s var(--ease);
+}
+.day-tip.below { bottom: auto; top: calc(100% + 8px); }
+.tip-date {
+  font-size: 0.95rem;
+  font-weight: 700;
+  padding-bottom: 0.55rem;
+  border-bottom: 1px solid var(--line);
+}
+.tip-row { display: flex; flex-direction: column; gap: 0.3rem; }
+.tip-line { display: flex; justify-content: space-between; align-items: baseline; gap: 0.75rem; }
+.tip-label { color: var(--ink-soft); }
+.tip-value { font-weight: 700; font-variant-numeric: tabular-nums; text-align: right; }
+.tip-bar { display: block; height: 7px; border-radius: var(--pill); background: var(--surface-sunken); overflow: hidden; }
+.tip-fill { display: block; height: 100%; min-width: 7px; border-radius: var(--pill); }
+.tip-fill.fill-chars { background: var(--info); }
+.tip-fill.fill-sessions { background: var(--good); }
+.tip-fill.fill-groups { background: var(--violet); }
+.tip-fill.fill-speed { background: var(--copper); }
+.tip-fill.fill-score { background: var(--warn); }
+.tip-note { color: var(--ink-dim); font-size: 0.78rem; }
+.tip-empty { color: var(--ink-dim); }
+@keyframes tip-in { from { opacity: 0; } to { opacity: 1; } }
 .heatmap-legend { display: flex; align-items: center; gap: 0.35rem; }
 
 .notice {

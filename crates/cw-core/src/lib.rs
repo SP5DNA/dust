@@ -9,6 +9,7 @@
 mod alignment;
 mod auto_level;
 pub mod band;
+mod board;
 mod callsign;
 mod heatmap;
 mod keyer;
@@ -34,6 +35,10 @@ pub use alignment::{AlignmentPair, CopyTally, LetterAccuracy, align_group};
 pub use auto_level::{
     AutoLevelChange, AutoLevelCounters, AutoLevelProgress, Completion, CountersKey, CountersUpdate,
     auto_level_progress, complete_session, evaluate_auto_level,
+};
+pub use board::{
+    BOARD_MIN_GROUPS, BoardEntry, FORM_SESSIONS, TimelinePoint, board_modes, board_place,
+    per_group, score_board, score_timeline,
 };
 pub use callsign::{CALLSIGN_TIER_MAX, generate_callsign, tier_examples};
 pub use heatmap::{

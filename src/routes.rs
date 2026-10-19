@@ -299,9 +299,11 @@ fn ResultsRoute() -> Element {
     let Some(result) = ctx.result.read().clone() else {
         return rsx! { p { class: "muted", "No result." } };
     };
+    let place = cw_core::board_place(&ctx.sessions.read(), result.timestamp);
     rsx! {
         ResultsView {
             result,
+            place,
             auto_message: ctx.auto_message.read().clone(),
             on_again,
             on_home,

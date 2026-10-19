@@ -553,6 +553,61 @@ fn results_renders_the_score_ring_and_rows() {
     assert!(html.contains("Unlocked a new character"));
     assert!(html.contains("50%"));
     assert!(html.contains("1/2"));
+    assert!(!html.contains("place-banner"), "no place, no banner");
+}
+
+/// A session that tops the board says so with the gold medal; one further
+/// down says where it came; one too short to place says what would.
+#[test]
+fn results_say_where_the_session_stands_on_the_board() {
+    fn long() -> SessionResult {
+        let mut result = session("2026-09-03", 0.9);
+        result.groups = (0..5).flat_map(|_| result.groups.clone()).collect();
+        result.score = 600.0;
+        result
+    }
+    let best = render(|| {
+        rsx! {
+            ResultsView {
+                result: long(),
+                place: Some((1, 5)),
+                auto_message: None,
+                on_again: move |_| {},
+                on_home: move |_| {},
+            }
+        }
+    });
+    assert!(
+        best.contains("New personal best — 60.0 points a group, the top of your 5 mixed sessions"),
+        "{best}"
+    );
+    assert!(best.contains("place-banner best"));
+    assert!(best.contains("aria-label=\"1st place\""));
+    let fourth = render(|| {
+        rsx! {
+            ResultsView {
+                result: long(),
+                place: Some((4, 5)),
+                auto_message: None,
+                on_again: move |_| {},
+                on_home: move |_| {},
+            }
+        }
+    });
+    assert!(fourth.contains("4th best of your 5 mixed sessions — 60.0 points a group"));
+    assert!(!fourth.contains("class=\"medal"), "no medal below third");
+    let short = render(|| {
+        rsx! {
+            ResultsView {
+                result: session("2026-09-03", 0.9),
+                place: None,
+                auto_message: None,
+                on_again: move |_| {},
+                on_home: move |_| {},
+            }
+        }
+    });
+    assert!(short.contains("Sessions of 10 groups or more go on the score board."));
 }
 
 #[test]
@@ -966,10 +1021,57 @@ mod interactions {
         // One button per day, June to September of them.
         assert_eq!(ui.controls("day-").len(), 30 + 31 + 31 + 30);
 
-        // Each day answers to its own date.
+        // A tap pins the day's card; a second tap on it takes it down.
+        assert!(!ui.has("day-tip"));
         ui.click("day-2026-09-08");
-        assert!(ui.has("2026-09-08 · 1 session · 2 chars"));
-        assert!(ui.has("accuracy"));
+        assert!(ui.has("Tuesday 8 September 2026"));
+        for row in [
+            "Characters",
+            "Sessions",
+            "Groups",
+            "Speed",
+            "Accuracy",
+            "Score",
+        ] {
+            assert!(ui.has(&format!(">{row}<")), "no {row} on the card");
+        }
+        assert!(ui.input_tag("day-2026-09-08").contains("selected"));
+        ui.click("day-2026-09-08");
+        assert!(!ui.has("day-tip"));
+    }
+
+    /// A mouse opens a day's card by pointing at the square and closes it by
+    /// leaving. The browser's own plain tooltip is gone; the label says the
+    /// same for a screen reader.
+    #[test]
+    fn pointing_at_a_day_opens_its_card() {
+        let mut ui = Ui::new(HeatmapHarness, ());
+        let square = ui.input_tag("day-2026-09-08");
+        assert!(!square.contains("title="), "{square}");
+        assert!(
+            square.contains("aria-label=\"Tuesday 8 September 2026: 2 characters, 1 session"),
+            "{square}"
+        );
+
+        ui.point_at("day-2026-09-08", "mouse", (410.0, 520.0), (10.0, 20.0));
+        assert!(ui.has("class=\"day-tip\""), "the card opens above");
+        assert!(ui.has("--cell-left: 400px;"));
+        assert!(ui.has(">Characters<"));
+        assert!(ui.input_tag("day-2026-09-08").contains("has-tip"));
+        ui.point_away("day-2026-09-08");
+        assert!(!ui.has("day-tip"));
+
+        // Near the top of the window it opens below.
+        ui.point_at("day-2026-09-08", "mouse", (410.0, 60.0), (10.0, 20.0));
+        assert!(ui.has("class=\"day-tip below\""));
+        ui.point_away("day-2026-09-08");
+
+        // A finger does not point: only its tap opens a card.
+        ui.point_at("day-2026-09-08", "touch", (410.0, 520.0), (10.0, 20.0));
+        assert!(!ui.has("day-tip"));
+        // Nor does a day still to come.
+        ui.point_at("day-2026-09-10", "mouse", (410.0, 520.0), (10.0, 20.0));
+        assert!(!ui.has("day-tip"));
     }
 
     #[test]
@@ -1008,7 +1110,9 @@ mod interactions {
     fn a_quiet_day_says_so() {
         let mut ui = Ui::new(HeatmapHarness, ());
         ui.click("day-2026-09-09");
-        assert!(ui.has("2026-09-09 · no practice"));
+        assert!(ui.has("Wednesday 9 September 2026"));
+        assert!(ui.has("No practice"));
+        assert!(!ui.has(">Characters<"));
     }
 
     #[test]

@@ -5,6 +5,7 @@ use cw_core::{
 use dioxus::prelude::*;
 
 use crate::state::SessionPick;
+use crate::ui::scores::ScoresTab;
 use crate::ui::settings::target_label;
 use crate::ui::stats_detail::{HistoryTab, LettersTab, MistakesTab, SamplingTab};
 use crate::ui::widgets::{CardHead, IconName, Seg};
@@ -18,6 +19,7 @@ const CHART_H: f64 = 96.0;
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum StatsTab {
     Overview,
+    Scores,
     Letters,
     Mistakes,
     Sampling,
@@ -25,8 +27,9 @@ enum StatsTab {
 }
 
 /// The tabs, in the order the control offers them.
-const TABS: [(StatsTab, &str); 5] = [
+const TABS: [(StatsTab, &str); 6] = [
     (StatsTab::Overview, "Overview"),
+    (StatsTab::Scores, "Scores"),
     (StatsTab::Letters, "Letters"),
     (StatsTab::Mistakes, "Mistakes"),
     (StatsTab::Sampling, "Sampling"),
@@ -275,6 +278,7 @@ pub fn StatsView(
                 StatsTab::Overview => rsx! {
                     OverviewTab { settings, sessions }
                 },
+                StatsTab::Scores => rsx! { ScoresTab { sessions } },
                 StatsTab::Letters => rsx! { LettersTab { sessions } },
                 StatsTab::Mistakes => rsx! { MistakesTab { sessions } },
                 StatsTab::Sampling => rsx! { SamplingTab { settings, sessions } },

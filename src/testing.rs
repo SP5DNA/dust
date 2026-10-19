@@ -689,13 +689,21 @@ impl Ui {
         );
     }
 
-    /// Put a finger down on the control with this id, and nothing after it:
-    /// a touch that slid as it tapped, which the browser sends no click for.
-    pub fn touch_down(&mut self, id: &str) {
+    /// A pointer of `kind` ("mouse", "touch") at `at` in the window, which is
+    /// `in_control` inside the control it is over.
+    fn pointer(
+        kind: &str,
+        at: (f64, f64),
+        in_control: (f64, f64),
+    ) -> dioxus::html::SerializedPointerData {
         let mut data = serde_json::to_value(dioxus::html::SerializedMouseData::default())
             .expect("mouse data serializes");
         let fields = data.as_object_mut().expect("mouse data is an object");
         for (name, value) in [
+            ("client_x", serde_json::json!(at.0)),
+            ("client_y", serde_json::json!(at.1)),
+            ("offset_x", serde_json::json!(in_control.0)),
+            ("offset_y", serde_json::json!(in_control.1)),
             ("pointer_id", serde_json::json!(1)),
             ("width", serde_json::json!(1.0)),
             ("height", serde_json::json!(1.0)),
@@ -704,14 +712,32 @@ impl Ui {
             ("tilt_x", serde_json::json!(0)),
             ("tilt_y", serde_json::json!(0)),
             ("twist", serde_json::json!(0)),
-            ("pointer_type", serde_json::json!("touch")),
+            ("pointer_type", serde_json::json!(kind)),
             ("is_primary", serde_json::json!(true)),
         ] {
             fields.insert(name.to_string(), value);
         }
-        let pointer: dioxus::html::SerializedPointerData =
-            serde_json::from_value(data).expect("pointer data deserializes");
+        serde_json::from_value(data).expect("pointer data deserializes")
+    }
+
+    /// Put a finger down on the control with this id, and nothing after it:
+    /// a touch that slid as it tapped, which the browser sends no click for.
+    pub fn touch_down(&mut self, id: &str) {
+        let pointer = Self::pointer("touch", (0.0, 0.0), (0.0, 0.0));
         self.fire("pointerdown", id, Box::new(pointer));
+    }
+
+    /// Move a pointer of `kind` onto the control with this id, at `at` in the
+    /// window and `in_control` inside the control.
+    pub fn point_at(&mut self, id: &str, kind: &str, at: (f64, f64), in_control: (f64, f64)) {
+        let pointer = Self::pointer(kind, at, in_control);
+        self.fire("pointerenter", id, Box::new(pointer));
+    }
+
+    /// Move a mouse off the control with this id.
+    pub fn point_away(&mut self, id: &str) {
+        let pointer = Self::pointer("mouse", (0.0, 0.0), (0.0, 0.0));
+        self.fire("pointerleave", id, Box::new(pointer));
     }
 
     /// Tap the control with this id with a finger: down, then the click the

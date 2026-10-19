@@ -6,7 +6,8 @@
 [![License: GPL v3](https://img.shields.io/badge/license-GPLv3-blue.svg)](LICENSE)
 
 CW Morse **group trainer** in Rust. Hear a group, type it from memory, and get
-alignment-based accuracy, letter mastery and a score.
+alignment-based accuracy, letter mastery and a score — and a **score board** of
+your best sessions, with a medal for the personal best.
 
 Two ways to practise: Koch-style **character groups**, unlocked one letter at a
 time, or **callsigns** — real prefixes in realistic shapes, from `W1AW` up to
