@@ -4,7 +4,7 @@
 //! These read the page rather than the store, so they say what the learner
 //! sees; the store is written from the same settings the page shows.
 
-use cw_core::{CharSetMode, Experience, GroupSizeTarget, RangeSetting, RangeValues};
+use cw_core::{Aim, CharSetMode, Experience, RangeSetting, RangeValues};
 
 use crate::persist::Store;
 use crate::testing::{Ui, run, test_settings};
@@ -377,14 +377,52 @@ fn adaptive_group_size_is_opt_in_and_its_target_follows_the_switch() {
         assert!(ui.has("Stretch aims for 50% of groups copied whole."));
         let stored = ui.stored_settings().await;
         assert!(stored.curriculum.adaptive_group_size);
-        assert_eq!(
-            stored.curriculum.group_size_target,
-            GroupSizeTarget::Stretch
-        );
+        assert_eq!(stored.curriculum.aim, Aim::Stretch);
 
         ui.click("link-group-size");
         assert!(ui.has("one size leaves nothing to adapt"));
         assert!(!ui.shows("seg-stretch"));
+    });
+}
+
+/// Adaptive speed is off until asked for. On, it shows what it aims for: in
+/// the Speed card while group size does not adapt, and once it does, under
+/// Session shape, one aim for both. One speed leaves nothing to adapt.
+#[test]
+fn adaptive_speed_is_opt_in_and_shares_its_aim_with_group_size() {
+    run(|| async {
+        let mut settings = test_settings();
+        settings.curriculum.max_group_size = 6;
+        settings.playback.char_wpm_min = 18.0;
+        settings.playback.char_wpm_max = 30.0;
+        settings.playback.link_char_wpm = false;
+        let (mut ui, _recorder) = Ui::app_with_settings(settings);
+        ui.click("nav-settings");
+        assert!(ui.shows("switch-adapt-speed-to-me"));
+        assert!(ui.has("Your copy speed is under Stats."));
+        assert!(!ui.shows("seg-balanced"), "no target until it is on");
+
+        ui.commit("switch-adapt-speed-to-me", "true");
+        assert!(ui.has("Balanced aims for 94% of characters right."));
+        ui.click("seg-comfortable");
+        assert!(ui.has("Comfortable aims for 97% of characters right."));
+        let stored = ui.stored_settings().await;
+        assert!(stored.playback.adaptive_speed);
+        assert_eq!(stored.curriculum.aim, Aim::Comfortable);
+
+        ui.commit("switch-adapt-group-size-to-me", "true");
+        assert!(
+            ui.has("Comfortable aims for 85% of groups copied whole and 97% of characters right.")
+        );
+        assert!(ui.has("Aim for is set under Session shape"));
+        assert_eq!(
+            ui.controls("seg-comfortable").len(),
+            1,
+            "one aim on the page"
+        );
+
+        ui.click("link-character-speed");
+        assert!(ui.has("one speed leaves nothing to adapt"));
     });
 }
 

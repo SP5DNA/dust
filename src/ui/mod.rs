@@ -1,9 +1,11 @@
 pub mod auto_level;
 pub mod band;
+pub mod chart;
 pub mod credits;
 pub mod envelope;
 #[cfg(feature = "desktop")]
 pub mod floating;
+pub mod format;
 pub mod heatmap;
 pub mod home;
 pub mod listen;

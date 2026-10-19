@@ -49,7 +49,13 @@ impl LiveSession {
     fn transmission(&self, index: usize, text: String) -> Transmission {
         let settings = self.machine.session().settings();
         let group = self.stations.fork(index as u64);
-        let voice = resolve_station(settings, &mut group.fork(GroupStream::Voice as u64));
+        let mut voice = resolve_station(settings, &mut group.fork(GroupStream::Voice as u64));
+        // Adaptive speed chose this group's speed; the station keeps its own
+        // tone, strength and fist.
+        if let Some((char_wpm, effective_wpm)) = self.machine.session().planned_wpm(index) {
+            voice.char_wpm = char_wpm;
+            voice.effective_wpm = effective_wpm;
+        }
         let mut elsewhere = CharSamplingState::default();
         Transmission::calling(
             settings,
@@ -1057,6 +1063,44 @@ mod tests {
                 voices[0], voices[3],
                 "every group came from the same station, which is its own problem"
             );
+        });
+    }
+
+    /// With adaptive speed on, each group is sent at the speed the session
+    /// chose for it, inside the speed settings, and every repeat at the same.
+    #[test]
+    fn adaptive_speed_sends_each_group_at_its_chosen_speed() {
+        run(|| async {
+            let mut settings = test_settings();
+            settings.curriculum.num_groups = 3;
+            settings.playback.group_repeat_min = 2;
+            settings.playback.group_repeat_max = 2;
+            settings.playback.char_wpm_min = 15.0;
+            settings.playback.char_wpm_max = 35.0;
+            settings.playback.link_char_to_effective = true;
+            settings.playback.adaptive_speed = true;
+
+            let mut h = Harness::with_settings(settings);
+            h.start_training();
+            h.play_through(300_000).await;
+            assert_eq!(h.screen(), Screen::Results);
+
+            let voices = h.recorder.voices();
+            assert_eq!(voices.len(), 6, "three groups, two sends each");
+            for voice in &voices {
+                assert!(
+                    (15.0..=35.0).contains(&voice.char_wpm),
+                    "sent at {} WPM",
+                    voice.char_wpm
+                );
+                assert_eq!(voice.effective_wpm, voice.char_wpm, "tied spacing");
+            }
+            for pair in voices.chunks(2) {
+                assert_eq!(
+                    pair[0].char_wpm, pair[1].char_wpm,
+                    "a repeat is the same speed"
+                );
+            }
         });
     }
 

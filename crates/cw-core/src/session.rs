@@ -91,6 +91,17 @@ pub enum SessionPhase {
     Aborted,
 }
 
+/// A group just answered, as its source learns from it: what was sent and
+/// typed, what was copied of it, and the character and effective speed it
+/// was played at, once measured.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Answered<'a> {
+    pub sent: &'a str,
+    pub received: &'a str,
+    pub copied: &'a CopyTally,
+    pub played: Option<(f64, f64)>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Group {
     sent: String,
@@ -106,6 +117,9 @@ pub struct Group {
     answer_at: Option<MonoMs>,
     /// The character and effective speed it was sent at, once measured.
     played_wpm: Option<(f64, f64)>,
+    /// The character and effective speed the source chose for it, when it
+    /// chooses one: adaptive speed does.
+    planned_wpm: Option<(f64, f64)>,
     /// How many times this group is sent before the answer window opens.
     repeats: u32,
     /// Sends already finished for this group.
@@ -122,6 +136,7 @@ impl Group {
             end_at: None,
             answer_at: None,
             played_wpm: None,
+            planned_wpm: None,
             repeats: 1,
             plays_done: 0,
         }
@@ -137,6 +152,16 @@ impl Group {
 
     pub fn confirmed(&self) -> bool {
         self.tally.is_some()
+    }
+
+    /// The group as it was answered, once it is.
+    pub fn answered(&self) -> Option<Answered<'_>> {
+        Some(Answered {
+            sent: &self.sent,
+            received: &self.input,
+            copied: self.tally.as_ref()?,
+            played: self.played_wpm,
+        })
     }
 
     /// How long the answer took, from the end of the send — never quicker
@@ -175,6 +200,19 @@ pub struct SessionView {
     /// Planned sends for the group being played, and how many are done.
     pub repeat_total: u32,
     pub repeat_done: u32,
+    /// The speed the session chose for the current group, when it chooses
+    /// one: adaptive speed does.
+    pub speed: Option<ChosenSpeed>,
+}
+
+/// The speed the session chose for a group, as the training screen shows it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ChosenSpeed {
+    pub char_wpm: f64,
+    pub effective_wpm: f64,
+    /// Faster than the group before it (1), slower (-1), or about the same
+    /// (0): a change under two percent is the same.
+    pub change: i8,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -269,7 +307,33 @@ impl GroupSession {
             countdown: self.countdown(),
             repeat_total: current.map_or(1, |g| g.repeats.max(1)),
             repeat_done: current.map_or(0, |g| g.plays_done),
+            speed: self.chosen_speed(self.current_group),
         }
+    }
+
+    /// The speed chosen for group `index`, and how it moved from the one
+    /// before it.
+    fn chosen_speed(&self, index: usize) -> Option<ChosenSpeed> {
+        let (char_wpm, effective_wpm) = self.planned_wpm(index)?;
+        let copy = |(c, e): (f64, f64)| crate::score::copy_speed(c, e);
+        let change = index
+            .checked_sub(1)
+            .and_then(|before| self.planned_wpm(before))
+            .map_or(0, |before| {
+                let ratio = copy((char_wpm, effective_wpm)) / copy(before);
+                if ratio > 1.02 {
+                    1
+                } else if ratio < 0.98 {
+                    -1
+                } else {
+                    0
+                }
+            });
+        Some(ChosenSpeed {
+            char_wpm,
+            effective_wpm,
+            change,
+        })
     }
 
     pub(crate) fn set_phase(&mut self, phase: SessionPhase) {
@@ -297,6 +361,21 @@ impl GroupSession {
             group.input.clear();
             group.repeats = repeats.max(1);
         }
+    }
+
+    /// The speed the source chose for group `index`, if it chose one.
+    pub(crate) fn set_group_speed(&mut self, index: usize, speed: Option<(f64, f64)>) {
+        if let Some(group) = self.groups.get_mut(index)
+            && !group.confirmed()
+        {
+            group.planned_wpm = speed;
+        }
+    }
+
+    /// The character and effective speed to send group `index` at, when the
+    /// session chose them; otherwise the station sending it decides.
+    pub fn planned_wpm(&self, index: usize) -> Option<(f64, f64)> {
+        self.groups.get(index)?.planned_wpm
     }
 
     pub(crate) fn begin_group(&mut self, index: usize, now: MonoMs) {
@@ -357,9 +436,9 @@ impl GroupSession {
         }
     }
 
-    /// Answer the current group with what is in its box. Returns what was
-    /// copied, the first time only.
-    pub(crate) fn confirm(&mut self, index: usize, now: MonoMs) -> Option<&CopyTally> {
+    /// Answer the current group with what is in its box. Returns the group
+    /// as answered, the first time only.
+    pub(crate) fn confirm(&mut self, index: usize, now: MonoMs) -> Option<Answered<'_>> {
         if index != self.current_group {
             return None;
         }
@@ -370,7 +449,8 @@ impl GroupSession {
         }
         group.answer_at = group.answer_at.or(Some(now));
         self.focused_group = (index + 1).min(last);
-        Some(group.tally.insert(CopyTally::of(&group.sent, &group.input)))
+        group.tally = Some(CopyTally::of(&group.sent, &group.input));
+        group.answered()
     }
 
     /// The finished session, scored, as it is stored. `finished_at` is wall

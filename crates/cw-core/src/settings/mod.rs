@@ -152,11 +152,11 @@ pub enum PracticeWindow {
     Last5,
 }
 
-/// How hard adaptive group size pushes: the share of groups it aims to have
-/// copied whole.
+/// How hard the adaptive features push, group size and speed alike: the
+/// share of groups to copy whole, and of characters to copy right.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum GroupSizeTarget {
+pub enum Aim {
     /// Mostly clean copy.
     Comfortable,
     /// About a third of the groups trip you up.
@@ -166,16 +166,29 @@ pub enum GroupSizeTarget {
     Stretch,
 }
 
-impl GroupSizeTarget {
-    /// Every target, in the order the settings screen offers them.
+impl Aim {
+    /// Every aim, in the order the settings screen offers them.
     pub const ALL: [Self; 3] = [Self::Comfortable, Self::Balanced, Self::Stretch];
 
-    /// The share of groups to copy whole, from 0 to 1.
-    pub fn success_rate(self) -> f64 {
+    /// The share of groups to copy whole, from 0 to 1: what adaptive group
+    /// size aims for.
+    pub fn groups_whole(self) -> f64 {
         match self {
             Self::Comfortable => 0.85,
             Self::Balanced => 0.70,
             Self::Stretch => 0.50,
+        }
+    }
+
+    /// The share of characters to copy right, from 0 to 1: what adaptive
+    /// speed aims for. Over a group of five, each about matches the share
+    /// of groups copied whole above (0.97⁵ ≈ 0.86, 0.94⁵ ≈ 0.73,
+    /// 0.90⁵ ≈ 0.59).
+    pub fn chars_right(self) -> f64 {
+        match self {
+            Self::Comfortable => 0.97,
+            Self::Balanced => 0.94,
+            Self::Stretch => 0.90,
         }
     }
 }
@@ -210,8 +223,10 @@ pub struct CurriculumSettings {
     /// inside the group size range, rather than evenly across it. Off unless
     /// asked for; older saves have no field and load with it off.
     pub adaptive_group_size: bool,
-    /// What adaptive group size aims for.
-    pub group_size_target: GroupSizeTarget,
+    /// What adaptive group size and adaptive speed aim for. Saved under the
+    /// name it had when only group size adapted.
+    #[serde(rename = "groupSizeTarget")]
+    pub aim: Aim,
 }
 
 impl Default for CurriculumSettings {
@@ -231,7 +246,7 @@ impl Default for CurriculumSettings {
             max_group_size: 5,
             link_group_size: false,
             adaptive_group_size: false,
-            group_size_target: GroupSizeTarget::Balanced,
+            aim: Aim::Balanced,
         }
     }
 }
@@ -246,6 +261,10 @@ pub struct PlaybackSettings {
     pub effective_wpm_max: f64,
     pub link_effective_wpm: bool,
     pub link_char_to_effective: bool,
+    /// Let the trainer choose each group's speed within the ranges above,
+    /// learning your copy speed as it goes ([`crate::speed`]). Off draws the
+    /// speed evenly from the ranges. Older saves have no field and load off.
+    pub adaptive_speed: bool,
     pub extra_word_space_multiplier: f64,
     pub group_timeout: f64,
     /// Seconds to sit on the last group after it is sent, so the card can be
@@ -284,6 +303,7 @@ impl Default for PlaybackSettings {
             effective_wpm_max: 25.0,
             link_effective_wpm: false,
             link_char_to_effective: true,
+            adaptive_speed: false,
             extra_word_space_multiplier: 1.0,
             group_timeout: 10.0,
             group_pause_sec: 2.0,
@@ -1319,6 +1339,33 @@ mod tests {
         }
     }
 
+    /// The aim is shared by group size and speed, and shown by one card at a
+    /// time: that card's reset puts it back, and the other card's leaves it.
+    #[test]
+    fn the_aim_goes_back_with_the_card_that_shows_it() {
+        let mut speed_only = TrainingSettings::default();
+        speed_only.playback.adaptive_speed = true;
+        speed_only.playback.char_wpm_min = 18.0;
+        speed_only.playback.char_wpm_max = 30.0;
+        speed_only.playback.link_char_wpm = false;
+        speed_only.curriculum.aim = Aim::Stretch;
+        let mut both = speed_only.clone();
+        both.curriculum.adaptive_group_size = true;
+
+        let reset = |settings: &TrainingSettings, section| {
+            let mut settings = settings.clone();
+            settings.reset_section(section);
+            settings.curriculum.aim
+        };
+        assert_eq!(reset(&speed_only, SettingsSection::Speed), Aim::Balanced);
+        assert_eq!(
+            reset(&speed_only, SettingsSection::SessionShape),
+            Aim::Stretch
+        );
+        assert_eq!(reset(&both, SettingsSection::Speed), Aim::Stretch);
+        assert_eq!(reset(&both, SettingsSection::SessionShape), Aim::Balanced);
+    }
+
     /// Settings with every stored preference moved off its default, so a reset
     /// has something to undo whichever section it is asked about.
     fn wildly_different() -> TrainingSettings {
@@ -1328,7 +1375,7 @@ mod tests {
         s.curriculum.max_group_size = 9;
         s.curriculum.link_group_size = true;
         s.curriculum.adaptive_group_size = true;
-        s.curriculum.group_size_target = GroupSizeTarget::Stretch;
+        s.curriculum.aim = Aim::Stretch;
         s.curriculum.char_set_mode = CharSetMode::Koch;
         s.curriculum.mixed_letters_percent = 33;
         s.curriculum.custom_sequence = vec!['Z', 'Q'];

@@ -20,7 +20,11 @@ calls, counted from the Super Check Partial list of active contest calls by
 Opt in to **adaptive group size** and the trainer learns your copy span, the
 group length you copy whole about half the time, and draws lengths near its
 edge: longer while you copy groups whole, shorter when you don't
-([how it works](docs/adaptive-group-size.md)).
+([how it works](docs/adaptive-group-size.md)). **Adaptive speed** does the same
+for speed, as RufzXP does: faster while you copy the characters, slower when
+you miss them, within the speeds you set. The two learn from different
+mistakes — speed from misheard characters, length from groups you could not
+hold — so they can run together ([how it works](docs/adaptive-speed.md)).
 
 New here? A guided setup opens on the first launch, and the **?** in the
 header opens it again any time. It takes you through a first session — start

@@ -281,6 +281,7 @@ fn TrainingRoute() -> Element {
                 repeat_total: view.repeat_total,
                 repeat_done: view.repeat_done,
                 countdown: view.countdown,
+                speed: view.speed,
                 answer: ctx.answer,
                 on_change,
                 on_confirm,

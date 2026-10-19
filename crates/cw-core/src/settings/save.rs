@@ -124,7 +124,7 @@ impl<'de> Deserialize<'de> for TrainingSettings {
 mod tests {
     use super::*;
     use crate::sequences::{PresetId, SequenceChoice};
-    use crate::settings::GroupSizeTarget;
+    use crate::settings::Aim;
 
     fn load(json: serde_json::Value) -> TrainingSettings {
         serde_json::from_value(json).expect("a save should load")
@@ -159,7 +159,7 @@ mod tests {
             "charSetMode": "koch", "minGroupSize": 3, "maxGroupSize": 7,
         }));
         assert!(!old.curriculum.adaptive_group_size);
-        assert_eq!(old.curriculum.group_size_target, GroupSizeTarget::Balanced);
+        assert_eq!(old.curriculum.aim, Aim::Balanced);
         assert_eq!(
             (old.curriculum.min_group_size, old.curriculum.max_group_size),
             (3, 7)
@@ -167,10 +167,23 @@ mod tests {
 
         let mut new = TrainingSettings::default();
         new.curriculum.adaptive_group_size = true;
-        new.curriculum.group_size_target = GroupSizeTarget::Comfortable;
+        new.curriculum.aim = Aim::Comfortable;
         let json = serde_json::to_value(&new).expect("serialize");
         assert_eq!(json["adaptiveGroupSize"], true);
         assert_eq!(json["groupSizeTarget"], "comfortable");
+        assert_eq!(load(json), new);
+    }
+
+    /// A save from before adaptive speed has it off; one written since reads
+    /// back what it said.
+    #[test]
+    fn adaptive_speed_is_off_in_a_save_from_before_it() {
+        let old = load(serde_json::json!({ "charWpmMin": 18.0, "charWpmMax": 30.0 }));
+        assert!(!old.playback.adaptive_speed);
+        let mut new = TrainingSettings::default();
+        new.playback.adaptive_speed = true;
+        let json = serde_json::to_value(&new).expect("serialize");
+        assert_eq!(json["adaptiveSpeed"], true);
         assert_eq!(load(json), new);
     }
 

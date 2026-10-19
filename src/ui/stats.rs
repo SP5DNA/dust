@@ -1,20 +1,17 @@
 use cw_core::{
-    AccuracyPoint, MasteryStatus, SessionResult, SpanPoint, TrainingSettings, accuracy_chart,
-    adapts_group_size, character_diagnostics, span_history,
+    AccuracyPoint, Estimate, EstimatePoint, MasteryStatus, SessionResult, TrainingSettings,
+    accuracy_chart, adapts_group_size, adapts_speed, character_diagnostics, span_history,
+    speed_history,
 };
 use dioxus::prelude::*;
 
 use crate::state::SessionPick;
+use crate::ui::chart::{CHART_H, marks, path, polyline, series, trend_chart};
+use crate::ui::format::counted;
 use crate::ui::scores::ScoresTab;
-use crate::ui::settings::target_label;
+use crate::ui::settings::aim_label;
 use crate::ui::stats_detail::{HistoryTab, LettersTab, MistakesTab, SamplingTab};
 use crate::ui::widgets::{CardHead, IconName, Seg};
-
-// 420×96 keeps the drawing box at the same aspect the card gives it, so the
-// SVG can scale uniformly: stretched coordinates would turn the dots into
-// ellipses and thin the stroke unevenly.
-const CHART_W: f64 = 420.0;
-const CHART_H: f64 = 96.0;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum StatsTab {
@@ -55,46 +52,6 @@ fn chart_floor(points: &[AccuracyPoint]) -> f64 {
     (((min - 6.0) / 10.0).floor() * 10.0).clamp(0.0, 80.0)
 }
 
-/// Where each of `count` sessions sits across the chart: spread over its
-/// whole width, or, for a single session, a flat line across it — which beats
-/// an empty chart, the way a one-point polyline renders.
-fn series(values: &[f64], y_at: impl Fn(f64) -> f64) -> Vec<(f64, f64)> {
-    if let [only] = values {
-        let y = y_at(*only);
-        return vec![(0.0, y), (CHART_W, y)];
-    }
-    let last = values.len().saturating_sub(1).max(1) as f64;
-    values
-        .iter()
-        .enumerate()
-        .map(|(i, value)| (i as f64 / last * CHART_W, y_at(*value)))
-        .collect()
-}
-
-fn polyline(coords: &[(f64, f64)]) -> String {
-    coords
-        .iter()
-        .map(|(x, y)| format!("{x:.1},{y:.1}"))
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-/// The points marked with a dot: every session on a short history, the last
-/// on a long one, the middle of the line for a single session.
-fn marks(coords: &[(f64, f64)], sessions: usize) -> Vec<(f64, f64)> {
-    if sessions == 1 {
-        coords
-            .first()
-            .map(|(_, y)| (CHART_W / 2.0, *y))
-            .into_iter()
-            .collect()
-    } else if sessions <= 30 {
-        coords.to_vec()
-    } else {
-        coords.last().copied().into_iter().collect()
-    }
-}
-
 fn chart_geometry(points: &[AccuracyPoint], threshold_pct: f64) -> Option<ChartGeometry> {
     if points.is_empty() {
         return None;
@@ -108,19 +65,15 @@ fn chart_geometry(points: &[AccuracyPoint], threshold_pct: f64) -> Option<ChartG
 
     let values: Vec<f64> = points.iter().map(|p| p.accuracy_pct).collect();
     let coords = series(&values, y_at);
-    let line = polyline(&coords);
-    let mut area = format!("M{:.1},{CHART_H:.1}", coords[0].0);
-    for (x, y) in &coords {
-        area.push_str(&format!(" L{x:.1},{y:.1}"));
-    }
-    area.push_str(&format!(
-        " L{:.1},{CHART_H:.1} Z",
-        coords.last().map(|(x, _)| *x).unwrap_or(0.0)
-    ));
+    let (&(first_x, _), &(last_x, _)) = (coords.first()?, coords.last()?);
+    // The line, closed down to the floor at either end.
+    let outline = std::iter::once((first_x, CHART_H))
+        .chain(coords.iter().copied())
+        .chain(std::iter::once((last_x, CHART_H)));
 
     Some(ChartGeometry {
-        line,
-        area,
+        line: polyline(&coords),
+        area: format!("{} Z", path(outline)),
         dots: marks(&coords, points.len()),
         floor_pct,
         threshold_y: (threshold_pct > floor_pct && threshold_pct < 100.0)
@@ -128,101 +81,71 @@ fn chart_geometry(points: &[AccuracyPoint], threshold_pct: f64) -> Option<ChartG
     })
 }
 
-/// Chart shape for the copy span: its estimate after each session, and a
-/// band one standard deviation either side of it, which narrows as the
-/// estimate firms up.
-struct SpanChart {
-    line: String,
-    band: String,
-    dots: Vec<(f64, f64)>,
-    /// The scale, in characters, bottom to top.
-    low: f64,
-    high: f64,
+/// How many sessions a trend card draws.
+const TREND_SESSIONS_SHOWN: usize = 30;
+
+/// How an estimate moved over `count` sessions, given to `decimals` places.
+/// A change too small to show at that many places is steady.
+fn trend_words(change: f64, count: usize, decimals: usize) -> String {
+    let steady = 0.5 / 10_f64.powi(decimals as i32);
+    if count == 1 {
+        "after 1 session".to_string()
+    } else if change.abs() < steady {
+        format!("steady over {count} sessions")
+    } else if change > 0.0 {
+        format!("up {change:.decimals$} over {count} sessions")
+    } else {
+        format!("down {:.decimals$} over {count} sessions", -change)
+    }
 }
 
-fn span_chart(points: &[SpanPoint]) -> Option<SpanChart> {
-    if points.is_empty() {
-        return None;
-    }
-    let below = |p: &SpanPoint| p.estimate.mean - p.estimate.sd;
-    let above = |p: &SpanPoint| p.estimate.mean + p.estimate.sd;
-    let low = points.iter().map(below).fold(f64::INFINITY, f64::min);
-    let high = points.iter().map(above).fold(f64::NEG_INFINITY, f64::max);
-    let low = low.floor().max(0.0);
-    let high = high.ceil().max(low + 2.0);
-    let y_at = |chars: f64| (CHART_H - (chars - low) / (high - low) * CHART_H).clamp(0.0, CHART_H);
-
-    let means: Vec<f64> = points.iter().map(|p| p.estimate.mean).collect();
-    let tops: Vec<f64> = points.iter().map(above).collect();
-    let bottoms: Vec<f64> = points.iter().map(below).collect();
-    let coords = series(&means, y_at);
-    let mut band = String::new();
-    for (i, (x, y)) in series(&tops, y_at).into_iter().enumerate() {
-        band.push_str(&format!("{}{x:.1},{y:.1}", if i == 0 { "M" } else { " L" }));
-    }
-    for (x, y) in series(&bottoms, y_at).into_iter().rev() {
-        band.push_str(&format!(" L{x:.1},{y:.1}"));
-    }
-    band.push_str(" Z");
-
-    Some(SpanChart {
-        line: polyline(&coords),
-        band,
-        dots: marks(&coords, points.len()),
-        low,
-        high,
-    })
-}
-
-/// How many sessions of span the overview draws.
-const SPAN_SESSIONS_SHOWN: usize = 30;
-
-/// The copy span: how long a group you copy whole, and how that has moved.
-/// Nothing for callsigns, which are as long as they are, or before a session
-/// of the character set being trained.
+/// An estimate over the last sessions, with its uncertainty, and whether the
+/// feature it belongs to is steering by it. Nothing before the first session
+/// it can be read from.
 #[component]
-fn SpanCard(settings: TrainingSettings, sessions: Vec<SessionResult>) -> Element {
-    let points = span_history(&settings, &sessions);
-    let shown = &points[points.len().saturating_sub(SPAN_SESSIONS_SHOWN)..];
-    let (Some(first), Some(last), Some(chart)) = (shown.first(), shown.last(), span_chart(shown))
+fn TrendCard(
+    /// The estimate after each session, oldest first.
+    points: Vec<EstimatePoint>,
+    icon: IconName,
+    title: &'static str,
+    /// What the estimate is counted in: "chars", "WPM".
+    unit: &'static str,
+    /// How many decimal places it is given to.
+    decimals: usize,
+    /// The colour it is drawn in.
+    colour: &'static str,
+    /// What the estimate stands for, said before its scale.
+    #[props(into)]
+    meaning: String,
+    /// The aim, while the feature is steering by it.
+    steering: Option<&'static str>,
+    /// What the chip says while it is not.
+    off: &'static str,
+) -> Element {
+    let shown = &points[points.len().saturating_sub(TREND_SESSIONS_SHOWN)..];
+    let estimates: Vec<Estimate> = shown.iter().map(|point| point.estimate).collect();
+    let (Some(first), Some(last), Some(chart)) =
+        (estimates.first(), estimates.last(), trend_chart(&estimates))
     else {
         return rsx! {};
     };
-    let change = last.estimate.mean - first.estimate.mean;
-    let count = shown.len();
-    let trend = if count == 1 {
-        "after 1 session".to_string()
-    } else if change.abs() < 0.05 {
-        format!("steady over {count} sessions")
-    } else if change > 0.0 {
-        format!("up {change:.1} over {count} sessions")
-    } else {
-        format!("down {:.1} over {count} sessions", -change)
-    };
-    let adapting = adapts_group_size(&settings);
-    let mode = if adapting {
-        format!(
-            "Adapting · {}",
-            target_label(settings.curriculum.group_size_target)
-        )
-    } else {
-        "Adaptive length off".to_string()
-    };
+    let trend = trend_words(last.mean - first.mean, estimates.len(), decimals);
+    let mode = steering.map_or_else(|| off.to_string(), |aim| format!("Adapting · {aim}"));
     rsx! {
         div { class: "card chart-card",
             CardHead {
-                icon: IconName::Target,
-                title: "Copy span",
-                note: format!("{:.1} ± {:.1} chars · {trend}", last.estimate.mean, last.estimate.sd),
+                icon,
+                title,
+                note: format!("{:.decimals$} ± {:.decimals$} {unit} · {trend}", last.mean, last.sd),
             }
             svg {
                 class: "sparkline",
                 view_box: "0 0 420 96",
-                path { d: "{chart.band}", fill: "var(--info)", fill_opacity: "0.16", stroke: "none" }
+                path { d: "{chart.band}", fill: colour, fill_opacity: "0.16", stroke: "none" }
                 polyline {
                     points: "{chart.line}",
                     fill: "none",
-                    stroke: "var(--info)",
+                    stroke: colour,
                     stroke_width: "2.2",
                     stroke_linecap: "round",
                     stroke_linejoin: "round",
@@ -232,7 +155,7 @@ fn SpanCard(settings: TrainingSettings, sessions: Vec<SessionResult>) -> Element
                         cx: "{x:.1}",
                         cy: "{y:.1}",
                         r: "3",
-                        fill: "var(--info)",
+                        fill: colour,
                         stroke: "var(--surface)",
                         stroke_width: "1.5",
                     }
@@ -240,10 +163,51 @@ fn SpanCard(settings: TrainingSettings, sessions: Vec<SessionResult>) -> Element
             }
             div { class: "row-between",
                 span { class: "tiny", style: "text-transform: none; letter-spacing: 0.02em;",
-                    "Copied whole about half the time · scale {chart.low:.0}–{chart.high:.0} chars"
+                    "{meaning} · scale {chart.low:.0}–{chart.high:.0} {unit}"
                 }
-                span { class: if adapting { "chip good" } else { "chip" }, "{mode}" }
+                span { class: if steering.is_some() { "chip good" } else { "chip" }, "{mode}" }
             }
+        }
+    }
+}
+
+/// The copy span: how long a group you copy whole, and how that has moved.
+/// Nothing for callsigns, which are as long as they are, or before a session
+/// of the character set being trained.
+#[component]
+fn SpanCard(settings: TrainingSettings, sessions: Vec<SessionResult>) -> Element {
+    rsx! {
+        TrendCard {
+            points: span_history(&settings, &sessions),
+            icon: IconName::Target,
+            title: "Copy span",
+            unit: "chars",
+            decimals: 1,
+            colour: "var(--info)",
+            meaning: "Copied whole about half the time",
+            steering: adapts_group_size(&settings).then(|| aim_label(settings.curriculum.aim)),
+            off: "Adaptive length off",
+        }
+    }
+}
+
+/// Your copy speed: the speed at which you copy the share of characters
+/// "Aim for" asks, and how that has moved. Nothing before a session of the
+/// character set being trained.
+#[component]
+fn CopySpeedCard(settings: TrainingSettings, sessions: Vec<SessionResult>) -> Element {
+    let aim = settings.curriculum.aim;
+    rsx! {
+        TrendCard {
+            points: speed_history(&settings, &sessions),
+            icon: IconName::Gauge,
+            title: "Copy speed",
+            unit: "WPM",
+            decimals: 0,
+            colour: "var(--good)",
+            meaning: format!("{:.0}% of characters right", aim.chars_right() * 100.0),
+            steering: adapts_speed(&settings).then(|| aim_label(aim)),
+            off: "Adaptive speed off",
         }
     }
 }
@@ -307,12 +271,6 @@ fn OverviewTab(settings: TrainingSettings, sessions: Vec<SessionResult>) -> Elem
         .filter(|d| d.status == MasteryStatus::Mastered)
         .count();
     let geometry = chart_geometry(&chart, threshold);
-    let session_count = sessions.len();
-    let session_noun = if session_count == 1 {
-        "session"
-    } else {
-        "sessions"
-    };
     let latest = chart.last().map(|p| p.accuracy_pct).unwrap_or(0.0);
     rsx! {
         div { class: "stack",
@@ -343,7 +301,7 @@ fn OverviewTab(settings: TrainingSettings, sessions: Vec<SessionResult>) -> Elem
                         CardHead {
                             icon: IconName::Chart,
                             title: "Accuracy over time",
-                            note: format!("{session_count} {session_noun} · latest {}%", latest.round()),
+                            note: format!("{} · latest {}%", counted(sessions.len(), "session"), latest.round()),
                         }
                         svg {
                             class: "sparkline",
@@ -394,7 +352,8 @@ fn OverviewTab(settings: TrainingSettings, sessions: Vec<SessionResult>) -> Elem
                         }
                     }
                 }
-                SpanCard { settings, sessions }
+                SpanCard { settings: settings.clone(), sessions: sessions.clone() }
+                CopySpeedCard { settings, sessions }
             }
         }
     }
@@ -402,7 +361,8 @@ fn OverviewTab(settings: TrainingSettings, sessions: Vec<SessionResult>) -> Elem
 
 #[cfg(test)]
 mod tests {
-    use super::{CHART_H, CHART_W, chart_floor, chart_geometry};
+    use super::{chart_floor, chart_geometry, trend_words};
+    use crate::ui::chart::{CHART_H, CHART_W};
     use cw_core::AccuracyPoint;
 
     fn points(pcts: &[f64]) -> Vec<AccuracyPoint> {
@@ -427,7 +387,8 @@ mod tests {
         // Two coordinates, so the polyline actually has a segment to draw.
         assert_eq!(geometry.line.split(' ').count(), 2);
         assert!(geometry.line.starts_with("0.0,"));
-        assert!(geometry.area.ends_with(" Z"));
+        assert!(geometry.area.starts_with("M0.0,96.0 L0.0,"));
+        assert!(geometry.area.ends_with(" L420.0,96.0 Z"));
         assert_eq!(geometry.dots.len(), 1);
         assert!((geometry.dots[0].0 - CHART_W / 2.0).abs() < f64::EPSILON);
     }
@@ -483,5 +444,18 @@ mod tests {
         // Neither does one at the very top.
         let top = chart_geometry(&points(&[80.0]), 100.0).unwrap();
         assert!(top.threshold_y.is_none());
+    }
+
+    /// A move is said to the places the estimate is given to; one that would
+    /// show as nothing is steady.
+    #[test]
+    fn a_trend_says_which_way_and_how_far() {
+        assert_eq!(trend_words(3.0, 1, 1), "after 1 session");
+        assert_eq!(trend_words(0.04, 8, 1), "steady over 8 sessions");
+        assert_eq!(trend_words(0.36, 8, 1), "up 0.4 over 8 sessions");
+        assert_eq!(trend_words(-1.24, 8, 1), "down 1.2 over 8 sessions");
+        assert_eq!(trend_words(0.4, 8, 0), "steady over 8 sessions");
+        assert_eq!(trend_words(2.6, 8, 0), "up 3 over 8 sessions");
+        assert_eq!(trend_words(-5.0, 30, 0), "down 5 over 30 sessions");
     }
 }

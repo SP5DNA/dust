@@ -3,6 +3,7 @@ use cw_core::{
 };
 use dioxus::prelude::*;
 
+use crate::ui::format::{counted, long_date, month_name};
 use crate::ui::widgets::{CardHead, IconName, Seg, control_id, html_bool};
 
 #[component]
@@ -18,12 +19,7 @@ pub fn StreakCard(status: StreakStatus) -> Element {
     let Some((class, emoji, body)) = (match status.state {
         StreakState::Safe => Some({
             let used = if status.freezes_used > 0 {
-                let noun = if status.freezes_used == 1 {
-                    "freeze"
-                } else {
-                    "freezes"
-                };
-                format!(" ({} {noun} used)", status.freezes_used)
+                format!(" ({} used)", counted(status.freezes_used, "freeze"))
             } else {
                 String::new()
             };
@@ -117,60 +113,6 @@ pub fn ActivityHeatmap(sessions: Vec<SessionResult>, today: String) -> Element {
 
 /// Weekday headings over each month's columns, Monday first.
 const WEEKDAYS: [&str; 7] = ["M", "T", "W", "T", "F", "S", "S"];
-
-const WEEKDAY_NAMES: [&str; 7] = [
-    "Monday",
-    "Tuesday",
-    "Wednesday",
-    "Thursday",
-    "Friday",
-    "Saturday",
-    "Sunday",
-];
-
-const MONTH_NAMES: [&str; 12] = [
-    "January",
-    "February",
-    "March",
-    "April",
-    "May",
-    "June",
-    "July",
-    "August",
-    "September",
-    "October",
-    "November",
-    "December",
-];
-
-/// "September 2026" for 2026 and 9.
-fn month_label(year: i32, month: u32) -> String {
-    let name = month
-        .checked_sub(1)
-        .and_then(|index| MONTH_NAMES.get(index as usize))
-        .copied()
-        .unwrap_or_default();
-    format!("{name} {year}")
-}
-
-/// "Tuesday 8 September 2026": the `n`th day (from 0) of a month whose 1st
-/// falls `lead` days into its week.
-fn day_label(year: i32, month: u32, lead: u32, n: usize) -> String {
-    let weekday = WEEKDAY_NAMES
-        .get((lead as usize + n) % WEEKDAY_NAMES.len())
-        .copied()
-        .unwrap_or_default();
-    format!("{weekday} {} {}", n + 1, month_label(year, month))
-}
-
-/// "1 session", "2 sessions".
-fn counted(n: u32, noun: &str) -> String {
-    if n == 1 {
-        format!("1 {noun}")
-    } else {
-        format!("{n} {noun}s")
-    }
-}
 
 /// What a screen reader says for a day's square.
 fn day_summary(label: &str, cell: &HeatmapCell) -> String {
@@ -383,14 +325,14 @@ fn HeatmapGridView(grid: HeatmapGrid) -> Element {
         div { class: "heatmap-months",
             for month in grid.months.iter() {
                 div { class: "heatmap-month",
-                    span { class: "heatmap-month-label", "{month_label(month.year, month.month)}" }
+                    span { class: "heatmap-month-label", "{month_name(month.year, month.month)}" }
                     div { class: "heatmap-month-grid",
                         for day in WEEKDAYS {
                             span { class: "heatmap-day-label", "{day}" }
                         }
                         for (n, cell) in month.cells.iter().enumerate() {
                             {
-                                let label = day_label(month.year, month.month, month.lead, n);
+                                let label = long_date(&cell.date);
                                 let tip = shown.as_ref().filter(|at| at.date == cell.date);
                                 let is_selected = pinned_date.as_deref() == Some(cell.date.as_str());
                                 let cls = match (is_selected, tip.is_some()) {
@@ -463,30 +405,6 @@ mod tests {
         // Out-of-range input is clamped rather than producing a broken colour.
         assert_eq!(heat_color(-1.0), heat_color(0.0));
         assert_eq!(heat_color(9.0), heat_color(1.0));
-    }
-
-    #[test]
-    fn a_month_is_named_in_full_with_its_year() {
-        assert_eq!(month_label(2026, 1), "January 2026");
-        assert_eq!(month_label(2026, 12), "December 2026");
-        // A month out of range names no month rather than panicking.
-        assert_eq!(month_label(2026, 0), " 2026");
-        assert_eq!(month_label(2026, 13), " 2026");
-    }
-
-    #[test]
-    fn a_day_is_named_with_its_weekday() {
-        // September 2026 starts on a Tuesday, one day into its week.
-        assert_eq!(day_label(2026, 9, 1, 0), "Tuesday 1 September 2026");
-        assert_eq!(day_label(2026, 9, 1, 5), "Sunday 6 September 2026");
-        assert_eq!(day_label(2026, 9, 1, 6), "Monday 7 September 2026");
-    }
-
-    #[test]
-    fn one_is_counted_in_the_singular() {
-        assert_eq!(counted(1, "session"), "1 session");
-        assert_eq!(counted(2, "session"), "2 sessions");
-        assert_eq!(counted(0, "character"), "0 characters");
     }
 
     fn day(sessions: u32) -> HeatmapCell {

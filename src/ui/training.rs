@@ -1,4 +1,4 @@
-use cw_core::answer_length_matches;
+use cw_core::{ChosenSpeed, answer_length_matches};
 use dioxus::core::Runtime;
 use dioxus::prelude::*;
 
@@ -473,6 +473,24 @@ input.focus({{ preventScroll: true }});"#
 ///
 /// The answer box is local: [`AnswerDraft`] says when the session hears it.
 /// Typing itself does not clone the session.
+/// "▲ 27 WPM", or "▼ 27/21 WPM" under Farnsworth: the speed adaptive speed
+/// chose, and which way it moved.
+fn speed_label(speed: ChosenSpeed) -> String {
+    let arrow = match speed.change {
+        1 => "▲ ",
+        -1 => "▼ ",
+        _ => "",
+    };
+    if speed.char_wpm - speed.effective_wpm >= 0.5 {
+        format!(
+            "{arrow}{:.0}/{:.0} WPM",
+            speed.char_wpm, speed.effective_wpm
+        )
+    } else {
+        format!("{arrow}{:.0} WPM", speed.char_wpm)
+    }
+}
+
 #[component]
 pub fn TrainingView(
     current: usize,
@@ -486,6 +504,9 @@ pub fn TrainingView(
     repeat_done: u32,
     /// Seconds left before the first group, while the session counts down.
     countdown: Option<u32>,
+    /// The speed adaptive speed chose for the current group, if it chose.
+    #[props(default)]
+    speed: Option<ChosenSpeed>,
     /// Where the box's text waits on its way to the session.
     answer: AnswerOutbox,
     on_change: EventHandler<(usize, String)>,
@@ -575,6 +596,17 @@ pub fn TrainingView(
             div { class: "card",
                 div { class: "train-head",
                     p { class: "muted train-hint", "{hint}" }
+                    if let Some(speed) = speed {
+                        span {
+                            class: match speed.change {
+                                1 => "chip speed-chip faster",
+                                -1 => "chip speed-chip slower",
+                                _ => "chip speed-chip",
+                            },
+                            title: "Adaptive speed",
+                            {speed_label(speed)}
+                        }
+                    }
                     if repeat_total > 1 {
                         span { class: "chip",
                             Icon { name: IconName::Repeat }
@@ -633,6 +665,24 @@ pub fn TrainingView(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod speed_tests {
+    use super::{ChosenSpeed, speed_label};
+
+    #[test]
+    fn the_chosen_speed_says_which_way_it_moved() {
+        let speed = |char_wpm, effective_wpm, change| ChosenSpeed {
+            char_wpm,
+            effective_wpm,
+            change,
+        };
+        assert_eq!(speed_label(speed(27.0, 27.0, 1)), "▲ 27 WPM");
+        assert_eq!(speed_label(speed(24.4, 24.4, -1)), "▼ 24 WPM");
+        assert_eq!(speed_label(speed(20.0, 20.0, 0)), "20 WPM");
+        assert_eq!(speed_label(speed(25.0, 15.0, 0)), "25/15 WPM", "Farnsworth");
     }
 }
 

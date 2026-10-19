@@ -57,7 +57,7 @@ impl GroupSource for Scripted {
         (self.0.pop_front().unwrap_or_else(|| "KM".into()), 1)
     }
 
-    fn learn(&mut self, _: &cw_core::CopyTally) {}
+    fn learn(&mut self, _: cw_core::Answered<'_>) {}
 }
 
 /// One finished session, the way the app stores it: each group sent, and

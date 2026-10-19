@@ -11,57 +11,104 @@ pub struct AlignmentPair {
     pub matched: bool,
 }
 
-/// Edit distance, filled row by row in one flat table, then walked back to
-/// pair the characters up. Every cell reads the row above it and the cell to
-/// its left, so the indices are the point rather than something an iterator
-/// would tidy away.
+/// Pair what was sent with what was received, character by character, at
+/// the fewest edits: a match, a wrong character, one dropped, or one added.
 pub fn align_group(sent: &str, received: &str) -> Vec<AlignmentPair> {
-    let s: Vec<char> = sent.chars().map(|c| c.to_ascii_uppercase()).collect();
-    let r: Vec<char> = received.chars().map(|c| c.to_ascii_uppercase()).collect();
-    let pair = |sent_char: Option<char>, received_char: Option<char>| AlignmentPair {
-        sent_char,
-        received_char,
-        matched: sent_char.is_some() && sent_char == received_char,
-    };
+    let (s, r) = (upper(sent), upper(received));
     // A clean copy is the common case, and needs no table.
     if s == r {
         return s.iter().map(|&c| pair(Some(c), Some(c))).collect();
     }
+    let table = Edits::new(&s, &r);
+    table.walk_back(&s, &r, s.len())
+}
 
-    let (m, n) = (s.len(), r.len());
-    let width = n + 1;
-    let mut dp = vec![0u32; (m + 1) * width];
-    for (j, cell) in dp.iter_mut().take(width).enumerate() {
-        *cell = j as u32;
+/// The alignment of what was held of `sent`, and how many of its characters
+/// were lost off the end, after the last one received.
+///
+/// Of the readings that cost the fewest edits, it takes the one that loses
+/// the most off the end: "KE" for "KMRSU" is one wrong and three lost, not
+/// three dropped inside and the last one wrong. At least one character is
+/// always held.
+pub(crate) fn align_holding(sent: &str, received: &str) -> (Vec<AlignmentPair>, usize) {
+    let (s, r) = (upper(sent), upper(received));
+    let table = Edits::new(&s, &r);
+    let fewest = table.at(s.len(), r.len());
+    let lost = (0..s.len())
+        .rev()
+        .find(|lost| table.at(s.len() - lost, r.len()) + *lost as u32 == fewest)
+        .unwrap_or(0);
+    (table.walk_back(&s, &r, s.len() - lost), lost)
+}
+
+fn upper(text: &str) -> Vec<char> {
+    text.chars().map(|c| c.to_ascii_uppercase()).collect()
+}
+
+fn pair(sent_char: Option<char>, received_char: Option<char>) -> AlignmentPair {
+    AlignmentPair {
+        sent_char,
+        received_char,
+        matched: sent_char.is_some() && sent_char == received_char,
     }
-    for i in 1..=m {
-        dp[i * width] = i as u32;
-        for j in 1..=n {
-            let match_cost = u32::from(s[i - 1] != r[j - 1]);
-            dp[i * width + j] = (dp[(i - 1) * width + j] + 1)
-                .min(dp[i * width + j - 1] + 1)
-                .min(dp[(i - 1) * width + j - 1] + match_cost);
+}
+
+/// The edit-distance table: entry `(i, j)` is the fewest edits that turn the
+/// first `i` characters sent into the first `j` received. Filled row by row
+/// in one flat table; every cell reads the row above it and the cell to its
+/// left, so the indices are the point rather than something an iterator
+/// would tidy away.
+struct Edits {
+    width: usize,
+    cells: Vec<u32>,
+}
+
+impl Edits {
+    fn new(s: &[char], r: &[char]) -> Self {
+        let (m, n) = (s.len(), r.len());
+        let width = n + 1;
+        let mut cells = vec![0u32; (m + 1) * width];
+        for (j, cell) in cells.iter_mut().take(width).enumerate() {
+            *cell = j as u32;
         }
+        for i in 1..=m {
+            cells[i * width] = i as u32;
+            for j in 1..=n {
+                let match_cost = u32::from(s[i - 1] != r[j - 1]);
+                cells[i * width + j] = (cells[(i - 1) * width + j] + 1)
+                    .min(cells[i * width + j - 1] + 1)
+                    .min(cells[(i - 1) * width + j - 1] + match_cost);
+            }
+        }
+        Self { width, cells }
     }
 
-    let mut alignment = Vec::with_capacity(m.max(n));
-    let (mut i, mut j) = (m, n);
-    while i > 0 || j > 0 {
-        let here = dp[i * width + j];
-        if i > 0 && j > 0 && here == dp[(i - 1) * width + j - 1] + u32::from(s[i - 1] != r[j - 1]) {
-            alignment.push(pair(Some(s[i - 1]), Some(r[j - 1])));
-            i -= 1;
-            j -= 1;
-        } else if i > 0 && (j == 0 || here == dp[(i - 1) * width + j] + 1) {
-            alignment.push(pair(Some(s[i - 1]), None));
-            i -= 1;
-        } else {
-            alignment.push(pair(None, Some(r[j - 1])));
-            j -= 1;
-        }
+    fn at(&self, i: usize, j: usize) -> u32 {
+        self.cells[i * self.width + j]
     }
-    alignment.reverse();
-    alignment
+
+    /// The pairs that turn the first `held` characters sent into everything
+    /// received, walked back from the end.
+    fn walk_back(&self, s: &[char], r: &[char], held: usize) -> Vec<AlignmentPair> {
+        let mut alignment = Vec::with_capacity(held.max(r.len()));
+        let (mut i, mut j) = (held, r.len());
+        while i > 0 || j > 0 {
+            let here = self.at(i, j);
+            if i > 0 && j > 0 && here == self.at(i - 1, j - 1) + u32::from(s[i - 1] != r[j - 1]) {
+                alignment.push(pair(Some(s[i - 1]), Some(r[j - 1])));
+                i -= 1;
+                j -= 1;
+            } else if i > 0 && (j == 0 || here == self.at(i - 1, j) + 1) {
+                alignment.push(pair(Some(s[i - 1]), None));
+                i -= 1;
+            } else {
+                alignment.push(pair(None, Some(r[j - 1])));
+                j -= 1;
+            }
+        }
+        alignment.reverse();
+        alignment
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -145,6 +192,26 @@ impl CopyTally {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What was lost off the end is counted apart from what was held; a
+    /// clean copy loses nothing.
+    #[test]
+    fn a_group_cut_short_is_held_up_to_where_it_was_lost() {
+        let held = |sent: &str, received: &str| {
+            let (pairs, lost) = align_holding(sent, received);
+            let right = pairs.iter().filter(|pair| pair.matched).count();
+            (right, pairs.len(), lost)
+        };
+        assert_eq!(held("KMRSU", "KMRSU"), (5, 5, 0));
+        assert_eq!(held("KMRSU", "KMR"), (3, 3, 2));
+        assert_eq!(held("KMRSU", "KE"), (1, 2, 3), "one wrong, three lost");
+        assert_eq!(held("KMRSU", "KRSU"), (4, 5, 0), "dropped inside");
+        assert_eq!(held("kmrsu", "KMR"), (3, 3, 2), "case is no error");
+        // The pairs held are the alignment of the part held.
+        let (pairs, lost) = align_holding("KMRSU", "KXR");
+        assert_eq!(lost, 2);
+        assert_eq!(pairs, align_group("KMR", "KXR"));
+    }
 
     #[test]
     fn align_substitution() {

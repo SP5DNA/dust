@@ -6,8 +6,9 @@
 //! the sampler learns from each answer. The runtime only plays, waits, and
 //! reports back.
 
-use crate::alignment::CopyTally;
-use crate::session::{GroupSession, MonoMs, SessionId, SessionPhase, answer_length_matches};
+use crate::session::{
+    Answered, GroupSession, MonoMs, SessionId, SessionPhase, answer_length_matches,
+};
 use crate::settings::TrainingSettings;
 use crate::timing::{compute_after_group_gap_ms, compute_group_gap_for_wpm};
 
@@ -22,8 +23,13 @@ pub trait GroupSource {
     /// The next group to send, never empty, and how many times to send it
     /// before the answer window opens.
     fn next_group(&mut self, settings: &TrainingSettings) -> (String, u32);
-    /// What was copied of a group the user has just answered.
-    fn learn(&mut self, copied: &CopyTally);
+    /// A group the user has just answered.
+    fn learn(&mut self, answered: Answered<'_>);
+    /// The character and effective speed to send the group just drawn at,
+    /// if the source chooses it. Otherwise the station sending it does.
+    fn next_speed(&mut self, _settings: &TrainingSettings) -> Option<(f64, f64)> {
+        None
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -134,8 +140,10 @@ impl<S: GroupSource> SessionMachine<S> {
         let groups = settings.curriculum.num_groups.max(1) as usize;
         let countdown = settings.playback.countdown_sec;
         let (text, repeats) = source.next_group(&settings);
+        let speed = source.next_speed(&settings);
         let mut session = GroupSession::new(session_id, groups, settings);
         session.set_group(0, text, repeats);
+        session.set_group_speed(0, speed);
         let mut machine = Self {
             repeats_left: session.group_repeats(0),
             session,
@@ -425,8 +433,8 @@ impl<S: GroupSource> SessionMachine<S> {
             return false;
         }
         match self.session.confirm(index, now) {
-            Some(copied) => {
-                self.source.learn(copied);
+            Some(answered) => {
+                self.source.learn(answered);
                 true
             }
             None => false,
@@ -447,7 +455,9 @@ impl<S: GroupSource> SessionMachine<S> {
             ];
         }
         let (text, repeats) = self.source.next_group(self.session.settings());
+        let speed = self.source.next_speed(self.session.settings());
         self.session.set_group(next, text, repeats);
+        self.session.set_group_speed(next, speed);
         self.set_phase(SessionPhase::InterGroupGap { next });
         let gap_ms = self.group_gap_ms(next);
         vec![
@@ -497,6 +507,7 @@ mod tests {
     use std::collections::VecDeque;
 
     use super::*;
+    use crate::alignment::CopyTally;
 
     /// Hands out the groups it is given, then "KM" for ever, and remembers
     /// what it was taught.
@@ -505,6 +516,10 @@ mod tests {
         texts: VecDeque<String>,
         repeats: u32,
         learned: Vec<CopyTally>,
+        /// The speed it chooses for every group, if it chooses one.
+        speed: Option<(f64, f64)>,
+        /// What it was taught about speed: sent, typed, and played at.
+        heard: Vec<(String, String, (f64, f64))>,
     }
 
     impl GroupSource for Script {
@@ -513,8 +528,19 @@ mod tests {
             (text, self.repeats.max(1))
         }
 
-        fn learn(&mut self, copied: &CopyTally) {
-            self.learned.push(copied.clone());
+        fn learn(&mut self, answered: Answered<'_>) {
+            self.learned.push(answered.copied.clone());
+            if let Some(played) = answered.played {
+                self.heard.push((
+                    answered.sent.to_string(),
+                    answered.received.to_string(),
+                    played,
+                ));
+            }
+        }
+
+        fn next_speed(&mut self, _: &TrainingSettings) -> Option<(f64, f64)> {
+            self.speed
         }
     }
 
@@ -522,7 +548,7 @@ mod tests {
         Script {
             texts: texts.iter().map(|t| (*t).to_string()).collect(),
             repeats,
-            learned: Vec::new(),
+            ..Script::default()
         }
     }
 
@@ -790,6 +816,28 @@ mod tests {
             }]
         );
         assert_eq!(m.session().current_group(), 1);
+    }
+
+    /// A source that chooses each group's speed has it kept with the group,
+    /// for the sender to use, and learns from each answer at the speed it
+    /// was actually played.
+    #[test]
+    fn a_chosen_speed_is_kept_with_its_group_and_learned_from() {
+        let mut source = script(&["KM", "UK"], 1);
+        source.speed = Some((27.0, 21.0));
+        let mut m = start_with(settings(2, true, 10.0), source);
+        assert_eq!(m.session().planned_wpm(0), Some((27.0, 21.0)));
+        let _ = m.apply(ended(0), MonoMs(500));
+        let _ = m.apply(typed(0, "kx"), MonoMs(600));
+        let _ = m.apply(SessionEvent::Confirm, MonoMs(700));
+        assert_eq!(m.session().planned_wpm(1), Some((27.0, 21.0)));
+        assert_eq!(
+            m.source.heard,
+            vec![("KM".to_string(), "KX".to_string(), (20.0, 18.0))],
+            "learned at the speed it was played"
+        );
+        // A source that chooses none leaves the speed to the station.
+        assert_eq!(machine().session().planned_wpm(0), None);
     }
 
     #[test]

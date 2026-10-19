@@ -6,9 +6,11 @@
 
 #![forbid(unsafe_code)]
 
+mod aim;
 mod alignment;
 mod auto_level;
 pub mod band;
+mod belief;
 mod board;
 mod callsign;
 mod heatmap;
@@ -26,6 +28,7 @@ mod settings;
 #[cfg(test)]
 mod soak;
 mod span;
+mod speed;
 mod stats;
 mod streak;
 mod timing;
@@ -36,6 +39,7 @@ pub use auto_level::{
     AutoLevelChange, AutoLevelCounters, AutoLevelProgress, Completion, CountersKey, CountersUpdate,
     auto_level_progress, complete_session, evaluate_auto_level,
 };
+pub use belief::{Estimate, EstimatePoint};
 pub use board::{
     BOARD_MIN_GROUPS, BoardEntry, FORM_SESSIONS, TimelinePoint, board_modes, board_place,
     per_group, score_board, score_timeline,
@@ -53,30 +57,34 @@ pub use pool::{
     compute_char_pool, current_practice_window, newest_unlocked, unlocked_practice_count,
 };
 pub use rng::{Rng, SplitMix64};
-pub use sampling::{CharSamplingState, Sampler, adapts_group_size, generate_training_group};
+pub use sampling::{
+    CharSamplingState, Sampler, adapts_group_size, adapts_speed, aim_section,
+    generate_training_group,
+};
 pub use sequences::{PresetId, SEQUENCE_PRESETS, SequenceChoice, SequencePreset};
 pub use session::{
-    Group, GroupResult, GroupSession, MonoMs, SessionId, SessionPhase, SessionResult,
-    SessionTiming, SessionView, answer_length_matches,
+    Answered, ChosenSpeed, Group, GroupResult, GroupSession, MonoMs, SessionId, SessionPhase,
+    SessionResult, SessionTiming, SessionView, answer_length_matches,
 };
 pub use settings::{
-    ADJUST_COUNT_MAX, ADJUST_THRESHOLD_MAX_PCT, ADJUST_THRESHOLD_MIN_PCT, AutoLevelSettings,
+    ADJUST_COUNT_MAX, ADJUST_THRESHOLD_MAX_PCT, ADJUST_THRESHOLD_MIN_PCT, Aim, AutoLevelSettings,
     BandSettings, COUNTDOWN_MAX_SEC, COVERAGE_STRENGTH_MAX, CharSetMode, CurriculumSettings,
     DEFAULT_FILTER_WIDTH_HZ, ERROR_WEIGHT_MAX, EXTRA_WORD_SPACE_MAX, EXTRA_WORD_SPACE_MIN,
     Experience, FILTER_WIDTH_MAX, FILTER_WIDTH_MIN, FilterShape, GROUP_PAUSE_MAX_SEC,
     GROUP_REPEAT_MAX, GROUP_REPEAT_MIN, GROUP_SIZE_MAX, GROUP_SIZE_MIN, GROUP_TIMEOUT_MAX_SEC,
-    GroupSizeTarget, LevelAxis, MixedAutoLevelAxis, NUM_GROUPS_MAX, NUM_GROUPS_MIN,
-    PILEUP_LEVEL_MAX_DB, PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN,
-    PlaybackSettings, PracticeWindow, QSB_RATE_MAX_HZ, QSB_RATE_MIN_HZ, RangeSetting, RangeValues,
-    SIDE_TONE_MAX_HZ, SIDE_TONE_MIN_HZ, STATIONS_MAX, STATIONS_MIN, STEEPNESS_MAX_MS,
-    STEEPNESS_MIN_MS, SettingsSection, TrainingSettings, VOLUME_MAX, VOLUME_MIN, WPM_MAX, WPM_MIN,
+    LevelAxis, MixedAutoLevelAxis, NUM_GROUPS_MAX, NUM_GROUPS_MIN, PILEUP_LEVEL_MAX_DB,
+    PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN, PlaybackSettings, PracticeWindow,
+    QSB_RATE_MAX_HZ, QSB_RATE_MIN_HZ, RangeSetting, RangeValues, SIDE_TONE_MAX_HZ,
+    SIDE_TONE_MIN_HZ, STATIONS_MAX, STATIONS_MIN, STEEPNESS_MAX_MS, STEEPNESS_MIN_MS,
+    SettingsSection, TrainingSettings, VOLUME_MAX, VOLUME_MIN, WPM_MAX, WPM_MIN,
 };
-pub use span::{LengthForecast, SpanEstimate, SpanPoint};
+pub use span::LengthForecast;
+pub use speed::SpeedPath;
 pub use stats::{
     AccuracyPoint, BigramHeatmap, CharacterDiagnostic, ConfusionEntry, GROUP_START_BIGRAM_TOKEN,
     MasteryStatus, MistakeStats, SamplingRow, SessionHistoryRow, accuracy_chart,
     character_diagnostics, group_length_forecast, mistake_stats, sampling_rows, session_history,
-    span_history,
+    span_history, speed_history,
 };
 pub use streak::{StreakState, StreakStatus, compute_streak_status};
 pub use timing::{

@@ -1,7 +1,8 @@
 use cw_core::{BOARD_MIN_GROUPS, SessionResult};
 use dioxus::prelude::*;
 
-use crate::ui::scores::{Medal, mode_noun, ordinal, per_group_label};
+use crate::ui::format::ordinal;
+use crate::ui::scores::{Medal, mode_noun, per_group_label};
 use crate::ui::widgets::{CardHead, GroupResultRow, Icon, IconName, ScoreRing, control_id};
 
 /// What the session's place on the score board says, and the medal it

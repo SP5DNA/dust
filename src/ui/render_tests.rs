@@ -983,6 +983,39 @@ mod interactions {
         Ui::new(StatsHarness, StatsHarnessProps { adaptive, mode })
     }
 
+    #[component]
+    fn SpeedStatsHarness(adaptive_speed: bool) -> Element {
+        let mut settings = TrainingSettings::default();
+        settings.playback.adaptive_speed = adaptive_speed;
+        settings.curriculum.char_set_mode = CharSetMode::Mixed;
+        rsx! {
+            StatsView { settings, sessions: history() }
+        }
+    }
+
+    /// The overview shows the copy speed at the share of characters the aim
+    /// asks, and whether adaptive speed steers by it.
+    #[test]
+    fn the_overview_shows_the_copy_speed_and_whether_it_steers() {
+        let ui = Ui::new(
+            SpeedStatsHarness,
+            SpeedStatsHarnessProps {
+                adaptive_speed: false,
+            },
+        );
+        assert!(ui.has("Copy speed"));
+        assert!(ui.has("WPM · after 1 session") || ui.has("over 3 sessions"));
+        assert!(ui.has("94% of characters right"));
+        assert!(ui.has("Adaptive speed off"));
+        let on = Ui::new(
+            SpeedStatsHarness,
+            SpeedStatsHarnessProps {
+                adaptive_speed: true,
+            },
+        );
+        assert!(on.has("Adapting · Balanced"));
+    }
+
     #[test]
     fn the_overview_shows_the_copy_span_and_whether_it_steers() {
         let ui = stats(false, CharSetMode::Mixed);
