@@ -70,7 +70,7 @@ web-sys = { version = "0.3", optional = true, features = [
 # Linux / desktop
 cpal = { version = "0.15", optional = true }
 dirs = { version = "6", optional = true }
-tokio = { version = "1", optional = true, default-features = false, features = ["time", "rt"] }
+tokio = { version = "1", optional = true, default-features = false, features = ["time", "rt", "sync"] }
 
 # Linux desktop: the window menu is asked for through GTK, which the webview
 # runs on already.

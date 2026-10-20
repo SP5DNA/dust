@@ -234,19 +234,33 @@ unless the site is on the home screen. So **Stats → History** has a Backup
 card:
 
 - **Save a backup** writes `dust-backup-<date>.json`, the settings and the
-  history in one file. The web app hands it over as a download; desktop
-  builds put it in Downloads (or Documents, or home), never over an earlier
-  one. An app on a phone keeps its files where nobody can reach them, so it
-  has no Save button.
-- **Restore a backup**, on every build, adds the sessions in the file that
-  are not here yet and takes its settings, level included. Undo, in the
-  message that follows, puts both back as they were. A file that is not a
-  backup, or far too large to be one, is refused, and the card says why. A
-  session or a setting the file can no longer read is left out, as when the
-  store is read.
+  history in one file, somewhere the user can reach it:
+  - the web app hands it over as a download;
+  - desktop builds put it in Downloads (or Documents, or home), never over
+    an earlier one;
+  - Android adds it to the shared Downloads folder through the media store,
+    which takes no permission from Android 10 on; before that it goes to the
+    app's own folder on the shared storage, `Android/data/<package>/files/Download`;
+  - iOS puts it in the app's Documents folder, which the Info.plist keys in
+    `Dioxus.toml` (`UIFileSharingEnabled`, `LSSupportsOpeningDocumentsInPlace`)
+    show in the Files app under On My iPhone, Dust.
+- **Restore a backup** adds the sessions in the file that are not here yet
+  and takes its settings, level included. Undo, in the message that follows,
+  puts both back as they were. A file that is not a backup, or far too large
+  to be one, is refused, and the card says why. A session or a setting the
+  file can no longer read is left out, as when the store is read. A backup
+  saved by any build restores on any other: the web app's on a phone, a
+  phone's on a computer.
 - After ten sessions without a backup the card says so, and its Save button
   stands out. When the last one was saved is kept under `dust_last_backup`,
   or in `last_backup.txt`.
+
+On a phone a file is chosen through the webview's own picker
+(`src/ui/file_pick.rs`), for backups and word lists alike. The renderer asks
+its native side for whatever a file input chose, and on Android and iOS the
+native side gives nothing back; so there the button opens a file input made
+outside the app's page, where the renderer does not reach, and the file is
+read in the page and handed back.
 
 After every finished session the web app also asks the browser to keep its
 storage (`navigator.storage.persist()`) rather than clear it to make room.

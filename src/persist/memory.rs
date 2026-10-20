@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 use cw_core::{AutoLevelCounters, CountersKey, SessionResult, TrainingSettings};
 
-use super::{HistorySaved, Store, newest};
+use super::{BackupSaving, HistorySaved, Store, newest, saved_now};
 
 #[derive(Default)]
 pub struct MemoryStore {
@@ -103,14 +103,14 @@ impl Store for MemoryStore {
         !self.no_backups.get()
     }
 
-    fn save_backup_file(&self, name: &str, contents: &str) -> Result<String, String> {
+    fn save_backup_file(&self, name: &str, contents: &str) -> BackupSaving {
         if self.no_backups.get() {
-            return Err("this build has nowhere to put it".into());
+            return saved_now(Err("this build has nowhere to put it".into()));
         }
         self.backup_files
             .borrow_mut()
             .push((name.to_string(), contents.to_string()));
-        Ok(format!("{name}, in your downloads"))
+        saved_now(Ok(format!("{name}, in your downloads")))
     }
 
     fn ask_to_keep(&self) {

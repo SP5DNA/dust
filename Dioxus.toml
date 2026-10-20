@@ -51,3 +51,14 @@ desktop_template = "assets/linux/dust.desktop.hbs"
 min_sdk = 24
 target_sdk = 36
 compile_sdk = 36
+
+# Backups are saved in the app's Documents folder (src/persist/desktop.rs).
+# These keys show that folder in the Files app, under On My iPhone, where a
+# backup can be moved, shared, or chosen again to restore from.
+[ios.raw]
+info_plist = """
+<key>UIFileSharingEnabled</key>
+<true/>
+<key>LSSupportsOpeningDocumentsInPlace</key>
+<true/>
+"""

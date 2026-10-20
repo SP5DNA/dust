@@ -262,23 +262,26 @@ impl AppCtx {
     }
 
     /// Hand the history and the settings to the user as a backup file, and
-    /// remember when.
+    /// remember when, once it is saved. Saving goes on whichever screen is
+    /// up by then.
     pub fn save_backup(self) {
-        let store = self.app().store;
         let at = crate::time::now_ms();
         let contents = write_backup(&self.settings.peek(), &self.sessions.peek(), at);
         let name = backup_name(&crate::time::local_date_string());
-        match store.save_backup_file(&name, &contents) {
-            Ok(place) => {
-                store.mark_backup(at);
-                let mut last_backup = self.last_backup;
-                last_backup.set(Some(at));
-                self.toasts.show(format!("Backup saved as {place}."));
+        let saving = self.app().store.save_backup_file(&name, &contents);
+        dioxus::core::spawn_forever(async move {
+            match saving.await {
+                Ok(place) => {
+                    self.app().store.mark_backup(at);
+                    let mut last_backup = self.last_backup;
+                    last_backup.set(Some(at));
+                    self.toasts.show(format!("Backup saved as {place}."));
+                }
+                Err(why) => self
+                    .toasts
+                    .show(format!("The backup could not be saved: {why}.")),
             }
-            Err(why) => self
-                .toasts
-                .show(format!("The backup could not be saved: {why}.")),
-        }
+        });
     }
 
     /// Put back what `backup` holds: every session of it not already here,
