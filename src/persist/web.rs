@@ -6,7 +6,10 @@ use cw_core::{AutoLevelCounters, CountersKey, SessionResult, TrainingSettings};
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 
-use super::{HistorySaved, Store, load_settings_from, newest, newest_that_fit, parse_sessions};
+use super::{
+    BackupSaving, HistorySaved, Store, load_settings_from, newest, newest_that_fit, parse_sessions,
+    saved_now,
+};
 
 const THEME_KEY: &str = "dust_theme";
 const TUTORIAL_KEY: &str = "dust_tutorial_done";
@@ -216,9 +219,12 @@ impl Store for WebStore {
         true
     }
 
-    fn save_backup_file(&self, name: &str, contents: &str) -> Result<String, String> {
-        download(name, contents).ok_or("this browser would not hand over the file")?;
-        Ok(format!("{name}, in your downloads"))
+    fn save_backup_file(&self, name: &str, contents: &str) -> BackupSaving {
+        saved_now(
+            download(name, contents)
+                .map(|()| format!("{name}, in your downloads"))
+                .ok_or_else(|| "this browser would not hand over the file".into()),
+        )
     }
 
     fn ask_to_keep(&self) {

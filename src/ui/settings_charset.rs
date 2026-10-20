@@ -4,9 +4,9 @@ use cw_core::{
     WORD_LIST_MAX, WordList, compute_char_pool, current_practice_window, tier_examples,
     unlocked_practice_count,
 };
-use dioxus::html::FileData;
 use dioxus::prelude::*;
 
+use crate::ui::file_pick::{ChosenFile, FileButton};
 use crate::ui::format::counted;
 use crate::ui::widgets::{
     CardHead, DISCLOSURE, Icon, IconName, NumberField, SectionReset, Seg, control_id,
@@ -56,6 +56,15 @@ pub(crate) const CHAR_SET_MODES: [(CharSetMode, &str); 5] = [
     (CharSetMode::Callsign, "Callsigns"),
     (CharSetMode::Words, "Words"),
 ];
+
+/// What a character set is called on screen: "Callsigns".
+pub(crate) fn mode_label(mode: CharSetMode) -> &'static str {
+    CHAR_SET_MODES
+        .iter()
+        .find(|(each, _)| *each == mode)
+        .map(|(_, label)| *label)
+        .unwrap_or_default()
+}
 
 /// The practice windows, and how many characters each needs unlocked before
 /// it is offered.
@@ -325,22 +334,22 @@ fn take_list(
     settings.write().curriculum.word_list = list.words;
 }
 
-/// Read a chosen file as a word list.
-async fn load_word_file(
+/// Take a chosen file as the word list.
+fn take_word_file(
     settings: Signal<TrainingSettings>,
     mut report: Signal<Option<String>>,
-    file: FileData,
+    file: ChosenFile,
 ) {
-    let name = file.name();
-    if file.size() > WORD_FILE_MAX_BYTES {
+    let ChosenFile { name, size, text } = file;
+    if size > WORD_FILE_MAX_BYTES {
         report.set(Some(format!(
             "{name} is over a megabyte, far more than a word list: nothing was read."
         )));
         return;
     }
-    match file.read_string().await {
-        Ok(text) => take_list(settings, report, &text, Some(&name)),
-        Err(_) => report.set(Some(format!(
+    match text {
+        Some(text) => take_list(settings, report, &text, Some(&name)),
+        None => report.set(Some(format!(
             "{name} could not be read as text: is it a plain .txt file?"
         ))),
     }
@@ -367,9 +376,6 @@ fn WordListEditor(settings: Signal<TrainingSettings>, words: Vec<String>, own: b
         draft.set(None);
         repaint += 1;
     };
-    // Moved on by every file chosen, to draw a fresh file input: the same
-    // file chosen again in the old one would change nothing, and not load.
-    let mut picked = use_signal(|| 0u64);
     // The starter list, unfolded.
     let mut show_list = use_signal(|| false);
     let shown = draft
@@ -394,25 +400,16 @@ fn WordListEditor(settings: Signal<TrainingSettings>, words: Vec<String>, own: b
             },
         }
         div { class: "word-tools",
-            label { class: "btn btn-secondary btn-sm file-button",
-                for fresh in [picked()] {
-                    input {
-                        key: "{fresh}",
-                        id: control_id("file", "word list"),
-                        class: "file-input",
-                        r#type: "file",
-                        accept: ".txt,text/plain",
-                        onchange: move |e| {
-                            if let Some(file) = e.files().into_iter().next() {
-                                settle();
-                                picked += 1;
-                                spawn(load_word_file(settings, report, file));
-                            }
-                        },
-                    }
-                }
-                Icon { name: IconName::Upload }
-                "Load a text file"
+            FileButton {
+                id: control_id("file", "word list"),
+                accept: ".txt,text/plain",
+                max_bytes: WORD_FILE_MAX_BYTES,
+                icon: IconName::Upload,
+                label: "Load a text file",
+                on_choose: move |file| {
+                    settle();
+                    take_word_file(settings, report, file);
+                },
             }
             if own {
                 button {

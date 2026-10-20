@@ -611,7 +611,8 @@ pub struct SessionResult {
     pub char_wpm: f64,
     #[serde(default = "session_wpm_default")]
     pub effective_wpm: f64,
-    /// Full progress alphabet at the time of the session. Empty on legacy saves.
+    /// Full progress alphabet at the time of the session, in its unlock
+    /// order. Empty on legacy saves.
     #[serde(default)]
     pub alphabet_fingerprint: String,
 }
@@ -661,15 +662,6 @@ impl SessionResult {
             tally.add(&group.sent, &group.received);
         }
         Cow::Owned(tally.sent)
-    }
-
-    /// Whether this session's letter stats should seed sampling for `settings`.
-    pub fn usable_for_sampling(&self, settings: &TrainingSettings) -> bool {
-        if self.char_set_mode != settings.curriculum.char_set_mode {
-            return false;
-        }
-        self.alphabet_fingerprint.is_empty()
-            || self.alphabet_fingerprint == settings.alphabet_fingerprint()
     }
 
     /// A Koch session with nothing in it, for tests to fill in.
@@ -1036,29 +1028,6 @@ mod tests {
         assert_eq!(result.level, 4);
         assert_eq!(result.digits_level, 4);
         assert_eq!(result.alphabet_fingerprint, "0123456789");
-    }
-
-    #[test]
-    fn history_is_reusable_only_for_the_same_alphabet() {
-        let mut settings = TrainingSettings::default();
-        settings.curriculum.char_set_mode = CharSetMode::Koch;
-        let result = result(&answered(settings.clone(), &[("KM", "KM", 10)]));
-        assert!(result.usable_for_sampling(&settings));
-
-        // A different character set never seeds another one's sampling.
-        let mut other = settings.clone();
-        other.curriculum.char_set_mode = CharSetMode::Digits;
-        assert!(!result.usable_for_sampling(&other));
-
-        // Same mode, different alphabet.
-        let mut resequenced = settings;
-        resequenced.curriculum.custom_sequence = vec!['A', 'B', 'C'];
-        assert!(!result.usable_for_sampling(&resequenced));
-
-        // A legacy session carries no fingerprint and is accepted.
-        let mut legacy = result;
-        legacy.alphabet_fingerprint.clear();
-        assert!(legacy.usable_for_sampling(&resequenced));
     }
 
     /// The tally is saved as the flat keys a session always had, plus the

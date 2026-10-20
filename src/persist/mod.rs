@@ -7,6 +7,8 @@
 //! one it has. Reading is forgiving: a store that cannot read something gives
 //! back the most it can, and never writes over what it could not read.
 
+#[cfg(all(target_os = "android", not(test)))]
+mod android;
 pub mod backup;
 #[cfg(feature = "native-runtime")]
 mod desktop;
@@ -15,6 +17,8 @@ pub mod memory;
 #[cfg(feature = "web")]
 mod web;
 
+use std::future::Future;
+use std::pin::Pin;
 use std::rc::Rc;
 
 use cw_core::{
@@ -49,13 +53,24 @@ pub trait Store {
     /// phone has nowhere outside itself to put one.
     fn saves_backups(&self) -> bool;
     /// Hand `contents` to the user as a file called `name`, outside the
-    /// store: a download in a browser, a file in Downloads on a computer.
-    /// Says where it went, or why it could not go.
-    fn save_backup_file(&self, name: &str, contents: &str) -> Result<String, String>;
+    /// store, somewhere they can reach it: a download in a browser, a file
+    /// in Downloads on a computer or an Android phone, one in the Files app
+    /// on an iPhone. Says where it went, or why it could not go.
+    fn save_backup_file(&self, name: &str, contents: &str) -> BackupSaving;
     /// Ask the platform to keep what is stored rather than clear it when it
     /// needs room. Only a browser clears a store on its own, and it may ask
     /// the user first.
     fn ask_to_keep(&self) {}
+}
+
+/// A backup file on its way: saved already, or still being saved where only
+/// the platform's own thread can save it, as on Android.
+pub type BackupSaving = Pin<Box<dyn Future<Output = Result<String, String>>>>;
+
+/// A backup file saved, or not, already: everywhere but Android.
+#[cfg_attr(all(target_os = "android", not(test)), allow(dead_code))]
+fn saved_now(result: Result<String, String>) -> BackupSaving {
+    Box::pin(std::future::ready(result))
 }
 
 /// What became of a history handed to [`Store::save_sessions`].

@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use cw_core::{AutoLevelCounters, CountersKey, SessionResult, TrainingSettings};
 
-use super::{HistorySaved, Store, load_settings_from, newest, parse_sessions};
+use super::{BackupSaving, HistorySaved, Store, load_settings_from, newest, parse_sessions};
 
 const THEME: &str = "theme.txt";
 const TUTORIAL: &str = "tutorial_done.txt";
@@ -94,7 +94,7 @@ impl DesktopStore {
 /// an empty one whose rename reached the disk before its data. The temporary
 /// name is this process's own, so two copies of the app running at once
 /// cannot write into each other's.
-fn write_whole(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
+pub(super) fn write_whole(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
     static WRITES: AtomicU64 = AtomicU64::new(0);
     fs::create_dir_all(dir)?;
     let path = dir.join(name);
@@ -116,12 +116,16 @@ fn write_whole(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
     written
 }
 
-/// Where a computer's backup files go: Downloads, or failing that Documents,
-/// or home. An app on a phone keeps its files where the user cannot reach
-/// them, so it has nowhere.
+/// Where backup files go. On a computer: Downloads, or failing that
+/// Documents, or home. On an iPhone: the app's Documents, which its
+/// Info.plist shows in the Files app (Dioxus.toml). Android has a folder of
+/// its own only through the media store ([`super::android`]).
 fn backup_folder() -> Option<PathBuf> {
-    if cfg!(any(target_os = "android", target_os = "ios")) {
+    if cfg!(target_os = "android") {
         return None;
+    }
+    if cfg!(target_os = "ios") {
+        return dirs::document_dir();
     }
     dirs::download_dir()
         .or_else(dirs::document_dir)
@@ -131,7 +135,7 @@ fn backup_folder() -> Option<PathBuf> {
 /// `name` in `folder`, or, if a file is already called that, the first of
 /// `name-2`, `name-3` and so on that is free: an earlier backup is never
 /// written over.
-fn free_name(folder: &Path, name: &str) -> String {
+pub(super) fn free_name(folder: &Path, name: &str) -> String {
     let (stem, extension) = name.rsplit_once('.').unwrap_or((name, ""));
     std::iter::once(name.to_string())
         .chain((2..1_000).map(|n| {
@@ -255,17 +259,32 @@ impl Store for DesktopStore {
     }
 
     fn saves_backups(&self) -> bool {
-        self.backup_folder.is_some()
+        cfg!(all(target_os = "android", not(test))) || self.backup_folder.is_some()
     }
 
-    fn save_backup_file(&self, name: &str, contents: &str) -> Result<String, String> {
+    fn save_backup_file(&self, name: &str, contents: &str) -> BackupSaving {
+        #[cfg(all(target_os = "android", not(test)))]
+        return super::android::save_backup(name.to_string(), contents.to_string());
+        #[cfg(not(all(target_os = "android", not(test))))]
+        super::saved_now(self.save_in_folder(name, contents))
+    }
+}
+
+impl DesktopStore {
+    /// Save a backup file in the backup folder, and say where it went.
+    #[cfg_attr(all(target_os = "android", not(test)), allow(dead_code))]
+    fn save_in_folder(&self, name: &str, contents: &str) -> Result<String, String> {
         let folder = self
             .backup_folder
             .as_deref()
             .ok_or("there is no folder to put it in")?;
         let name = free_name(folder, name);
         write_whole(folder, &name, contents.as_bytes()).map_err(|err| err.to_string())?;
-        Ok(folder.join(name).display().to_string())
+        if cfg!(target_os = "ios") {
+            Ok(format!("{name}, in the Files app, in Dust's folder"))
+        } else {
+            Ok(folder.join(name).display().to_string())
+        }
     }
 }
 
@@ -574,11 +593,11 @@ mod tests {
         let (dir, store) = store("backup");
         let folder = TempDir::new("backup-folder");
         assert!(!store.saves_backups(), "a store with no folder saves none");
-        assert!(store.save_backup_file("b.json", "{}").is_err());
+        assert!(store.save_in_folder("b.json", "{}").is_err());
         let store = store.with_backup_folder(folder.0.clone());
         assert!(store.saves_backups());
-        let first = store.save_backup_file("dust-backup-2026-10-19.json", "one");
-        let second = store.save_backup_file("dust-backup-2026-10-19.json", "two");
+        let first = store.save_in_folder("dust-backup-2026-10-19.json", "one");
+        let second = store.save_in_folder("dust-backup-2026-10-19.json", "two");
         assert_eq!(
             first,
             Ok(folder

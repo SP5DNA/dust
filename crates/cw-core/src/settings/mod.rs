@@ -134,6 +134,17 @@ pub enum CharSetMode {
 }
 
 impl CharSetMode {
+    /// Every character set, in the order the settings list them.
+    pub const ALL: [Self; 5] = [
+        Self::Koch,
+        Self::Digits,
+        Self::Mixed,
+        Self::Callsign,
+        Self::Words,
+    ];
+}
+
+impl CharSetMode {
     /// Whether a group is drawn a character at a time, at a length the group
     /// size gives it. Callsigns and words are not: each is as long as it is.
     pub fn draws_characters(self) -> bool {

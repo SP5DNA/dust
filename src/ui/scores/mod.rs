@@ -23,20 +23,12 @@ use cw_core::{
 use dioxus::prelude::*;
 
 use crate::ui::format::short_date;
-use crate::ui::settings_charset::CHAR_SET_MODES;
+use crate::ui::settings_charset::mode_label;
 use crate::ui::widgets::{CardHead, IconName, Seg};
 use best::BestCard;
 use board::BoardList;
 pub use medal::Medal;
 use timeline::ScoreTimeline;
-
-fn mode_label(mode: CharSetMode) -> &'static str {
-    CHAR_SET_MODES
-        .iter()
-        .find(|(each, _)| *each == mode)
-        .map(|(_, label)| *label)
-        .unwrap_or_default()
-}
 
 /// What a session of `mode` is called in a sentence: "callsign sessions".
 pub fn mode_noun(mode: CharSetMode) -> &'static str {
@@ -123,7 +115,7 @@ pub fn ScoresTab(sessions: Vec<SessionResult>) -> Element {
     rsx! {
         div { class: "stack",
             if modes.len() > 1 {
-                div { class: "board-modes",
+                div { class: "mode-pills",
                     Seg { label: "All modes", pill: true, active: current.is_none(), onclick: move |_| mode.set(None) }
                     for each in modes.iter().copied() {
                         Seg {
@@ -145,6 +137,7 @@ pub fn ScoresTab(sessions: Vec<SessionResult>) -> Element {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::settings_charset::CHAR_SET_MODES;
 
     #[test]
     fn every_mode_has_a_name() {

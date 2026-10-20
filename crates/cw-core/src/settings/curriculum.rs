@@ -167,9 +167,10 @@ impl TrainingSettings {
         }
     }
 
-    /// Identity of the alphabet this mode is training, used to isolate
-    /// auto-level counters and sampling history when the user switches
-    /// sequence or custom set.
+    /// Identity of the alphabet this mode is training, in its unlock order:
+    /// what keeps auto-level counters apart when the order changes, since a
+    /// level means a different set of characters in another order. What the
+    /// sampler knows of each character is not kept apart by it.
     pub fn alphabet_fingerprint(&self) -> String {
         match self.curriculum.char_set_mode.axis() {
             // One fingerprint for every tier: the characters do not change as

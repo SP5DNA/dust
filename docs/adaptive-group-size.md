@@ -168,6 +168,8 @@ that lag.
 - **Stats → Overview:** a "Copy span" card. It shows the span with ± one
   standard deviation and its change over the last 30 sessions, as a line
   with an uncertainty band. A chip says whether adaptive length is steering.
+  With more than one character set in the history, a pill for each shows its
+  own span; choosing callsigns in the settings keeps the others on show.
 - **Stats → Sampling:** a "Group length" card. Each length gets its chance of
   coming next and how often a group that long is copied whole.
 

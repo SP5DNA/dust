@@ -2,10 +2,10 @@
 //! user keeps outside the app, saved and restored from here, and a word when
 //! the last one is many sessions old.
 
-use dioxus::html::FileData;
 use dioxus::prelude::*;
 
 use crate::persist::backup::{BACKUP_DUE_AFTER, BACKUP_MAX_BYTES, Backup, read_backup};
+use crate::ui::file_pick::{ChosenFile, FileButton};
 use crate::ui::format::{counted, day_of, short_date};
 use crate::ui::widgets::{CardHead, Icon, IconName, control_id};
 
@@ -14,8 +14,8 @@ use crate::ui::widgets::{CardHead, Icon, IconName, control_id};
 pub struct Backups {
     /// When the last backup was saved, if ever.
     pub last: Option<u64>,
-    /// This build can hand over a backup file; an app on a phone has nowhere
-    /// to put one, and can only restore.
+    /// This build can hand over a backup file. One that cannot can still
+    /// restore.
     pub can_save: bool,
     pub on_save: EventHandler<()>,
     pub on_restore: EventHandler<Backup>,
@@ -28,31 +28,25 @@ const AT_RISK: &str = if cfg!(target_arch = "wasm32") {
     "if this device's data is lost"
 };
 
-/// Read a chosen file as a backup, and hand it on to be restored; or say
-/// why it could not be.
-async fn restore_file(
-    file: FileData,
-    on_restore: EventHandler<Backup>,
-    mut problem: Signal<Option<String>>,
-) {
-    let name = file.name();
-    if file.size() > BACKUP_MAX_BYTES {
-        problem.set(Some(format!(
+/// The files offered to restore from. An Android picker that filters by
+/// type hides a backup that another app stored untyped, so there every file
+/// is offered, and one that is not a backup is refused once it is read.
+const BACKUP_ACCEPT: &str = if cfg!(target_os = "android") {
+    ""
+} else {
+    ".json,application/json"
+};
+
+/// The backup a chosen file holds, or why it could not be restored from.
+fn backup_in(file: ChosenFile) -> Result<Backup, String> {
+    let ChosenFile { name, size, text } = file;
+    if size > BACKUP_MAX_BYTES {
+        return Err(format!(
             "{name} is far larger than any backup: nothing was restored."
-        )));
-        return;
+        ));
     }
-    let read = match file.read_string().await {
-        Ok(text) => read_backup(&text).map_err(|not| not.reason()),
-        Err(_) => Err("could not be read"),
-    };
-    match read {
-        Ok(backup) => {
-            problem.set(None);
-            on_restore.call(backup);
-        }
-        Err(reason) => problem.set(Some(format!("{name} {reason}: nothing was restored."))),
-    }
+    let text = text.ok_or_else(|| format!("{name} could not be read: nothing was restored."))?;
+    read_backup(&text).map_err(|not| format!("{name} {}: nothing was restored.", not.reason()))
 }
 
 /// Save a backup, or restore one; and when `since` sessions have gone
@@ -63,10 +57,7 @@ pub fn BackupCard(
     /// The sessions finished since the last backup, or all of them.
     since: usize,
 ) -> Element {
-    let problem = use_signal(|| None::<String>);
-    // Moved on by every file chosen, to draw a fresh file input: the same
-    // file chosen again in the old one would change nothing.
-    let mut picked = use_signal(|| 0u64);
+    let mut problem = use_signal(|| None::<String>);
     let Backups {
         last,
         can_save,
@@ -112,24 +103,19 @@ pub fn BackupCard(
                         "Save a backup"
                     }
                 }
-                label { class: "btn btn-secondary btn-sm file-button",
-                    for fresh in [picked()] {
-                        input {
-                            key: "{fresh}",
-                            id: control_id("file", "backup"),
-                            class: "file-input",
-                            r#type: "file",
-                            accept: ".json,application/json",
-                            onchange: move |e| {
-                                if let Some(file) = e.files().into_iter().next() {
-                                    picked += 1;
-                                    spawn(restore_file(file, on_restore, problem));
-                                }
-                            },
+                FileButton {
+                    id: control_id("file", "backup"),
+                    accept: BACKUP_ACCEPT,
+                    max_bytes: BACKUP_MAX_BYTES,
+                    icon: IconName::Upload,
+                    label: "Restore a backup",
+                    on_choose: move |file| match backup_in(file) {
+                        Ok(backup) => {
+                            problem.set(None);
+                            on_restore.call(backup);
                         }
-                    }
-                    Icon { name: IconName::Upload }
-                    "Restore a backup"
+                        Err(why) => problem.set(Some(why)),
+                    },
                 }
             }
             if let Some(problem) = problem() {
