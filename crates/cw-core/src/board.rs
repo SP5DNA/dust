@@ -119,20 +119,14 @@ pub fn board_place(sessions: &[SessionResult], timestamp: u64) -> Option<(usize,
 /// The modes the board has sessions of, in the order the trainer offers
 /// them.
 pub fn board_modes(sessions: &[SessionResult]) -> Vec<CharSetMode> {
-    [
-        CharSetMode::Koch,
-        CharSetMode::Digits,
-        CharSetMode::Mixed,
-        CharSetMode::Callsign,
-        CharSetMode::Words,
-    ]
-    .into_iter()
-    .filter(|mode| {
-        sessions
-            .iter()
-            .any(|session| session.char_set_mode == *mode && per_group(session).is_some())
-    })
-    .collect()
+    CharSetMode::ALL
+        .into_iter()
+        .filter(|mode| {
+            sessions
+                .iter()
+                .any(|session| session.char_set_mode == *mode && per_group(session).is_some())
+        })
+        .collect()
 }
 
 /// The middle of `values`, or the mean of the two middle ones.

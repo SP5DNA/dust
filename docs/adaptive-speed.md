@@ -230,7 +230,8 @@ Reproduce with `cargo test -p cw-core --release adaptive_speed_simulation --
 - **Training:** the speed chip, ▲ faster or ▼ slower than the group before.
 - **Stats → Overview:** "Copy speed": the speed at the aim's share of
   characters, ± one standard deviation, over the last 30 sessions, and a chip
-  saying whether adaptive speed is steering.
+  saying whether adaptive speed is steering. With more than one character
+  set in the history, a pill for each shows its own.
 - **Stats → Sampling:** "Speed, WPM": round speeds across the range, each with
   its chance of coming next and the share of characters copied right at it.
 

@@ -1,7 +1,7 @@
 use cw_core::{
-    AccuracyPoint, Estimate, EstimatePoint, MasteryStatus, SessionResult, TrainingSettings,
-    accuracy_chart, adapts_group_size, adapts_speed, character_diagnostics, span_history,
-    speed_history,
+    AccuracyPoint, CharSetMode, Estimate, EstimatePoint, MasteryStatus, SessionResult,
+    TrainingSettings, accuracy_chart, adapts_group_size, adapts_speed, character_diagnostics,
+    practised_modes, span_history, speed_history,
 };
 use dioxus::prelude::*;
 
@@ -11,8 +11,9 @@ use crate::ui::chart::{CHART_H, marks, path, polyline, series, trend_chart};
 use crate::ui::format::counted;
 use crate::ui::scores::ScoresTab;
 use crate::ui::settings::aim_label;
+use crate::ui::settings_charset::mode_label;
 use crate::ui::stats_detail::{HistoryTab, LettersTab, MistakesTab, SamplingTab};
-use crate::ui::widgets::{CardHead, IconName, Seg};
+use crate::ui::widgets::{CardHead, IconName, Seg, control_id};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum StatsTab {
@@ -100,6 +101,21 @@ fn trend_words(change: f64, count: usize, decimals: usize) -> String {
     }
 }
 
+/// The character set a trend card shows: the one chosen, while it has
+/// history; else the one practised now, if it has any; else the first that
+/// does. Nothing when none has: a set chosen in the settings never hides
+/// another's history.
+fn shown_mode(
+    chosen: Option<CharSetMode>,
+    modes: &[CharSetMode],
+    current: CharSetMode,
+) -> Option<CharSetMode> {
+    chosen
+        .filter(|mode| modes.contains(mode))
+        .or_else(|| modes.contains(&current).then_some(current))
+        .or_else(|| modes.first().copied())
+}
+
 /// An estimate over the last sessions, with its uncertainty, and whether the
 /// feature it belongs to is steering by it. Nothing before the first session
 /// it can be read from.
@@ -122,6 +138,13 @@ fn TrendCard(
     steering: Option<&'static str>,
     /// What the chip says while it is not.
     off: &'static str,
+    /// The character sets there is history for, and the one shown: a pill
+    /// for each, when there is more than one.
+    modes: Vec<CharSetMode>,
+    mode: CharSetMode,
+    on_mode: EventHandler<CharSetMode>,
+    /// What the pills' ids begin with.
+    pills: &'static str,
 ) -> Element {
     let shown = &points[points.len().saturating_sub(TREND_SESSIONS_SHOWN)..];
     let estimates: Vec<Estimate> = shown.iter().map(|point| point.estimate).collect();
@@ -131,13 +154,26 @@ fn TrendCard(
         return rsx! {};
     };
     let trend = trend_words(last.mean - first.mean, estimates.len(), decimals);
-    let mode = steering.map_or_else(|| off.to_string(), |aim| format!("Adapting · {aim}"));
+    let chip = steering.map_or_else(|| off.to_string(), |aim| format!("Adapting · {aim}"));
     rsx! {
         div { class: "card chart-card",
             CardHead {
                 icon,
                 title,
                 note: format!("{:.decimals$} ± {:.decimals$} {unit} · {trend}", last.mean, last.sd),
+            }
+            if modes.len() > 1 {
+                div { class: "mode-pills",
+                    for each in modes.iter().copied() {
+                        Seg {
+                            label: mode_label(each),
+                            id: control_id(pills, mode_label(each)),
+                            pill: true,
+                            active: each == mode,
+                            onclick: move |_| on_mode.call(each),
+                        }
+                    }
+                }
             }
             svg {
                 class: "sparkline",
@@ -166,49 +202,81 @@ fn TrendCard(
                 span { class: "tiny", style: "text-transform: none; letter-spacing: 0.02em;",
                     "{meaning} · scale {chart.low:.0}–{chart.high:.0} {unit}"
                 }
-                span { class: if steering.is_some() { "chip good" } else { "chip" }, "{mode}" }
+                span { class: if steering.is_some() { "chip good" } else { "chip" }, "{chip}" }
             }
         }
     }
 }
 
-/// The copy span: how long a group you copy whole, and how that has moved.
-/// Nothing for callsigns, which are as long as they are, or before a session
-/// of the character set being trained.
+/// What the chip says of a character set that is not the one practised now.
+const NOT_NOW: &str = "Not the set practised now";
+
+/// The copy span: how long a group you copy whole, and how that has moved,
+/// for each character set with groups drawn a character at a time in its
+/// history. Callsigns and words are as long as they are.
 #[component]
 fn SpanCard(settings: TrainingSettings, sessions: Vec<SessionResult>) -> Element {
+    let mut chosen = use_signal(|| None::<CharSetMode>);
+    let modes: Vec<CharSetMode> = practised_modes(&sessions)
+        .into_iter()
+        .filter(|mode| mode.draws_characters())
+        .collect();
+    let current = settings.curriculum.char_set_mode;
+    let Some(mode) = shown_mode(chosen(), &modes, current) else {
+        return rsx! {};
+    };
+    let mut shown = settings.clone();
+    shown.curriculum.char_set_mode = mode;
+    let now = mode == current;
     rsx! {
         TrendCard {
-            points: span_history(&settings, &sessions),
+            points: span_history(&shown, &sessions),
             icon: IconName::Target,
             title: "Copy span",
             unit: "chars",
             decimals: 1,
             colour: "var(--info)",
             meaning: "Copied whole about half the time",
-            steering: adapts_group_size(&settings).then(|| aim_label(settings.curriculum.aim)),
-            off: "Adaptive length off",
+            steering: (now && adapts_group_size(&settings)).then(|| aim_label(settings.curriculum.aim)),
+            off: if now { "Adaptive length off" } else { NOT_NOW },
+            modes,
+            mode,
+            on_mode: move |mode| chosen.set(Some(mode)),
+            pills: "span",
         }
     }
 }
 
 /// Your copy speed: the speed at which you copy the share of characters
-/// "Aim for" asks, and how that has moved. Nothing before a session of the
-/// character set being trained.
+/// "Aim for" asks, and how that has moved, for each character set in the
+/// history.
 #[component]
 fn CopySpeedCard(settings: TrainingSettings, sessions: Vec<SessionResult>) -> Element {
+    let mut chosen = use_signal(|| None::<CharSetMode>);
+    let modes = practised_modes(&sessions);
+    let current = settings.curriculum.char_set_mode;
+    let Some(mode) = shown_mode(chosen(), &modes, current) else {
+        return rsx! {};
+    };
+    let mut shown = settings.clone();
+    shown.curriculum.char_set_mode = mode;
+    let now = mode == current;
     let aim = settings.curriculum.aim;
     rsx! {
         TrendCard {
-            points: speed_history(&settings, &sessions),
+            points: speed_history(&shown, &sessions),
             icon: IconName::Gauge,
             title: "Copy speed",
             unit: "WPM",
             decimals: 0,
             colour: "var(--good)",
             meaning: format!("{:.0}% of characters right", aim.chars_right() * 100.0),
-            steering: adapts_speed(&settings).then(|| aim_label(aim)),
-            off: "Adaptive speed off",
+            steering: (now && adapts_speed(&settings)).then(|| aim_label(aim)),
+            off: if now { "Adaptive speed off" } else { NOT_NOW },
+            modes,
+            mode,
+            on_mode: move |mode| chosen.set(Some(mode)),
+            pills: "speed",
         }
     }
 }

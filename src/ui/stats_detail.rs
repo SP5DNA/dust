@@ -1,9 +1,9 @@
 use std::collections::BTreeSet;
 
 use cw_core::{
-    GROUP_START_BIGRAM_TOKEN, MasteryStatus, SessionResult, SpeedPath, TrainingSettings,
-    character_diagnostics, group_length_forecast, mistake_stats, sampling_rows, session_history,
-    speed_forecast,
+    GROUP_START_BIGRAM_TOKEN, MasteryStatus, SamplingRow, SessionResult, SpeedPath,
+    TrainingSettings, character_diagnostics, group_length_forecast, mistake_stats, sampling_rows,
+    session_history, speed_forecast,
 };
 use dioxus::prelude::*;
 
@@ -135,26 +135,39 @@ fn character_sampling_card(settings: &TrainingSettings, sessions: &[SessionResul
         .map(|r| r.sampling_prob)
         .fold(0.0_f64, f64::max)
         .max(0.0001);
+    let (drawn, others): (Vec<&SamplingRow>, Vec<&SamplingRow>) =
+        rows.iter().partition(|row| row.drawn_now);
     rsx! {
         div { class: "card stack",
             div { class: "tiny", "Sampling snapshot" }
-            p { class: "muted", "Posterior error vs chance of being drawn in the next group (mean weights, not Thompson draws)." }
-            if rows.is_empty() {
+            p { class: "muted", "Posterior error vs chance of being drawn in the next group (mean weights, not Thompson draws). What every character you have practised has taught counts, whatever set it was sent in." }
+            if drawn.is_empty() {
                 p { class: "muted", "Pool is empty." }
-            } else {
-                for row in rows.iter() {
-                    {
-                        let width = (row.sampling_prob / max_p * 100.0).clamp(4.0, 100.0);
-                        rsx! {
-                            div { class: "letter-row",
-                                span { class: "letter-key group-text", "{row.character}" }
-                                div { class: "bar-track",
-                                    span { class: "bar-fill sample", style: "width: {width}%;" }
-                                }
-                                span { class: "mono muted", "{(row.sampling_prob * 100.0).round()}%" }
-                                span { class: "tiny", style: "text-transform: none; letter-spacing: 0;", "p(err) {(row.p_error * 100.0).round()}%" }
+            }
+            for row in drawn {
+                {
+                    let width = (row.sampling_prob / max_p * 100.0).clamp(4.0, 100.0);
+                    rsx! {
+                        div { class: "letter-row",
+                            span { class: "letter-key group-text", "{row.character}" }
+                            div { class: "bar-track",
+                                span { class: "bar-fill sample", style: "width: {width}%;" }
                             }
+                            span { class: "mono muted", "{(row.sampling_prob * 100.0).round()}%" }
+                            span { class: "tiny", style: "text-transform: none; letter-spacing: 0;", "p(err) {(row.p_error * 100.0).round()}%" }
                         }
+                    }
+                }
+            }
+            if !others.is_empty() {
+                div { class: "tiny", "Not in the current set" }
+                p { class: "muted", "Practised before, and not drawn now. What you learned of them is kept, and counts again when they come back." }
+                for row in others {
+                    div { class: "letter-row not-drawn",
+                        span { class: "letter-key group-text", "{row.character}" }
+                        div { class: "bar-track" }
+                        span { class: "mono muted", "—" }
+                        span { class: "tiny", style: "text-transform: none; letter-spacing: 0;", "p(err) {(row.p_error * 100.0).round()}%" }
                     }
                 }
             }

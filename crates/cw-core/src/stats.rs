@@ -75,10 +75,14 @@ pub struct ConfusionEntry {
 pub struct SamplingRow {
     pub character: char,
     pub p_error: f64,
+    /// The chance it is drawn next; nothing for a character the current
+    /// set does not draw.
     pub sampling_prob: f64,
     pub alpha: f64,
     pub beta: f64,
     pub is_letter: bool,
+    /// Whether the current set draws it at all.
+    pub drawn_now: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -343,8 +347,13 @@ fn whole_group_character_shares(
     counts
 }
 
+/// What the sampler makes of each character: the chance it is drawn next,
+/// and what the history says of how often it is missed. Every character the
+/// history knows is listed, whatever set it was practised in, those the
+/// current set does not draw after the rest: no setting hides what was
+/// learned.
 pub fn sampling_rows(settings: &TrainingSettings, sessions: &[SessionResult]) -> Vec<SamplingRow> {
-    let state = CharSamplingState::from_history(sessions, settings);
+    let state = CharSamplingState::from_history(sessions);
     let pool = compute_char_pool(settings);
     let mut config = config_from_settings(settings);
     config.thompson_sampling = false;
@@ -358,18 +367,32 @@ pub fn sampling_rows(settings: &TrainingSettings, sessions: &[SessionResult]) ->
         let weights = compute_raw_sampling_weights(&pool, &state, &config, &mut rng);
         normalize_weights(&pool, &weights)
     };
-    pool.into_iter()
-        .map(|character| {
-            let belief = belief_for(&state, character);
-            SamplingRow {
-                character,
-                p_error: beta_posterior_mean_error(belief),
-                sampling_prob: probs.get(&character).copied().unwrap_or(0.0),
-                alpha: belief.alpha,
-                beta: belief.beta,
-                is_letter: !character.is_ascii_digit(),
-            }
-        })
+    let mut others: Vec<char> = state
+        .beliefs
+        .keys()
+        .copied()
+        .filter(|character| !pool.contains(character))
+        .collect();
+    // In the order Koch training unlocks them, then the rest.
+    others.sort_by_key(|character| {
+        let unlocked = LCWO_SEQUENCE.iter().position(|each| each == character);
+        (unlocked.unwrap_or(usize::MAX), *character)
+    });
+    let row = |character: char, drawn_now: bool| {
+        let belief = belief_for(&state, character);
+        SamplingRow {
+            character,
+            p_error: beta_posterior_mean_error(belief),
+            sampling_prob: probs.get(&character).copied().unwrap_or(0.0),
+            alpha: belief.alpha,
+            beta: belief.beta,
+            is_letter: !character.is_ascii_digit(),
+            drawn_now,
+        }
+    };
+    pool.iter()
+        .map(|character| row(*character, true))
+        .chain(others.into_iter().map(|character| row(character, false)))
         .collect()
 }
 
@@ -390,6 +413,19 @@ pub fn session_history(sessions: &[SessionResult]) -> Vec<SessionHistoryRow> {
         .collect();
     rows.sort_by_key(|r| std::cmp::Reverse(r.timestamp));
     rows
+}
+
+/// The character sets `sessions` hold any practice in, in the order the
+/// settings list them: whatever is chosen now, each keeps its history.
+pub fn practised_modes(sessions: &[SessionResult]) -> Vec<CharSetMode> {
+    CharSetMode::ALL
+        .into_iter()
+        .filter(|mode| {
+            sessions
+                .iter()
+                .any(|session| session.char_set_mode == *mode && !session.groups.is_empty())
+        })
+        .collect()
 }
 
 /// Your copy span after each session of the character set `settings`
@@ -738,8 +774,10 @@ mod tests {
         assert_eq!(shares(sampling_rows(&settings, &[])), without);
     }
 
+    /// A character's history counts wherever it was practised: a K missed
+    /// in a digits session is as missed in Koch.
     #[test]
-    fn sampling_rows_ignore_other_char_set_modes() {
+    fn sampling_rows_count_every_char_set_mode() {
         let mut settings = TrainingSettings::default();
         settings.curriculum.char_set_mode = CharSetMode::Koch;
         let mut koch = session();
@@ -767,9 +805,41 @@ mod tests {
                 .map(|row| (row.alpha, row.beta))
                 .expect("K in pool")
         };
-        let only_koch = k_belief(&sampling_rows(&settings, &[koch.clone()]));
-        let mixed_history = k_belief(&sampling_rows(&settings, &[koch, digits]));
-        assert_eq!(only_koch, mixed_history);
+        let (alpha, beta) = k_belief(&sampling_rows(&settings, &[koch.clone()]));
+        let both = k_belief(&sampling_rows(&settings, &[koch, digits]));
+        assert_eq!(both, (alpha, beta + 10.0));
+    }
+
+    /// A character the current set does not draw is still listed, after the
+    /// rest, with what its history says and no chance of being drawn.
+    #[test]
+    fn characters_the_set_does_not_draw_are_still_listed() {
+        let mut settings = TrainingSettings::default();
+        settings.curriculum.char_set_mode = CharSetMode::Koch;
+        settings.curriculum.level = 1;
+        let mut practised = session();
+        for (character, correct) in [('Q', 1), ('5', 8)] {
+            practised
+                .tally
+                .sent
+                .insert(character, LetterAccuracy { correct, total: 10 });
+        }
+        let rows = sampling_rows(&settings, &[practised]);
+        let drawn: Vec<char> = rows
+            .iter()
+            .filter(|row| row.drawn_now)
+            .map(|row| row.character)
+            .collect();
+        assert_eq!(drawn, compute_char_pool(&settings));
+        let others: Vec<&SamplingRow> = rows.iter().filter(|row| !row.drawn_now).collect();
+        assert_eq!(
+            others.iter().map(|row| row.character).collect::<Vec<_>>(),
+            ['5', 'Q'],
+            "in the order Koch unlocks them"
+        );
+        assert!(others.iter().all(|row| row.sampling_prob == 0.0));
+        assert!(others[1].p_error > 0.8, "Q is mostly missed");
+        assert!(rows.iter().take_while(|row| row.drawn_now).count() == drawn.len());
     }
 
     /// Picking another unlock order — the guided setup does — keeps what the
@@ -875,6 +945,24 @@ mod tests {
         let rows = speed_forecast(&settings, &[session()]);
         assert_eq!(rows.len(), 1);
         assert_eq!((rows[0].wpm, rows[0].drawn), (10.0, 1.0));
+    }
+
+    #[test]
+    fn every_set_with_practice_in_it_is_listed_in_order() {
+        let of = |mode: CharSetMode| SessionResult {
+            char_set_mode: mode,
+            ..session()
+        };
+        let empty = SessionResult {
+            char_set_mode: CharSetMode::Digits,
+            groups: Vec::new(),
+            ..session()
+        };
+        assert_eq!(
+            practised_modes(&[of(CharSetMode::Words), of(CharSetMode::Koch), empty]),
+            [CharSetMode::Koch, CharSetMode::Words]
+        );
+        assert!(practised_modes(&[]).is_empty());
     }
 
     #[test]

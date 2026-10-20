@@ -661,7 +661,6 @@ mod tests {
                     )
                 })
                 .collect();
-            assert!(sessions[0].usable_for_sampling(&h.ctx.settings.peek()));
             let lease = claim(&h);
             let heard = h.in_app(|| Signal::new(Vec::<HeardGroup>::new()));
             let _outcome = spawn_into(

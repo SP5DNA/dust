@@ -37,12 +37,14 @@ pub struct CharSamplingState {
 }
 
 impl CharSamplingState {
-    /// What the history says about each character, from the sessions that
-    /// trained what `settings` trains: every character copied right moves
-    /// its belief one way, every miss the other.
-    pub fn from_history(history: &[SessionResult], settings: &TrainingSettings) -> Self {
+    /// What the history says about each character: every character copied
+    /// right moves its belief one way, every miss the other. Every session
+    /// counts, whatever character set, unlock order or level it was
+    /// practised at: a character is as hard to copy whichever of them sent
+    /// it, and no setting hides what was learned.
+    pub fn from_history(history: &[SessionResult]) -> Self {
         let mut state = Self::default();
-        for session in history.iter().filter(|s| s.usable_for_sampling(settings)) {
+        for session in history {
             for (character, stats) in session.letter_accuracy().iter() {
                 let belief = state.beliefs.entry(*character).or_default();
                 belief.alpha += f64::from(stats.correct);
@@ -86,7 +88,7 @@ impl Sampler {
     /// to session.
     pub fn new(history: &[SessionResult], settings: &TrainingSettings, seed: u64) -> Self {
         Self {
-            state: CharSamplingState::from_history(history, settings),
+            state: CharSamplingState::from_history(history),
             span: SpanBelief::for_session(history, settings),
             speed: SpeedBelief::for_session(history, settings),
             rng: SplitMix64::new(seed),
@@ -889,10 +891,10 @@ mod tests {
         assert!(!next.beliefs.contains_key(&'X'));
     }
 
+    /// Every session seeds the beliefs, a digits session's K as much as a
+    /// Koch one's.
     #[test]
     fn history_from_earlier_sessions_seeds_the_beliefs() {
-        let mut settings = TrainingSettings::default();
-        settings.curriculum.char_set_mode = CharSetMode::Koch;
         let session = |copies: &[(&str, &str)]| {
             let mut result = SessionResult::empty_for_test();
             for (sent, received) in copies {
@@ -904,10 +906,10 @@ mod tests {
         let second = session(&[("K", "K")]);
         let mut digits = session(&[("K", "X")]);
         digits.char_set_mode = CharSetMode::Digits;
-        let state = CharSamplingState::from_history(&[first, second, digits], &settings);
+        let state = CharSamplingState::from_history(&[first, second, digits]);
         let belief = state.beliefs[&'K'];
         assert_eq!(belief.alpha, CHAR_SAMPLING_PRIOR_ALPHA + 4.0);
-        assert_eq!(belief.beta, CHAR_SAMPLING_PRIOR_BETA + 2.0);
+        assert_eq!(belief.beta, CHAR_SAMPLING_PRIOR_BETA + 3.0);
         assert!(state.session_sample_counts.is_empty());
     }
 
@@ -1030,7 +1032,7 @@ mod tests {
         let settings = length_settings(false);
         let history = history_of("KMKMKMKM", true);
         let mut sampler = Sampler::new(&history, &settings, 42);
-        let mut state = CharSamplingState::from_history(&history, &settings);
+        let mut state = CharSamplingState::from_history(&history);
         let mut rng = SplitMix64::new(42);
         for _ in 0..50 {
             let expected = (

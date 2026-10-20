@@ -293,11 +293,21 @@ With more than one mode in the history, the board can show one at a time; a
 finished session's results say where it came among the sessions of its own
 mode.
 
-Stats are computed across your whole history. Changing course — Koch to Mixed,
-a new sequence, a custom alphabet — does not hide what you already did:
-accuracy over time, letter mastery, mistakes, the calendar and the streak all
-count every session, because a letter is the same letter whichever set it was
-sent under. The one exception is the **Sampling** tab, which shows what the
-trainer will draw next and so narrows to the current character set, the same way
-the sampler itself does — in whatever unlock order it was practised, since a
-character is as hard to copy whichever order unlocked it.
+Stats are computed across your whole history, and no setting hides any of
+it. Changing course — Koch to Mixed, a new unlock order, a level, callsigns —
+does not hide what you already did: accuracy over time, letter mastery,
+mistakes, the calendar and the streak all count every session, because a
+letter is the same letter whichever set it was sent under.
+
+- The sampler learns what it knows of each character from every session,
+  whatever set, order or level sent it. The **Sampling** tab's snapshot lists
+  every character you have practised: the ones the current set draws with
+  their chance of coming next, and after them, greyed, the ones it does not,
+  with what your history says of them.
+- **Copy span** and **Copy speed** are each kept per character set, since a
+  callsign at 30 WPM is not a two-letter Koch group at 30 WPM. With history
+  in more than one set, each card has a pill for every set, the one practised
+  now chosen first. A set with no history yet — callsigns for the span, which
+  has none — shows the first that has, rather than nothing.
+- The Sampling tab's **Group length** and **Speed** cards are forecasts of
+  the next session, so they follow the settings it will run with.

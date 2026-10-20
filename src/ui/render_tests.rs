@@ -1024,8 +1024,11 @@ mod interactions {
         assert!(ui.has("chars · up") || ui.has("chars · down") || ui.has("chars · steady"));
         assert!(ui.has("Adaptive length off"));
         assert!(stats(true, CharSetMode::Mixed).has("Adapting · Balanced"));
-        // A callsign is as long as it is: there is no span to show.
-        assert!(!stats(true, CharSetMode::Callsign).has("Copy span"));
+        // A callsign is as long as it is, but choosing callsigns keeps the
+        // span of the set practised before.
+        let callsigns = stats(true, CharSetMode::Callsign);
+        assert!(callsigns.has("Copy span"));
+        assert!(callsigns.has("Not the set practised now"));
     }
 
     #[test]
@@ -1072,6 +1075,67 @@ mod interactions {
         let mut ui = stats(true, CharSetMode::Callsign);
         ui.click("seg-sampling");
         assert!(ui.has("Speed, WPM"));
+    }
+
+    /// Mixed history from `history`, and a Koch session that missed Q, seen
+    /// with `mode` chosen and one letter unlocked.
+    #[component]
+    fn TwoSetsHarness(mode: CharSetMode) -> Element {
+        let mut settings = TrainingSettings::default();
+        settings.curriculum.char_set_mode = mode;
+        settings.curriculum.level = 1;
+        let mut sessions = history();
+        let mut koch = stored_session("2026-09-04", &[("QQ", "QX"), ("KM", "KM")]);
+        koch.char_set_mode = CharSetMode::Koch;
+        koch.timestamp = 1_757_000_900_000;
+        sessions.push(koch);
+        rsx! {
+            StatsView { settings, sessions }
+        }
+    }
+
+    fn two_sets(mode: CharSetMode) -> Ui {
+        Ui::new(TwoSetsHarness, TwoSetsHarnessProps { mode })
+    }
+
+    /// A character the set chosen now does not draw is still listed, greyed,
+    /// with what its history says of it.
+    #[test]
+    fn characters_outside_the_set_stay_listed() {
+        let mut ui = two_sets(CharSetMode::Koch);
+        ui.click("seg-sampling");
+        assert!(ui.has("Not in the current set"));
+        assert!(ui.has("letter-row not-drawn"));
+        for character in ["Q", "U", "R"] {
+            assert!(
+                ui.has(&format!("letter-key group-text\">{character}<")),
+                "{character} is listed"
+            );
+        }
+    }
+
+    /// Choosing another set never hides the span and speed of the ones
+    /// practised before: with Callsigns chosen, which has none, the cards show
+    /// the sets that have, one at a time.
+    #[test]
+    fn no_set_chosen_hides_the_history_of_another() {
+        let mut ui = two_sets(CharSetMode::Callsign);
+        assert!(ui.has("Copy span"));
+        assert!(ui.has("Copy speed"));
+        for pill in ["span-koch", "span-mixed", "speed-koch", "speed-mixed"] {
+            assert!(ui.shows(pill), "{pill}");
+        }
+        assert!(!ui.shows("span-callsigns"), "no callsign history to show");
+        assert!(ui.input_tag("span-koch").contains("active"));
+        assert!(ui.has("Not the set practised now"));
+        ui.click("span-mixed");
+        assert!(ui.input_tag("span-mixed").contains("active"));
+        assert!(!ui.input_tag("span-koch").contains("active"));
+
+        // The set practised now is the one shown first.
+        let ui = two_sets(CharSetMode::Mixed);
+        assert!(ui.input_tag("span-mixed").contains("active"));
+        assert!(ui.has("Adaptive length off"));
     }
 
     #[test]

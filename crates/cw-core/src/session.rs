@@ -664,15 +664,6 @@ impl SessionResult {
         Cow::Owned(tally.sent)
     }
 
-    /// Whether this session's letter stats should seed sampling for
-    /// `settings`: a session of the same character set does, whatever unlock
-    /// order it was practised in. A character is as hard to copy whichever
-    /// order unlocked it, and a new order — the guided setup picks one — must
-    /// not leave the sampler knowing nothing of characters it has seen.
-    pub fn usable_for_sampling(&self, settings: &TrainingSettings) -> bool {
-        self.char_set_mode == settings.curriculum.char_set_mode
-    }
-
     /// A Koch session with nothing in it, for tests to fill in.
     #[cfg(test)]
     pub(crate) fn empty_for_test() -> Self {
@@ -1037,33 +1028,6 @@ mod tests {
         assert_eq!(result.level, 4);
         assert_eq!(result.digits_level, 4);
         assert_eq!(result.alphabet_fingerprint, "0123456789");
-    }
-
-    #[test]
-    fn history_seeds_sampling_for_its_own_character_set_in_any_order() {
-        let mut settings = TrainingSettings::default();
-        settings.curriculum.char_set_mode = CharSetMode::Koch;
-        let result = result(&answered(settings.clone(), &[("KM", "KM", 10)]));
-        assert!(result.usable_for_sampling(&settings));
-
-        // A different character set never seeds another one's sampling.
-        let mut other = settings.clone();
-        other.curriculum.char_set_mode = CharSetMode::Digits;
-        assert!(!result.usable_for_sampling(&other));
-
-        // Another unlock order of the same set does: K is K.
-        let mut resequenced = settings;
-        resequenced.curriculum.custom_sequence = vec!['A', 'B', 'C'];
-        assert_ne!(
-            result.alphabet_fingerprint,
-            resequenced.alphabet_fingerprint()
-        );
-        assert!(result.usable_for_sampling(&resequenced));
-
-        // So does a legacy session, which carries no fingerprint.
-        let mut legacy = result;
-        legacy.alphabet_fingerprint.clear();
-        assert!(legacy.usable_for_sampling(&resequenced));
     }
 
     /// The tally is saved as the flat keys a session always had, plus the

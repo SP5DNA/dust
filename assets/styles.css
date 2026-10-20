@@ -1479,7 +1479,7 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
 .medal-disc { fill: var(--medal); stroke: var(--medal-edge); stroke-width: 1.5; }
 .medal-ring { fill: none; stroke: var(--medal-shine); stroke-width: 1.2; opacity: 0.9; }
 .medal-number { font-family: Figtree, system-ui, sans-serif; font-size: 10.5px; font-weight: 800; fill: var(--medal-edge); }
-.board-modes { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+.mode-pills { display: flex; flex-wrap: wrap; gap: 0.4rem; }
 .best-card {
   display: flex;
   align-items: center;
@@ -1733,6 +1733,8 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
 .letter-row:last-child, .confuse-row:last-child { border-bottom: 0; }
 .letter-row { grid-template-columns: 1.7rem 1fr auto; }
 .letter-row .tiny { grid-column: 2 / -1; text-transform: none; letter-spacing: 0.02em; }
+/* A character the current set does not draw: kept, and greyed. */
+.letter-row.not-drawn { opacity: 0.55; }
 .letter-key {
   display: grid;
   place-items: center;

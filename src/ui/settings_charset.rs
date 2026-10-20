@@ -57,6 +57,15 @@ pub(crate) const CHAR_SET_MODES: [(CharSetMode, &str); 5] = [
     (CharSetMode::Words, "Words"),
 ];
 
+/// What a character set is called on screen: "Callsigns".
+pub(crate) fn mode_label(mode: CharSetMode) -> &'static str {
+    CHAR_SET_MODES
+        .iter()
+        .find(|(each, _)| *each == mode)
+        .map(|(_, label)| *label)
+        .unwrap_or_default()
+}
+
 /// The practice windows, and how many characters each needs unlocked before
 /// it is offered.
 const PRACTICE_WINDOWS: [(PracticeWindow, &str, usize); 3] = [

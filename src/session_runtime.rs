@@ -992,8 +992,10 @@ mod tests {
 
     /// A callsign session must not teach the group sampler, or a tier-6 call
     /// full of `Q` and `Z` would drag the Koch curriculum around behind it.
+    /// What a callsign session says of each character counts for every set:
+    /// switching to Koch afterwards keeps it.
     #[test]
-    fn callsign_history_stays_out_of_the_group_sampler() {
+    fn a_callsign_session_teaches_the_sampler_of_every_set() {
         run(|| async {
             let mut settings = test_settings();
             settings.curriculum.char_set_mode = CharSetMode::Callsign;
@@ -1002,20 +1004,26 @@ mod tests {
             h.play_through(120_000).await;
             let stored = h.ctx.sessions.peek().clone();
             assert_eq!(stored.len(), 1);
+            let sent = stored[0]
+                .letter_accuracy()
+                .keys()
+                .copied()
+                .collect::<Vec<_>>();
+            assert!(!sent.is_empty());
 
             let mut koch = test_settings();
             koch.curriculum.char_set_mode = CharSetMode::Koch;
-            assert!(
-                !stored[0].usable_for_sampling(&koch),
-                "a callsign session must not seed the Koch sampler"
-            );
-            let mut callsigns = test_settings();
-            callsigns.curriculum.char_set_mode = CharSetMode::Callsign;
-            callsigns.curriculum.callsign_level = cw_core::CALLSIGN_TIER_MAX;
-            assert!(
-                stored[0].usable_for_sampling(&callsigns),
-                "but every tier shares one callsign history"
-            );
+            let rows = cw_core::sampling_rows(&koch, &stored);
+            for character in sent {
+                let row = rows
+                    .iter()
+                    .find(|row| row.character == character)
+                    .unwrap_or_else(|| panic!("{character} listed under Koch"));
+                assert!(
+                    row.alpha + row.beta > 2.0,
+                    "{character} keeps what the callsign session taught"
+                );
+            }
         });
     }
 
